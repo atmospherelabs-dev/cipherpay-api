@@ -95,13 +95,18 @@ async fn resolve_merchant(
                 .unwrap_or(auth_str)
                 .trim();
 
-            if key.starts_with("cpay_") {
+            if key.starts_with("cpay_sk_") || key.starts_with("cpay_") {
                 return crate::merchants::authenticate(pool, key)
                     .await
                     .ok()
                     .flatten();
             }
         }
+    }
+
+    // Try session cookie (dashboard creating invoices)
+    if let Some(merchant) = crate::api::auth::resolve_session(req, pool).await {
+        return Some(merchant);
     }
 
     // Fallback: single-tenant mode (test console, or self-hosted with one merchant)

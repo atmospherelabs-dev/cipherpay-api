@@ -3,10 +3,19 @@
 CREATE TABLE IF NOT EXISTS merchants (
     id TEXT PRIMARY KEY,
     api_key_hash TEXT NOT NULL UNIQUE,
-    ufvk TEXT NOT NULL,
+    dashboard_token_hash TEXT NOT NULL DEFAULT '',
+    ufvk TEXT NOT NULL UNIQUE,
     payment_address TEXT NOT NULL DEFAULT '',
     webhook_url TEXT,
     webhook_secret TEXT NOT NULL DEFAULT '',
+    recovery_email TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    id TEXT PRIMARY KEY,
+    merchant_id TEXT NOT NULL REFERENCES merchants(id),
+    expires_at TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 
@@ -19,6 +28,8 @@ CREATE TABLE IF NOT EXISTS invoices (
     price_eur REAL NOT NULL,
     price_zec REAL NOT NULL,
     zec_rate_at_creation REAL NOT NULL,
+    payment_address TEXT NOT NULL DEFAULT '',
+    zcash_uri TEXT NOT NULL DEFAULT '',
     shipping_alias TEXT,
     shipping_address TEXT,
     shipping_region TEXT,

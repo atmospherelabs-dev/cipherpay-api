@@ -1,6 +1,7 @@
 pub mod matching;
 pub mod pricing;
 
+use base64::Engine;
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, SqlitePool};
@@ -16,6 +17,8 @@ pub struct Invoice {
     pub price_eur: f64,
     pub price_zec: f64,
     pub zec_rate_at_creation: f64,
+    pub payment_address: String,
+    pub zcash_uri: String,
     pub shipping_alias: Option<String>,
     pub shipping_address: Option<String>,
     pub shipping_region: Option<String>,
@@ -80,11 +83,19 @@ pub async fn create_invoice(
         .to_string();
     let created_at = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
+    let memo_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(memo_code.as_bytes());
+    let zcash_uri = format!(
+        "zcash:{}?amount={:.8}&memo={}",
+        payment_address, price_zec, memo_b64
+    );
+
     sqlx::query(
         "INSERT INTO invoices (id, merchant_id, memo_code, product_name, size,
-         price_eur, price_zec, zec_rate_at_creation, shipping_alias, shipping_address,
+         price_eur, price_zec, zec_rate_at_creation, payment_address, zcash_uri,
+         shipping_alias, shipping_address,
          shipping_region, status, expires_at, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)"
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)"
     )
     .bind(&id)
     .bind(merchant_id)
@@ -94,6 +105,8 @@ pub async fn create_invoice(
     .bind(req.price_eur)
     .bind(price_zec)
     .bind(zec_rate)
+    .bind(payment_address)
+    .bind(&zcash_uri)
     .bind(&req.shipping_alias)
     .bind(&req.shipping_address)
     .bind(&req.shipping_region)
@@ -103,13 +116,6 @@ pub async fn create_invoice(
     .await?;
 
     tracing::info!(invoice_id = %id, memo = %memo_code, "Invoice created");
-
-    let zcash_uri = format!(
-        "zcash:{}?amount={:.8}&memo={}",
-        payment_address,
-        price_zec,
-        hex::encode(memo_code.as_bytes())
-    );
 
     Ok(CreateInvoiceResponse {
         invoice_id: id,
@@ -125,11 +131,16 @@ pub async fn create_invoice(
 
 pub async fn get_invoice(pool: &SqlitePool, id: &str) -> anyhow::Result<Option<Invoice>> {
     let row = sqlx::query_as::<_, Invoice>(
-        "SELECT id, merchant_id, memo_code, product_name, size,
-         price_eur, price_zec, zec_rate_at_creation, shipping_alias, shipping_address,
-         shipping_region, status, detected_txid, detected_at,
-         confirmed_at, shipped_at, expires_at, purge_after, created_at
-         FROM invoices WHERE id = ?"
+        "SELECT i.id, i.merchant_id, i.memo_code, i.product_name, i.size,
+         i.price_eur, i.price_zec, i.zec_rate_at_creation,
+         COALESCE(NULLIF(i.payment_address, ''), m.payment_address) AS payment_address,
+         i.zcash_uri,
+         i.shipping_alias, i.shipping_address,
+         i.shipping_region, i.status, i.detected_txid, i.detected_at,
+         i.confirmed_at, i.shipped_at, i.expires_at, i.purge_after, i.created_at
+         FROM invoices i
+         LEFT JOIN merchants m ON m.id = i.merchant_id
+         WHERE i.id = ?"
     )
     .bind(id)
     .fetch_optional(pool)
@@ -142,7 +153,8 @@ pub async fn get_invoice(pool: &SqlitePool, id: &str) -> anyhow::Result<Option<I
 pub async fn get_invoice_by_memo(pool: &SqlitePool, memo_code: &str) -> anyhow::Result<Option<Invoice>> {
     let row = sqlx::query_as::<_, Invoice>(
         "SELECT id, merchant_id, memo_code, product_name, size,
-         price_eur, price_zec, zec_rate_at_creation, shipping_alias, shipping_address,
+         price_eur, price_zec, zec_rate_at_creation, payment_address, zcash_uri,
+         shipping_alias, shipping_address,
          shipping_region, status, detected_txid, detected_at,
          confirmed_at, shipped_at, expires_at, purge_after, created_at
          FROM invoices WHERE memo_code = ?"
@@ -168,7 +180,8 @@ pub async fn get_invoice_status(pool: &SqlitePool, id: &str) -> anyhow::Result<O
 pub async fn get_pending_invoices(pool: &SqlitePool) -> anyhow::Result<Vec<Invoice>> {
     let rows = sqlx::query_as::<_, Invoice>(
         "SELECT id, merchant_id, memo_code, product_name, size,
-         price_eur, price_zec, zec_rate_at_creation, shipping_alias, shipping_address,
+         price_eur, price_zec, zec_rate_at_creation, payment_address, zcash_uri,
+         shipping_alias, shipping_address,
          shipping_region, status, detected_txid, detected_at,
          confirmed_at, shipped_at, expires_at, purge_after, created_at
          FROM invoices WHERE status IN ('pending', 'detected')
@@ -208,6 +221,19 @@ pub async fn mark_confirmed(pool: &SqlitePool, invoice_id: &str) -> anyhow::Resu
     .await?;
 
     tracing::info!(invoice_id, "Payment confirmed");
+    Ok(())
+}
+
+pub async fn mark_expired(pool: &SqlitePool, invoice_id: &str) -> anyhow::Result<()> {
+    sqlx::query(
+        "UPDATE invoices SET status = 'expired'
+         WHERE id = ? AND status = 'pending'"
+    )
+    .bind(invoice_id)
+    .execute(pool)
+    .await?;
+
+    tracing::info!(invoice_id, "Invoice cancelled/expired");
     Ok(())
 }
 

@@ -17,6 +17,8 @@ pub struct Config {
     pub coingecko_api_url: String,
     pub price_cache_secs: u64,
     pub allowed_origins: Vec<String>,
+    pub cookie_domain: Option<String>,
+    pub frontend_url: Option<String>,
 }
 
 impl Config {
@@ -55,6 +57,8 @@ impl Config {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect(),
+            cookie_domain: env::var("COOKIE_DOMAIN").ok().filter(|s| !s.is_empty()),
+            frontend_url: env::var("FRONTEND_URL").ok().filter(|s| !s.is_empty()),
         })
     }
 

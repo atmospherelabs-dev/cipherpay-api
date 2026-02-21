@@ -61,14 +61,16 @@ async fn main() -> anyhow::Result<()> {
     HttpServer::new(move || {
         let cors = if config.is_testnet() || config.allowed_origins.is_empty() {
             Cors::default()
-                .allow_any_origin()
+                .allowed_origin_fn(|_origin, _req_head| true)
                 .allow_any_method()
                 .allow_any_header()
+                .supports_credentials()
                 .max_age(3600)
         } else {
             let mut cors = Cors::default()
                 .allow_any_method()
                 .allow_any_header()
+                .supports_credentials()
                 .max_age(3600);
             for origin in &config.allowed_origins {
                 cors = cors.allowed_origin(origin);
