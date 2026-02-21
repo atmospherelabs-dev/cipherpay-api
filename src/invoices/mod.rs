@@ -23,6 +23,7 @@ pub struct Invoice {
     pub shipping_alias: Option<String>,
     pub shipping_address: Option<String>,
     pub shipping_region: Option<String>,
+    pub refund_address: Option<String>,
     pub status: String,
     pub detected_txid: Option<String>,
     pub detected_at: Option<String>,
@@ -50,6 +51,7 @@ pub struct CreateInvoiceRequest {
     pub shipping_alias: Option<String>,
     pub shipping_address: Option<String>,
     pub shipping_region: Option<String>,
+    pub refund_address: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -96,8 +98,8 @@ pub async fn create_invoice(
         "INSERT INTO invoices (id, merchant_id, memo_code, product_id, product_name, size,
          price_eur, price_zec, zec_rate_at_creation, payment_address, zcash_uri,
          shipping_alias, shipping_address,
-         shipping_region, status, expires_at, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)"
+         shipping_region, refund_address, status, expires_at, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)"
     )
     .bind(&id)
     .bind(merchant_id)
@@ -113,6 +115,7 @@ pub async fn create_invoice(
     .bind(&req.shipping_alias)
     .bind(&req.shipping_address)
     .bind(&req.shipping_region)
+    .bind(&req.refund_address)
     .bind(&expires_at)
     .bind(&created_at)
     .execute(pool)
@@ -140,7 +143,7 @@ pub async fn get_invoice(pool: &SqlitePool, id: &str) -> anyhow::Result<Option<I
          i.zcash_uri,
          NULLIF(m.name, '') AS merchant_name,
          i.shipping_alias, i.shipping_address,
-         i.shipping_region, i.status, i.detected_txid, i.detected_at,
+         i.shipping_region, i.refund_address, i.status, i.detected_txid, i.detected_at,
          i.confirmed_at, i.shipped_at, i.expires_at, i.purge_after, i.created_at
          FROM invoices i
          LEFT JOIN merchants m ON m.id = i.merchant_id
@@ -162,7 +165,7 @@ pub async fn get_invoice_by_memo(pool: &SqlitePool, memo_code: &str) -> anyhow::
          i.zcash_uri,
          NULLIF(m.name, '') AS merchant_name,
          i.shipping_alias, i.shipping_address,
-         i.shipping_region, i.status, i.detected_txid, i.detected_at,
+         i.shipping_region, i.refund_address, i.status, i.detected_txid, i.detected_at,
          i.confirmed_at, i.shipped_at, i.expires_at, i.purge_after, i.created_at
          FROM invoices i
          LEFT JOIN merchants m ON m.id = i.merchant_id

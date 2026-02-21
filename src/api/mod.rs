@@ -126,6 +126,7 @@ async fn checkout(
         shipping_alias: body.shipping_alias.clone(),
         shipping_address: body.shipping_address.clone(),
         shipping_region: body.shipping_region.clone(),
+        refund_address: body.refund_address.clone(),
     };
 
     match crate::invoices::create_invoice(
@@ -155,6 +156,7 @@ struct CheckoutRequest {
     shipping_alias: Option<String>,
     shipping_address: Option<String>,
     shipping_region: Option<String>,
+    refund_address: Option<String>,
 }
 
 async fn health() -> actix_web::HttpResponse {

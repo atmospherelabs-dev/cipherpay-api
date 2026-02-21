@@ -74,8 +74,13 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
         .await
         .ok();
 
-    // Add product_id to invoices for existing databases
+    // Add product_id and refund_address to invoices for existing databases
     sqlx::query("ALTER TABLE invoices ADD COLUMN product_id TEXT REFERENCES products(id)")
+        .execute(&pool)
+        .await
+        .ok();
+
+    sqlx::query("ALTER TABLE invoices ADD COLUMN refund_address TEXT")
         .execute(&pool)
         .await
         .ok();

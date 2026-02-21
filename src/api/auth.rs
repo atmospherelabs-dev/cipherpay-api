@@ -9,7 +9,7 @@ use crate::config::Config;
 use crate::merchants;
 
 const SESSION_COOKIE: &str = "cpay_session";
-const SESSION_DAYS: i64 = 30;
+const SESSION_HOURS: i64 = 24;
 
 #[derive(Debug, Deserialize)]
 pub struct CreateSessionRequest {
@@ -38,7 +38,7 @@ pub async fn create_session(
     };
 
     let session_id = Uuid::new_v4().to_string();
-    let expires_at = (Utc::now() + Duration::days(SESSION_DAYS))
+    let expires_at = (Utc::now() + Duration::hours(SESSION_HOURS))
         .format("%Y-%m-%dT%H:%M:%SZ")
         .to_string();
 
@@ -111,6 +111,21 @@ pub async fn me(
         "***".to_string()
     };
 
+    let masked_email = merchant.recovery_email.as_deref().map(|email| {
+        if let Some(at) = email.find('@') {
+            let local = &email[..at];
+            let domain = &email[at..];
+            let visible = if local.len() <= 2 { local.len() } else { 2 };
+            format!("{}{}{}",
+                &local[..visible],
+                "*".repeat(local.len().saturating_sub(visible)),
+                domain
+            )
+        } else {
+            "***".to_string()
+        }
+    });
+
     HttpResponse::Ok().json(serde_json::json!({
         "id": merchant.id,
         "name": merchant.name,
@@ -118,6 +133,7 @@ pub async fn me(
         "webhook_url": merchant.webhook_url,
         "webhook_secret_preview": masked_secret,
         "has_recovery_email": merchant.recovery_email.is_some(),
+        "recovery_email_preview": masked_email,
         "created_at": merchant.created_at,
         "stats": stats,
     }))
@@ -142,7 +158,7 @@ pub async fn my_invoices(
          price_eur, price_zec, zec_rate_at_creation, payment_address, zcash_uri,
          NULL AS merchant_name,
          shipping_alias, shipping_address,
-         shipping_region, status, detected_txid, detected_at,
+         shipping_region, refund_address, status, detected_txid, detected_at,
          confirmed_at, shipped_at, expires_at, purge_after, created_at
          FROM invoices WHERE merchant_id = ?
          ORDER BY created_at DESC LIMIT 100"
@@ -194,7 +210,7 @@ fn build_session_cookie<'a>(value: &str, config: &Config, clear: bool) -> Cookie
     if clear {
         builder = builder.max_age(actix_web::cookie::time::Duration::ZERO);
     } else {
-        builder = builder.max_age(actix_web::cookie::time::Duration::days(SESSION_DAYS));
+        builder = builder.max_age(actix_web::cookie::time::Duration::hours(SESSION_HOURS));
     }
 
     builder.finish()
@@ -203,15 +219,18 @@ fn build_session_cookie<'a>(value: &str, config: &Config, clear: bool) -> Cookie
 #[derive(Debug, Deserialize)]
 pub struct UpdateMerchantRequest {
     pub name: Option<String>,
-    pub payment_address: Option<String>,
     pub webhook_url: Option<String>,
-    /// Required when changing payment_address — re-authentication guard
-    pub current_token: Option<String>,
+    pub recovery_email: Option<String>,
 }
 
-/// PATCH /api/merchants/me -- update name, payment address and/or webhook URL.
-/// Changing payment_address requires `current_token` (dashboard token) for re-authentication,
-/// since a hijacked session redirecting payments is the highest-impact exploit.
+/// PATCH /api/merchants/me -- update name, webhook URL, and/or recovery email.
+///
+/// Payment address is intentionally NOT editable after registration.
+/// It is cryptographically tied to the UFVK used for trial decryption.
+/// Allowing changes would either:
+///   - Break payment detection (new address from different wallet)
+///   - Enable session-hijack fund diversion (attacker changes to their address)
+/// Merchants who need a new address must re-register with a new UFVK.
 pub async fn update_me(
     req: HttpRequest,
     pool: web::Data<SqlitePool>,
@@ -236,38 +255,6 @@ pub async fn update_me(
         tracing::info!(merchant_id = %merchant.id, "Merchant name updated");
     }
 
-    if let Some(ref addr) = body.payment_address {
-        if addr.is_empty() {
-            return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": "Payment address cannot be empty"
-            }));
-        }
-        // Re-authentication required for payment address change
-        let token = match &body.current_token {
-            Some(t) => t,
-            None => {
-                return HttpResponse::Forbidden().json(serde_json::json!({
-                    "error": "Payment address change requires current_token for re-authentication"
-                }));
-            }
-        };
-        match merchants::authenticate_dashboard(pool.get_ref(), token).await {
-            Ok(Some(m)) if m.id == merchant.id => {}
-            _ => {
-                return HttpResponse::Forbidden().json(serde_json::json!({
-                    "error": "Invalid dashboard token"
-                }));
-            }
-        }
-        sqlx::query("UPDATE merchants SET payment_address = ? WHERE id = ?")
-            .bind(addr)
-            .bind(&merchant.id)
-            .execute(pool.get_ref())
-            .await
-            .ok();
-        tracing::info!(merchant_id = %merchant.id, "Payment address updated (re-authenticated)");
-    }
-
     if let Some(ref url) = body.webhook_url {
         sqlx::query("UPDATE merchants SET webhook_url = ? WHERE id = ?")
             .bind(if url.is_empty() { None } else { Some(url.as_str()) })
@@ -276,6 +263,17 @@ pub async fn update_me(
             .await
             .ok();
         tracing::info!(merchant_id = %merchant.id, "Webhook URL updated");
+    }
+
+    if let Some(ref email) = body.recovery_email {
+        let val = if email.is_empty() { None } else { Some(email.as_str()) };
+        sqlx::query("UPDATE merchants SET recovery_email = ? WHERE id = ?")
+            .bind(val)
+            .bind(&merchant.id)
+            .execute(pool.get_ref())
+            .await
+            .ok();
+        tracing::info!(merchant_id = %merchant.id, "Recovery email updated");
     }
 
     HttpResponse::Ok().json(serde_json::json!({ "status": "updated" }))
