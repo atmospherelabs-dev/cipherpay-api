@@ -1,0 +1,949 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CipherPay // Test Console</title>
+  <style>
+    :root {
+      --bg: #0a0a0f;
+      --bg-card: #111118;
+      --bg-hover: #1a1a24;
+      --border: #2a2a3a;
+      --border-active: #06b6d4;
+      --text: #e4e4e7;
+      --text-muted: #71717a;
+      --text-dim: #52525b;
+      --cyan: #06b6d4;
+      --cyan-dim: #0891b2;
+      --purple: #a855f7;
+      --green: #22c55e;
+      --yellow: #eab308;
+      --red: #ef4444;
+      --font-mono: 'JetBrains Mono', 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font-mono);
+      font-size: 13px;
+      line-height: 1.6;
+      min-height: 100vh;
+    }
+
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 16px 0;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 32px;
+    }
+
+    .logo {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .logo-icon {
+      width: 28px;
+      height: 28px;
+      background: var(--cyan);
+      border-radius: 4px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      font-size: 14px;
+      color: var(--bg);
+    }
+
+    .logo-text {
+      font-size: 16px;
+      font-weight: 600;
+      letter-spacing: 2px;
+      color: var(--text);
+    }
+
+    .logo-text span {
+      color: var(--cyan);
+    }
+
+    .tag {
+      font-size: 10px;
+      letter-spacing: 1px;
+      color: var(--text-muted);
+      background: var(--bg-hover);
+      border: 1px solid var(--border);
+      padding: 3px 8px;
+      border-radius: 3px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 380px 1fr;
+      gap: 24px;
+    }
+
+    .panel {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    .panel-header {
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .panel-title {
+      font-size: 11px;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      color: var(--cyan);
+      font-weight: 600;
+    }
+
+    .panel-body {
+      padding: 18px;
+    }
+
+    .form-group {
+      margin-bottom: 16px;
+    }
+
+    label {
+      display: block;
+      font-size: 10px;
+      letter-spacing: 1.5px;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      margin-bottom: 6px;
+    }
+
+    input, textarea, select {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 10px 12px;
+      color: var(--text);
+      font-family: var(--font-mono);
+      font-size: 12px;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+
+    input:focus, textarea:focus {
+      border-color: var(--cyan);
+    }
+
+    textarea {
+      resize: vertical;
+      min-height: 60px;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 10px 18px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      background: var(--bg-hover);
+      color: var(--text);
+      font-family: var(--font-mono);
+      font-size: 11px;
+      letter-spacing: 1px;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    .btn:hover {
+      border-color: var(--cyan);
+      color: var(--cyan);
+    }
+
+    .btn-primary {
+      background: var(--cyan);
+      border-color: var(--cyan);
+      color: var(--bg);
+      font-weight: 600;
+    }
+
+    .btn-primary:hover {
+      background: var(--cyan-dim);
+      color: #fff;
+    }
+
+    .btn-small {
+      padding: 5px 10px;
+      font-size: 10px;
+    }
+
+    .btn-detect {
+      border-color: var(--yellow);
+      color: var(--yellow);
+    }
+
+    .btn-detect:hover {
+      background: var(--yellow);
+      color: var(--bg);
+    }
+
+    .btn-confirm {
+      border-color: var(--green);
+      color: var(--green);
+    }
+
+    .btn-confirm:hover {
+      background: var(--green);
+      color: var(--bg);
+    }
+
+    .btn-group {
+      display: flex;
+      gap: 8px;
+      margin-top: 8px;
+    }
+
+    .status-badge {
+      display: inline-block;
+      font-size: 10px;
+      letter-spacing: 1px;
+      padding: 3px 8px;
+      border-radius: 3px;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+
+    .status-pending {
+      background: rgba(234, 179, 8, 0.15);
+      color: var(--yellow);
+      border: 1px solid rgba(234, 179, 8, 0.3);
+    }
+
+    .status-detected {
+      background: rgba(168, 85, 247, 0.15);
+      color: var(--purple);
+      border: 1px solid rgba(168, 85, 247, 0.3);
+    }
+
+    .status-confirmed {
+      background: rgba(34, 197, 94, 0.15);
+      color: var(--green);
+      border: 1px solid rgba(34, 197, 94, 0.3);
+    }
+
+    .status-expired {
+      background: rgba(239, 68, 68, 0.15);
+      color: var(--red);
+      border: 1px solid rgba(239, 68, 68, 0.3);
+    }
+
+    .invoice-card {
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--border);
+      transition: background 0.1s;
+    }
+
+    .invoice-card:hover {
+      background: var(--bg-hover);
+    }
+
+    .invoice-card:last-child {
+      border-bottom: none;
+    }
+
+    .invoice-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 8px;
+    }
+
+    .invoice-id {
+      font-size: 11px;
+      color: var(--cyan);
+      cursor: pointer;
+    }
+
+    .invoice-id:hover {
+      text-decoration: underline;
+    }
+
+    .invoice-meta {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 4px 16px;
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+
+    .invoice-meta strong {
+      color: var(--text);
+      font-weight: 500;
+    }
+
+    .invoice-actions {
+      display: flex;
+      gap: 6px;
+      margin-top: 10px;
+    }
+
+    .empty-state {
+      padding: 40px;
+      text-align: center;
+      color: var(--text-dim);
+      font-size: 12px;
+    }
+
+    .empty-state .icon {
+      font-size: 32px;
+      margin-bottom: 12px;
+      opacity: 0.3;
+    }
+
+    .toast {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      background: var(--bg-card);
+      border: 1px solid var(--cyan);
+      border-radius: 6px;
+      padding: 12px 18px;
+      font-size: 12px;
+      color: var(--cyan);
+      z-index: 1000;
+      animation: slideIn 0.3s ease;
+      max-width: 360px;
+    }
+
+    @keyframes slideIn {
+      from { transform: translateY(20px); opacity: 0; }
+      to { transform: translateY(0); opacity: 1; }
+    }
+
+    .divider {
+      height: 1px;
+      background: var(--border);
+      margin: 20px 0;
+    }
+
+    .section-title {
+      font-size: 10px;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      color: var(--text-dim);
+      margin-bottom: 12px;
+    }
+
+    .checkout-preview {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 20px;
+      text-align: center;
+    }
+
+    .checkout-preview .price {
+      font-size: 28px;
+      font-weight: 700;
+      color: var(--text);
+      margin: 12px 0 4px;
+    }
+
+    .checkout-preview .price-zec {
+      font-size: 14px;
+      color: var(--cyan);
+      margin-bottom: 16px;
+    }
+
+    .checkout-preview .memo-box {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 10px;
+      margin: 12px 0;
+      font-size: 14px;
+      letter-spacing: 2px;
+      color: var(--purple);
+      cursor: pointer;
+    }
+
+    .checkout-preview .memo-box:hover {
+      border-color: var(--purple);
+    }
+
+    .checkout-preview .memo-label {
+      font-size: 10px;
+      color: var(--text-muted);
+      letter-spacing: 1px;
+      margin-bottom: 4px;
+    }
+
+    .checkout-preview .timer {
+      font-size: 11px;
+      color: var(--text-dim);
+      margin-top: 8px;
+    }
+
+    .checkout-status {
+      padding: 16px;
+      border-radius: 6px;
+      text-align: center;
+      margin-top: 16px;
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: 1px;
+    }
+
+    .checkout-status.detected {
+      background: rgba(168, 85, 247, 0.1);
+      border: 1px solid rgba(168, 85, 247, 0.3);
+      color: var(--purple);
+    }
+
+    .checkout-status.confirmed {
+      background: rgba(34, 197, 94, 0.1);
+      border: 1px solid rgba(34, 197, 94, 0.3);
+      color: var(--green);
+    }
+
+    .stat-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 8px 0;
+      border-bottom: 1px solid rgba(42, 42, 58, 0.5);
+      font-size: 11px;
+    }
+
+    .stat-label {
+      color: var(--text-muted);
+    }
+
+    .stat-value {
+      color: var(--text);
+      font-weight: 500;
+    }
+
+    .hidden { display: none; }
+
+    @media (max-width: 800px) {
+      .grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .pulse {
+      animation: pulse 2s ease-in-out infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="logo">
+        <div class="logo-icon">C</div>
+        <div class="logo-text">CIPHER<span>PAY</span></div>
+      </div>
+      <div class="tag">TEST CONSOLE // TESTNET</div>
+    </header>
+
+    <div class="grid">
+      <!-- Left Panel: Controls -->
+      <div>
+        <!-- Step 1: Merchant Setup -->
+        <div class="panel" id="merchant-panel">
+          <div class="panel-header">
+            <span class="panel-title">01 // Merchant Setup</span>
+            <span id="merchant-status" class="status-badge status-pending">NOT SET</span>
+          </div>
+          <div class="panel-body">
+            <div class="form-group">
+              <label>Unified Full Viewing Key (UFVK)</label>
+              <textarea id="ufvk-input" rows="3" placeholder="uviewtest1... (for trial decryption)"></textarea>
+            </div>
+            <div class="form-group">
+              <label>Payment Address (Unified Address)</label>
+              <textarea id="address-input" rows="2" placeholder="utest1... (where buyers send ZEC)"></textarea>
+            </div>
+            <div class="form-group">
+              <label>Webhook URL (optional)</label>
+              <input type="text" id="webhook-input" placeholder="https://your-server.com/webhook">
+            </div>
+            <button class="btn btn-primary" onclick="registerMerchant()">
+              REGISTER MERCHANT
+            </button>
+            <div id="merchant-info" class="hidden" style="margin-top: 14px;">
+              <div class="stat-row">
+                <span class="stat-label">Merchant ID</span>
+                <span class="stat-value" id="merchant-id-display">—</span>
+              </div>
+              <div class="stat-row">
+                <span class="stat-label">API Key</span>
+                <span class="stat-value" id="api-key-display" style="font-size:9px; word-break:break-all;">—</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Step 2: Create Invoice -->
+        <div class="panel" style="margin-top: 16px;">
+          <div class="panel-header">
+            <span class="panel-title">02 // Create Invoice</span>
+          </div>
+          <div class="panel-body">
+            <div class="form-group">
+              <label>Product</label>
+              <select id="product-select">
+                <option value="[REDACTED] Tee" data-price="65">[REDACTED] Tee — 65 EUR</option>
+                <option value="[ZERO KNOWLEDGE] Tee" data-price="65">[ZERO KNOWLEDGE] Tee — 65 EUR</option>
+                <option value="[CLASSIFIED] Tee" data-price="65">[CLASSIFIED] Tee — 65 EUR</option>
+                <option value="[DO NOT TRACK] Tee" data-price="65">[DO NOT TRACK] Tee — 65 EUR</option>
+                <option value="Custom" data-price="">Custom Amount</option>
+              </select>
+            </div>
+            <div id="custom-price-group" class="form-group hidden">
+              <label>Price (EUR)</label>
+              <input type="number" id="custom-price" placeholder="65" step="0.01">
+            </div>
+            <div class="form-group">
+              <label>Size</label>
+              <select id="size-select">
+                <option value="S">S</option>
+                <option value="M" selected>M</option>
+                <option value="L">L</option>
+                <option value="XL">XL</option>
+              </select>
+            </div>
+            <div class="divider"></div>
+            <div class="section-title">Shipping (encrypted, auto-purged)</div>
+            <div class="form-group">
+              <label>Alias</label>
+              <input type="text" id="shipping-alias" placeholder="anon_buyer_42">
+            </div>
+            <div class="form-group">
+              <label>Address</label>
+              <textarea id="shipping-address" rows="2" placeholder="123 Privacy St, Zurich CH-8001"></textarea>
+            </div>
+            <button class="btn btn-primary" onclick="createInvoice()">
+              CREATE INVOICE
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right Panel: Invoice Dashboard + Checkout Preview -->
+      <div>
+        <!-- Checkout Preview -->
+        <div class="panel" id="checkout-panel">
+          <div class="panel-header">
+            <span class="panel-title">Checkout Preview</span>
+            <span id="checkout-timer" class="tag">—</span>
+          </div>
+          <div class="panel-body">
+            <div id="checkout-empty" class="empty-state">
+              <div class="icon">&#9632;&#9632;&#9632;</div>
+              <div>Create an invoice to see the checkout flow</div>
+            </div>
+            <div id="checkout-content" class="hidden">
+              <div class="checkout-preview">
+                <div style="font-size: 10px; letter-spacing: 1px; color: var(--text-dim);">PAY WITH SHIELDED ZEC</div>
+                <div class="price" id="checkout-price-eur">€65.00</div>
+                <div class="price-zec" id="checkout-price-zec">≈ 1.2345 ZEC</div>
+
+                <div id="checkout-qr" style="margin: 16px auto; background: #fff; border-radius: 8px; display: inline-block; padding: 10px;">
+                  <img id="qr-img" src="" alt="QR" style="width: 180px; height: 180px; display: block;">
+                </div>
+
+                <div class="memo-label" style="margin-top: 12px;">SEND TO ADDRESS</div>
+                <div class="memo-box" id="checkout-address" onclick="copyAddress()" style="font-size: 9px; word-break: break-all; color: var(--cyan); letter-spacing: 0;">—</div>
+
+                <div class="memo-label">INCLUDE THIS MEMO</div>
+                <div class="memo-box" id="checkout-memo" onclick="copyMemo()">CP-XXXXXXXX</div>
+                <div class="timer" id="checkout-expires">Expires in 15:00</div>
+              </div>
+              <div id="checkout-status-box" class="hidden"></div>
+              <div class="btn-group" style="justify-content: center; margin-top: 16px;">
+                <button class="btn btn-small btn-detect" onclick="simulateDetect()">
+                  SIMULATE DETECT
+                </button>
+                <button class="btn btn-small btn-confirm" onclick="simulateConfirm()">
+                  SIMULATE CONFIRM
+                </button>
+              </div>
+              <div style="text-align: center; margin-top: 8px; font-size: 10px; color: var(--text-dim);">
+                Use these buttons to test the payment flow without real ZEC
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Invoice List -->
+        <div class="panel" style="margin-top: 16px;">
+          <div class="panel-header">
+            <span class="panel-title">Invoices</span>
+            <button class="btn btn-small" onclick="refreshInvoices()">REFRESH</button>
+          </div>
+          <div id="invoice-list">
+            <div class="empty-state">
+              <div class="icon">&#9744;</div>
+              <div>No invoices yet</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const API = '';
+    let currentInvoice = null;
+    let merchantApiKey = null;
+    let pollTimer = null;
+    let countdownTimer = null;
+
+    function authHeaders() {
+      const h = { 'Content-Type': 'application/json' };
+      if (merchantApiKey) h['Authorization'] = `Bearer ${merchantApiKey}`;
+      return h;
+    }
+
+    // Merchant registration
+    async function registerMerchant() {
+      const ufvk = document.getElementById('ufvk-input').value.trim();
+      const addr = document.getElementById('address-input').value.trim();
+      if (!ufvk) {
+        document.getElementById('ufvk-input').value = 'uviewtest1_placeholder_for_local_testing';
+      }
+      if (!addr) {
+        document.getElementById('address-input').value = 'utest1_placeholder_address';
+      }
+
+      const body = {
+        ufvk: document.getElementById('ufvk-input').value.trim(),
+        payment_address: document.getElementById('address-input').value.trim(),
+        webhook_url: document.getElementById('webhook-input').value.trim() || null,
+      };
+
+      try {
+        const resp = await fetch(`${API}/api/merchants`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const data = await resp.json();
+
+        if (resp.ok) {
+          merchantApiKey = data.api_key;
+          document.getElementById('merchant-status').textContent = 'ACTIVE';
+          document.getElementById('merchant-status').className = 'status-badge status-confirmed';
+          document.getElementById('merchant-id-display').textContent = data.merchant_id.substring(0, 8) + '...';
+          document.getElementById('api-key-display').textContent = data.api_key;
+          document.getElementById('merchant-info').classList.remove('hidden');
+          showToast('Merchant registered');
+        } else {
+          showToast('Error: ' + (data.error || 'Unknown'), true);
+        }
+      } catch (e) {
+        showToast('Network error: ' + e.message, true);
+      }
+    }
+
+    // Product selection
+    document.getElementById('product-select').addEventListener('change', function() {
+      const custom = this.value === 'Custom';
+      document.getElementById('custom-price-group').classList.toggle('hidden', !custom);
+    });
+
+    // Create invoice
+    async function createInvoice() {
+      const select = document.getElementById('product-select');
+      const option = select.options[select.selectedIndex];
+      const isCustom = select.value === 'Custom';
+      const price = isCustom
+        ? parseFloat(document.getElementById('custom-price').value)
+        : parseFloat(option.dataset.price);
+
+      if (!price || price <= 0) {
+        showToast('Enter a valid price', true);
+        return;
+      }
+
+      const body = {
+        product_name: select.value,
+        size: document.getElementById('size-select').value,
+        price_eur: price,
+        shipping_alias: document.getElementById('shipping-alias').value.trim() || null,
+        shipping_address: document.getElementById('shipping-address').value.trim() || null,
+      };
+
+      try {
+        const resp = await fetch(`${API}/api/invoices`, {
+          method: 'POST',
+          headers: authHeaders(),
+          body: JSON.stringify(body),
+        });
+        const data = await resp.json();
+
+        if (resp.ok) {
+          currentInvoice = data;
+          showCheckout(data);
+          refreshInvoices();
+          showToast('Invoice created: ' + data.memo_code);
+          startPolling(data.invoice_id);
+        } else {
+          showToast('Error: ' + (data.error || 'Unknown'), true);
+        }
+      } catch (e) {
+        showToast('Network error: ' + e.message, true);
+      }
+    }
+
+    // Show checkout preview
+    function showCheckout(invoice) {
+      document.getElementById('checkout-empty').classList.add('hidden');
+      document.getElementById('checkout-content').classList.remove('hidden');
+      document.getElementById('checkout-status-box').classList.add('hidden');
+
+      const eurStr = invoice.price_eur < 0.01
+        ? `€${invoice.price_eur}` 
+        : `€${invoice.price_eur.toFixed(2)}`;
+      document.getElementById('checkout-price-eur').textContent = eurStr;
+      document.getElementById('checkout-price-zec').textContent =
+        `≈ ${invoice.price_zec.toFixed(8)} ZEC`;
+      document.getElementById('checkout-memo').textContent = invoice.memo_code;
+
+      if (invoice.payment_address) {
+        document.getElementById('checkout-address').textContent = invoice.payment_address;
+      }
+
+      // Load QR code
+      const qrImg = document.getElementById('qr-img');
+      qrImg.src = `${API}/api/invoices/${invoice.invoice_id}/qr`;
+      qrImg.onerror = () => {
+        document.getElementById('checkout-qr').style.display = 'none';
+      };
+
+      startCountdown(invoice.expires_at);
+    }
+
+    function copyAddress() {
+      const addr = document.getElementById('checkout-address').textContent;
+      navigator.clipboard.writeText(addr).then(() => showToast('Address copied'));
+    }
+
+    // Countdown timer
+    function startCountdown(expiresAt) {
+      if (countdownTimer) clearInterval(countdownTimer);
+      const target = new Date(expiresAt).getTime();
+
+      function update() {
+        const now = Date.now();
+        const diff = target - now;
+        if (diff <= 0) {
+          document.getElementById('checkout-expires').textContent = 'EXPIRED';
+          document.getElementById('checkout-timer').textContent = 'EXPIRED';
+          clearInterval(countdownTimer);
+          return;
+        }
+        const mins = Math.floor(diff / 60000);
+        const secs = Math.floor((diff % 60000) / 1000);
+        const str = `${mins}:${secs.toString().padStart(2, '0')}`;
+        document.getElementById('checkout-expires').textContent = `Expires in ${str}`;
+        document.getElementById('checkout-timer').textContent = str;
+      }
+      update();
+      countdownTimer = setInterval(update, 1000);
+    }
+
+    // Copy memo
+    function copyMemo() {
+      const memo = document.getElementById('checkout-memo').textContent;
+      navigator.clipboard.writeText(memo).then(() => showToast('Memo copied'));
+    }
+
+    // Polling for status updates
+    function startPolling(invoiceId) {
+      if (pollTimer) clearInterval(pollTimer);
+
+      pollTimer = setInterval(async () => {
+        try {
+          const resp = await fetch(`${API}/api/invoices/${invoiceId}/status`);
+          const data = await resp.json();
+          updateCheckoutStatus(data);
+          refreshInvoices();
+
+          if (data.status === 'confirmed' || data.status === 'expired') {
+            clearInterval(pollTimer);
+          }
+        } catch (_) {}
+      }, 2000);
+    }
+
+    function updateCheckoutStatus(data) {
+      const box = document.getElementById('checkout-status-box');
+      if (data.status === 'detected') {
+        box.className = 'checkout-status detected';
+        box.innerHTML = `<div class="pulse">PAYMENT DETECTED IN MEMPOOL</div>
+          <div style="font-size:10px; margin-top:6px; color:var(--text-muted)">
+            Waiting for block confirmation...
+          </div>
+          <div style="font-size:9px; margin-top:4px; color:var(--text-dim); word-break:break-all">
+            txid: ${data.detected_txid || '—'}
+          </div>`;
+        box.classList.remove('hidden');
+      } else if (data.status === 'confirmed') {
+        box.className = 'checkout-status confirmed';
+        box.innerHTML = `<div>PAYMENT CONFIRMED</div>
+          <div style="font-size:10px; margin-top:6px; color:var(--text-muted)">
+            Transaction included in block
+          </div>`;
+        box.classList.remove('hidden');
+        if (countdownTimer) clearInterval(countdownTimer);
+        document.getElementById('checkout-timer').textContent = 'PAID';
+      }
+    }
+
+    // Simulation buttons
+    async function simulateDetect() {
+      if (!currentInvoice) return;
+      try {
+        const resp = await fetch(`${API}/api/invoices/${currentInvoice.invoice_id}/simulate-detect`, {
+          method: 'POST',
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+          showToast('Simulated: Payment detected');
+          updateCheckoutStatus({ status: 'detected', detected_txid: data.txid });
+          refreshInvoices();
+        }
+      } catch (e) {
+        showToast('Simulation failed', true);
+      }
+    }
+
+    async function simulateConfirm() {
+      if (!currentInvoice) return;
+      try {
+        const resp = await fetch(`${API}/api/invoices/${currentInvoice.invoice_id}/simulate-confirm`, {
+          method: 'POST',
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+          showToast('Simulated: Payment confirmed');
+          updateCheckoutStatus({ status: 'confirmed' });
+          refreshInvoices();
+        }
+      } catch (e) {
+        showToast('Simulation failed', true);
+      }
+    }
+
+    // Invoice list
+    async function refreshInvoices() {
+      try {
+        const resp = await fetch(`${API}/api/invoices`);
+        const invoices = await resp.json();
+        renderInvoices(invoices);
+      } catch (_) {}
+    }
+
+    function renderInvoices(invoices) {
+      const container = document.getElementById('invoice-list');
+      if (!invoices.length) {
+        container.innerHTML = '<div class="empty-state"><div class="icon">&#9744;</div><div>No invoices yet</div></div>';
+        return;
+      }
+
+      container.innerHTML = invoices.map(inv => {
+        const statusClass = `status-${inv.status}`;
+        return `
+          <div class="invoice-card">
+            <div class="invoice-header">
+              <span class="invoice-id" onclick="selectInvoice('${inv.id}')">${inv.memo_code}</span>
+              <span class="status-badge ${statusClass}">${inv.status.toUpperCase()}</span>
+            </div>
+            <div class="invoice-meta">
+              <span>${inv.product_name || '—'} ${inv.size || ''}</span>
+              <span><strong>€${inv.price_eur < 0.01 ? inv.price_eur : inv.price_eur.toFixed(2)}</strong> / ${inv.price_zec.toFixed(8)} ZEC</span>
+            </div>
+            ${inv.status === 'pending' ? `
+              <div class="invoice-actions">
+                <button class="btn btn-small btn-detect" onclick="simulateFor('${inv.id}', 'detect')">DETECT</button>
+              </div>` : ''}
+            ${inv.status === 'detected' ? `
+              <div class="invoice-actions">
+                <button class="btn btn-small btn-confirm" onclick="simulateFor('${inv.id}', 'confirm')">CONFIRM</button>
+              </div>` : ''}
+          </div>`;
+      }).join('');
+    }
+
+    async function selectInvoice(id) {
+      try {
+        const resp = await fetch(`${API}/api/invoices/${id}`);
+        const inv = await resp.json();
+        currentInvoice = {
+          invoice_id: inv.id,
+          memo_code: inv.memo_code,
+          price_eur: inv.price_eur,
+          price_zec: inv.price_zec,
+          expires_at: inv.expires_at,
+        };
+        showCheckout(currentInvoice);
+        startPolling(inv.id);
+
+        if (inv.status !== 'pending') {
+          updateCheckoutStatus({ status: inv.status, detected_txid: inv.detected_txid });
+        }
+      } catch (_) {}
+    }
+
+    async function simulateFor(id, action) {
+      try {
+        await fetch(`${API}/api/invoices/${id}/simulate-${action}`, { method: 'POST' });
+        refreshInvoices();
+        showToast(`Simulated ${action} for ${id.substring(0, 8)}`);
+      } catch (_) {}
+    }
+
+    // Toast
+    function showToast(msg, isError = false) {
+      const existing = document.querySelector('.toast');
+      if (existing) existing.remove();
+
+      const el = document.createElement('div');
+      el.className = 'toast';
+      if (isError) el.style.borderColor = 'var(--red)';
+      if (isError) el.style.color = 'var(--red)';
+      el.textContent = msg;
+      document.body.appendChild(el);
+      setTimeout(() => el.remove(), 3000);
+    }
+
+    // Initial load
+    refreshInvoices();
+  </script>
+</body>
+</html>

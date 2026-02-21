@@ -1,0 +1,64 @@
+[package]
+name = "cipherpay"
+version = "0.1.0"
+edition = "2021"
+description = "Shielded Zcash payment service with mempool detection"
+license = "MIT"
+
+[dependencies]
+# Web framework
+actix-web = "4"
+actix-cors = "0.7"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Database (SQLite for local dev, Postgres for production)
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "uuid", "chrono", "json"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# HTTP client (for CipherScan API + webhooks)
+reqwest = { version = "0.12", features = ["json"] }
+
+# Zcash crates (aligned with zcash-explorer WASM versions)
+zcash_primitives = { version = "0.25", default-features = false }
+zcash_note_encryption = "0.4"
+orchard = { version = "0.11", default-features = false, features = ["std"] }
+zcash_address = "0.10"
+
+# Crypto / hashing
+sha2 = "0.10"
+hmac = "0.12"
+hex = "0.4"
+rand = "0.8"
+base64 = "0.22"
+
+# QR code generation
+qrcode = "0.14"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# UUID
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Config
+dotenvy = "0.15"
+
+# Concurrency
+futures = "0.3"
+
+# Misc
+anyhow = "1"
+thiserror = "2"
+
+[dev-dependencies]
+actix-rt = "2"

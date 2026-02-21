@@ -1,0 +1,193 @@
+/* CipherPay Checkout Widget */
+
+.cipherpay-widget {
+  font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', monospace;
+  background: #08090F;
+  border: 1px solid rgba(0, 212, 255, 0.15);
+  border-radius: 12px;
+  padding: 24px;
+  max-width: 400px;
+  color: #E5E7EB;
+  box-shadow: 0 0 30px rgba(0, 212, 255, 0.05);
+}
+
+.cipherpay-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 20px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.cipherpay-logo {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: #00D4FF;
+}
+
+.cipherpay-network {
+  font-size: 9px;
+  color: #6B7280;
+  text-transform: uppercase;
+  letter-spacing: 0.15em;
+}
+
+.cipherpay-amount {
+  text-align: center;
+  margin-bottom: 20px;
+}
+
+.cipherpay-amount-zec {
+  font-size: 28px;
+  font-weight: 700;
+  color: #00D4FF;
+}
+
+.cipherpay-amount-zec span {
+  font-size: 14px;
+  color: #5EBBCE;
+  margin-left: 4px;
+}
+
+.cipherpay-amount-fiat {
+  font-size: 12px;
+  color: #6B7280;
+  margin-top: 4px;
+}
+
+.cipherpay-qr {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 20px;
+}
+
+.cipherpay-qr canvas,
+.cipherpay-qr img {
+  border-radius: 8px;
+  background: #fff;
+  padding: 12px;
+}
+
+.cipherpay-memo {
+  background: rgba(0, 212, 255, 0.05);
+  border: 1px solid rgba(0, 212, 255, 0.1);
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 16px;
+  text-align: center;
+}
+
+.cipherpay-memo-label {
+  font-size: 9px;
+  color: #6B7280;
+  text-transform: uppercase;
+  letter-spacing: 0.15em;
+  margin-bottom: 6px;
+}
+
+.cipherpay-memo-code {
+  font-size: 18px;
+  font-weight: 700;
+  color: #00E5FF;
+  letter-spacing: 0.05em;
+  user-select: all;
+  cursor: pointer;
+}
+
+.cipherpay-timer {
+  text-align: center;
+  font-size: 11px;
+  color: #6B7280;
+  margin-bottom: 16px;
+}
+
+.cipherpay-timer-value {
+  color: #9CA3AF;
+  font-weight: 600;
+}
+
+.cipherpay-status {
+  text-align: center;
+  padding: 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+}
+
+.cipherpay-status-pending {
+  background: rgba(255, 255, 255, 0.03);
+  color: #6B7280;
+}
+
+.cipherpay-status-pending::before {
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #6B7280;
+  margin-right: 8px;
+  animation: cipherpay-pulse 2s infinite;
+}
+
+.cipherpay-status-detected {
+  background: rgba(0, 212, 255, 0.08);
+  color: #00D4FF;
+}
+
+.cipherpay-status-detected::before {
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #00D4FF;
+  margin-right: 8px;
+  animation: cipherpay-pulse 1s infinite;
+}
+
+.cipherpay-status-confirmed {
+  background: rgba(0, 230, 118, 0.08);
+  color: #00E676;
+}
+
+.cipherpay-status-confirmed::before {
+  content: '';
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 8px;
+  border-left: 2px solid #00E676;
+  border-bottom: 2px solid #00E676;
+  transform: rotate(-45deg);
+}
+
+.cipherpay-status-expired {
+  background: rgba(255, 107, 53, 0.08);
+  color: #FF6B35;
+}
+
+.cipherpay-footer {
+  margin-top: 16px;
+  text-align: center;
+  font-size: 9px;
+  color: rgba(107, 114, 128, 0.5);
+  letter-spacing: 0.1em;
+}
+
+.cipherpay-footer a {
+  color: rgba(0, 212, 255, 0.4);
+  text-decoration: none;
+}
+
+.cipherpay-footer a:hover {
+  color: #00D4FF;
+}
+
+@keyframes cipherpay-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}

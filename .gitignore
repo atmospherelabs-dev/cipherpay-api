@@ -1,0 +1,7 @@
+/target
+.env
+*.pem
+*.key
+*.db
+*.db-shm
+*.db-wal
