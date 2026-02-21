@@ -17,16 +17,14 @@ Built on [CipherScan](https://cipherscan.app) APIs. No full node required.
 ## Architecture
 
 ```
-┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│  Your Store  │────▶│  CipherPay   │────▶│  CipherScan  │
-│  (frontend)  │ API │   (this)     │ API │  (blockchain) │
-└──────────────┘     └──────────────┘     └──────────────┘
-                           │
-                     ┌─────┴─────┐
-                     │  Scanner  │
-                     │ mempool + │
-                     │  blocks   │
-                     └───────────┘
+┌──────────────┐         ┌──────────────┐         ┌──────────────┐
+│  Your Store  │──API───▶│  CipherPay   │──API───▶│  CipherScan  │
+│  (frontend)  │         │   (this)     │◀──poll──│  (blockchain) │
+└──────────────┘         └──────────────┘         └──────────────┘
+                               │                        ▲
+                         ┌─────┴─────┐                  │
+                         │  Scanner  │──mempool/blocks───┘
+                         └───────────┘
 ```
 
 ## Quick Start
