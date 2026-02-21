@@ -195,7 +195,7 @@ pub async fn get_pending_invoices(pool: &SqlitePool) -> anyhow::Result<Vec<Invoi
          price_eur, price_zec, zec_rate_at_creation, payment_address, zcash_uri,
          NULL AS merchant_name,
          shipping_alias, shipping_address,
-         shipping_region, status, detected_txid, detected_at,
+         shipping_region, refund_address, status, detected_txid, detected_at,
          confirmed_at, shipped_at, expires_at, purge_after, created_at
          FROM invoices WHERE status IN ('pending', 'detected')
          AND expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
