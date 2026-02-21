@@ -103,10 +103,20 @@ pub async fn me(
 
     let stats = get_merchant_stats(pool.get_ref(), &merchant.id).await;
 
+    let masked_secret = if merchant.webhook_secret.len() > 12 {
+        format!("{}...", &merchant.webhook_secret[..12])
+    } else if merchant.webhook_secret.is_empty() {
+        String::new()
+    } else {
+        "***".to_string()
+    };
+
     HttpResponse::Ok().json(serde_json::json!({
         "id": merchant.id,
+        "name": merchant.name,
         "payment_address": merchant.payment_address,
         "webhook_url": merchant.webhook_url,
+        "webhook_secret_preview": masked_secret,
         "has_recovery_email": merchant.recovery_email.is_some(),
         "created_at": merchant.created_at,
         "stats": stats,
@@ -130,6 +140,7 @@ pub async fn my_invoices(
     let rows = sqlx::query_as::<_, crate::invoices::Invoice>(
         "SELECT id, merchant_id, memo_code, product_name, size,
          price_eur, price_zec, zec_rate_at_creation, payment_address, zcash_uri,
+         NULL AS merchant_name,
          shipping_alias, shipping_address,
          shipping_region, status, detected_txid, detected_at,
          confirmed_at, shipped_at, expires_at, purge_after, created_at
@@ -191,11 +202,16 @@ fn build_session_cookie<'a>(value: &str, config: &Config, clear: bool) -> Cookie
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateMerchantRequest {
+    pub name: Option<String>,
     pub payment_address: Option<String>,
     pub webhook_url: Option<String>,
+    /// Required when changing payment_address — re-authentication guard
+    pub current_token: Option<String>,
 }
 
-/// PATCH /api/merchants/me -- update payment address and/or webhook URL
+/// PATCH /api/merchants/me -- update name, payment address and/or webhook URL.
+/// Changing payment_address requires `current_token` (dashboard token) for re-authentication,
+/// since a hijacked session redirecting payments is the highest-impact exploit.
 pub async fn update_me(
     req: HttpRequest,
     pool: web::Data<SqlitePool>,
@@ -210,11 +226,38 @@ pub async fn update_me(
         }
     };
 
+    if let Some(ref name) = body.name {
+        sqlx::query("UPDATE merchants SET name = ? WHERE id = ?")
+            .bind(name)
+            .bind(&merchant.id)
+            .execute(pool.get_ref())
+            .await
+            .ok();
+        tracing::info!(merchant_id = %merchant.id, "Merchant name updated");
+    }
+
     if let Some(ref addr) = body.payment_address {
         if addr.is_empty() {
             return HttpResponse::BadRequest().json(serde_json::json!({
                 "error": "Payment address cannot be empty"
             }));
+        }
+        // Re-authentication required for payment address change
+        let token = match &body.current_token {
+            Some(t) => t,
+            None => {
+                return HttpResponse::Forbidden().json(serde_json::json!({
+                    "error": "Payment address change requires current_token for re-authentication"
+                }));
+            }
+        };
+        match merchants::authenticate_dashboard(pool.get_ref(), token).await {
+            Ok(Some(m)) if m.id == merchant.id => {}
+            _ => {
+                return HttpResponse::Forbidden().json(serde_json::json!({
+                    "error": "Invalid dashboard token"
+                }));
+            }
         }
         sqlx::query("UPDATE merchants SET payment_address = ? WHERE id = ?")
             .bind(addr)
@@ -222,7 +265,7 @@ pub async fn update_me(
             .execute(pool.get_ref())
             .await
             .ok();
-        tracing::info!(merchant_id = %merchant.id, "Payment address updated");
+        tracing::info!(merchant_id = %merchant.id, "Payment address updated (re-authenticated)");
     }
 
     if let Some(ref url) = body.webhook_url {
@@ -236,6 +279,147 @@ pub async fn update_me(
     }
 
     HttpResponse::Ok().json(serde_json::json!({ "status": "updated" }))
+}
+
+/// POST /api/merchants/me/regenerate-api-key
+pub async fn regenerate_api_key(
+    req: HttpRequest,
+    pool: web::Data<SqlitePool>,
+) -> HttpResponse {
+    let merchant = match resolve_session(&req, &pool).await {
+        Some(m) => m,
+        None => return HttpResponse::Unauthorized().json(serde_json::json!({ "error": "Not authenticated" })),
+    };
+
+    match merchants::regenerate_api_key(pool.get_ref(), &merchant.id).await {
+        Ok(new_key) => HttpResponse::Ok().json(serde_json::json!({ "api_key": new_key })),
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to regenerate API key");
+            HttpResponse::InternalServerError().json(serde_json::json!({ "error": "Failed to regenerate" }))
+        }
+    }
+}
+
+/// POST /api/merchants/me/regenerate-dashboard-token
+pub async fn regenerate_dashboard_token(
+    req: HttpRequest,
+    pool: web::Data<SqlitePool>,
+) -> HttpResponse {
+    let merchant = match resolve_session(&req, &pool).await {
+        Some(m) => m,
+        None => return HttpResponse::Unauthorized().json(serde_json::json!({ "error": "Not authenticated" })),
+    };
+
+    match merchants::regenerate_dashboard_token(pool.get_ref(), &merchant.id).await {
+        Ok(new_token) => HttpResponse::Ok().json(serde_json::json!({ "dashboard_token": new_token })),
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to regenerate dashboard token");
+            HttpResponse::InternalServerError().json(serde_json::json!({ "error": "Failed to regenerate" }))
+        }
+    }
+}
+
+/// POST /api/merchants/me/regenerate-webhook-secret
+pub async fn regenerate_webhook_secret(
+    req: HttpRequest,
+    pool: web::Data<SqlitePool>,
+) -> HttpResponse {
+    let merchant = match resolve_session(&req, &pool).await {
+        Some(m) => m,
+        None => return HttpResponse::Unauthorized().json(serde_json::json!({ "error": "Not authenticated" })),
+    };
+
+    match merchants::regenerate_webhook_secret(pool.get_ref(), &merchant.id).await {
+        Ok(new_secret) => HttpResponse::Ok().json(serde_json::json!({ "webhook_secret": new_secret })),
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to regenerate webhook secret");
+            HttpResponse::InternalServerError().json(serde_json::json!({ "error": "Failed to regenerate" }))
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RecoverRequest {
+    pub email: String,
+}
+
+/// POST /api/auth/recover -- request a recovery email.
+/// Uses constant-time response delay to prevent email enumeration via timing.
+pub async fn recover(
+    pool: web::Data<SqlitePool>,
+    config: web::Data<Config>,
+    body: web::Json<RecoverRequest>,
+) -> HttpResponse {
+    if !config.smtp_configured() {
+        return HttpResponse::ServiceUnavailable().json(serde_json::json!({
+            "error": "Email recovery is not configured on this instance"
+        }));
+    }
+
+    let start = std::time::Instant::now();
+
+    let result: Result<(), ()> = async {
+        let merchant = match merchants::find_by_email(pool.get_ref(), &body.email).await {
+            Ok(Some(m)) => m,
+            _ => return Err(()),
+        };
+
+        let token = merchants::create_recovery_token(pool.get_ref(), &merchant.id)
+            .await
+            .map_err(|e| tracing::error!(error = %e, "Failed to create recovery token"))?;
+
+        crate::email::send_recovery_email(&config, &body.email, &token)
+            .await
+            .map_err(|e| tracing::error!(error = %e, "Failed to send recovery email"))?;
+
+        Ok(())
+    }.await;
+
+    // Constant-time: always wait at least 2 seconds to prevent timing side-channel
+    let elapsed = start.elapsed();
+    let min_duration = std::time::Duration::from_secs(2);
+    if elapsed < min_duration {
+        tokio::time::sleep(min_duration - elapsed).await;
+    }
+
+    if result.is_err() {
+        // Same response whether email doesn't exist or sending failed
+    }
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "message": "If an account with this email exists, a recovery link has been sent"
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RecoverConfirmRequest {
+    pub token: String,
+}
+
+/// POST /api/auth/recover/confirm -- exchange recovery token for new dashboard token
+pub async fn recover_confirm(
+    pool: web::Data<SqlitePool>,
+    body: web::Json<RecoverConfirmRequest>,
+) -> HttpResponse {
+    match merchants::confirm_recovery_token(pool.get_ref(), &body.token).await {
+        Ok(Some(new_dashboard_token)) => {
+            HttpResponse::Ok().json(serde_json::json!({
+                "dashboard_token": new_dashboard_token,
+                "message": "Account recovered. Save your new dashboard token."
+            }))
+        }
+        Ok(None) => {
+            HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "Invalid or expired recovery token"
+            }))
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "Recovery confirmation failed");
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Recovery failed"
+            }))
+        }
+    }
 }
 
 async fn get_merchant_stats(pool: &SqlitePool, merchant_id: &str) -> serde_json::Value {

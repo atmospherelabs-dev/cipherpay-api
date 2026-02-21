@@ -19,6 +19,7 @@ pub struct Invoice {
     pub zec_rate_at_creation: f64,
     pub payment_address: String,
     pub zcash_uri: String,
+    pub merchant_name: Option<String>,
     pub shipping_alias: Option<String>,
     pub shipping_address: Option<String>,
     pub shipping_region: Option<String>,
@@ -42,6 +43,7 @@ pub struct InvoiceStatus {
 
 #[derive(Debug, Deserialize)]
 pub struct CreateInvoiceRequest {
+    pub product_id: Option<String>,
     pub product_name: Option<String>,
     pub size: Option<String>,
     pub price_eur: f64,
@@ -91,15 +93,16 @@ pub async fn create_invoice(
     );
 
     sqlx::query(
-        "INSERT INTO invoices (id, merchant_id, memo_code, product_name, size,
+        "INSERT INTO invoices (id, merchant_id, memo_code, product_id, product_name, size,
          price_eur, price_zec, zec_rate_at_creation, payment_address, zcash_uri,
          shipping_alias, shipping_address,
          shipping_region, status, expires_at, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)"
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)"
     )
     .bind(&id)
     .bind(merchant_id)
     .bind(&memo_code)
+    .bind(&req.product_id)
     .bind(&req.product_name)
     .bind(&req.size)
     .bind(req.price_eur)
@@ -135,6 +138,7 @@ pub async fn get_invoice(pool: &SqlitePool, id: &str) -> anyhow::Result<Option<I
          i.price_eur, i.price_zec, i.zec_rate_at_creation,
          COALESCE(NULLIF(i.payment_address, ''), m.payment_address) AS payment_address,
          i.zcash_uri,
+         NULLIF(m.name, '') AS merchant_name,
          i.shipping_alias, i.shipping_address,
          i.shipping_region, i.status, i.detected_txid, i.detected_at,
          i.confirmed_at, i.shipped_at, i.expires_at, i.purge_after, i.created_at
@@ -152,12 +156,17 @@ pub async fn get_invoice(pool: &SqlitePool, id: &str) -> anyhow::Result<Option<I
 /// Look up an invoice by its memo code (e.g. CP-C6CDB775)
 pub async fn get_invoice_by_memo(pool: &SqlitePool, memo_code: &str) -> anyhow::Result<Option<Invoice>> {
     let row = sqlx::query_as::<_, Invoice>(
-        "SELECT id, merchant_id, memo_code, product_name, size,
-         price_eur, price_zec, zec_rate_at_creation, payment_address, zcash_uri,
-         shipping_alias, shipping_address,
-         shipping_region, status, detected_txid, detected_at,
-         confirmed_at, shipped_at, expires_at, purge_after, created_at
-         FROM invoices WHERE memo_code = ?"
+        "SELECT i.id, i.merchant_id, i.memo_code, i.product_name, i.size,
+         i.price_eur, i.price_zec, i.zec_rate_at_creation,
+         COALESCE(NULLIF(i.payment_address, ''), m.payment_address) AS payment_address,
+         i.zcash_uri,
+         NULLIF(m.name, '') AS merchant_name,
+         i.shipping_alias, i.shipping_address,
+         i.shipping_region, i.status, i.detected_txid, i.detected_at,
+         i.confirmed_at, i.shipped_at, i.expires_at, i.purge_after, i.created_at
+         FROM invoices i
+         LEFT JOIN merchants m ON m.id = i.merchant_id
+         WHERE i.memo_code = ?"
     )
     .bind(memo_code)
     .fetch_optional(pool)
@@ -181,6 +190,7 @@ pub async fn get_pending_invoices(pool: &SqlitePool) -> anyhow::Result<Vec<Invoi
     let rows = sqlx::query_as::<_, Invoice>(
         "SELECT id, merchant_id, memo_code, product_name, size,
          price_eur, price_zec, zec_rate_at_creation, payment_address, zcash_uri,
+         NULL AS merchant_name,
          shipping_alias, shipping_address,
          shipping_region, status, detected_txid, detected_at,
          confirmed_at, shipped_at, expires_at, purge_after, created_at
@@ -221,6 +231,21 @@ pub async fn mark_confirmed(pool: &SqlitePool, invoice_id: &str) -> anyhow::Resu
     .await?;
 
     tracing::info!(invoice_id, "Payment confirmed");
+    Ok(())
+}
+
+pub async fn mark_shipped(pool: &SqlitePool, invoice_id: &str) -> anyhow::Result<()> {
+    let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    sqlx::query(
+        "UPDATE invoices SET status = 'shipped', shipped_at = ?
+         WHERE id = ? AND status = 'confirmed'"
+    )
+    .bind(&now)
+    .bind(invoice_id)
+    .execute(pool)
+    .await?;
+
+    tracing::info!(invoice_id, "Invoice marked as shipped");
     Ok(())
 }
 

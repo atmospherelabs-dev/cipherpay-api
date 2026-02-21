@@ -19,6 +19,10 @@ pub struct Config {
     pub allowed_origins: Vec<String>,
     pub cookie_domain: Option<String>,
     pub frontend_url: Option<String>,
+    pub smtp_host: Option<String>,
+    pub smtp_user: Option<String>,
+    pub smtp_pass: Option<String>,
+    pub smtp_from: Option<String>,
 }
 
 impl Config {
@@ -59,10 +63,18 @@ impl Config {
                 .collect(),
             cookie_domain: env::var("COOKIE_DOMAIN").ok().filter(|s| !s.is_empty()),
             frontend_url: env::var("FRONTEND_URL").ok().filter(|s| !s.is_empty()),
+            smtp_host: env::var("SMTP_HOST").ok().filter(|s| !s.is_empty()),
+            smtp_user: env::var("SMTP_USER").ok().filter(|s| !s.is_empty()),
+            smtp_pass: env::var("SMTP_PASS").ok().filter(|s| !s.is_empty()),
+            smtp_from: env::var("SMTP_FROM").ok().filter(|s| !s.is_empty()),
         })
     }
 
     pub fn is_testnet(&self) -> bool {
         self.network == "testnet"
+    }
+
+    pub fn smtp_configured(&self) -> bool {
+        self.smtp_host.is_some() && self.smtp_from.is_some()
     }
 }

@@ -1,8 +1,10 @@
 mod api;
 mod config;
 mod db;
+mod email;
 mod invoices;
 mod merchants;
+mod products;
 mod scanner;
 mod webhooks;
 
