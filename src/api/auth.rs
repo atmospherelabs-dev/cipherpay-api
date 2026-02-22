@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use crate::config::Config;
 use crate::merchants;
+use crate::validation;
 
 const SESSION_COOKIE: &str = "cpay_session";
 const SESSION_HOURS: i64 = 24;
@@ -22,7 +23,7 @@ pub async fn create_session(
     config: web::Data<Config>,
     body: web::Json<CreateSessionRequest>,
 ) -> HttpResponse {
-    let merchant = match merchants::authenticate_dashboard(pool.get_ref(), &body.token).await {
+    let merchant = match merchants::authenticate_dashboard(pool.get_ref(), &body.token, &config.encryption_key).await {
         Ok(Some(m)) => m,
         Ok(None) => {
             return HttpResponse::Unauthorized().json(serde_json::json!({
@@ -157,9 +158,9 @@ pub async fn my_invoices(
         "SELECT id, merchant_id, memo_code, product_name, size,
          price_eur, price_usd, currency, price_zec, zec_rate_at_creation, payment_address, zcash_uri,
          NULL AS merchant_name,
-         shipping_alias, shipping_address,
-         shipping_region, refund_address, status, detected_txid, detected_at,
-         confirmed_at, shipped_at, refunded_at, expires_at, purge_after, created_at
+         refund_address, status, detected_txid, detected_at,
+         confirmed_at, refunded_at, expires_at, purge_after, created_at,
+         orchard_receiver_hex, diversifier_index
          FROM invoices WHERE merchant_id = ?
          ORDER BY created_at DESC LIMIT 100"
     )
@@ -191,7 +192,8 @@ pub async fn resolve_session(
     pool: &SqlitePool,
 ) -> Option<merchants::Merchant> {
     let session_id = extract_session_id(req)?;
-    merchants::get_by_session(pool, &session_id).await.ok()?
+    let config = req.app_data::<web::Data<crate::config::Config>>()?;
+    merchants::get_by_session(pool, &session_id, &config.encryption_key).await.ok()?
 }
 
 fn build_session_cookie<'a>(value: &str, config: &Config, clear: bool) -> Cookie<'a> {
@@ -234,6 +236,7 @@ pub struct UpdateMerchantRequest {
 pub async fn update_me(
     req: HttpRequest,
     pool: web::Data<SqlitePool>,
+    config: web::Data<Config>,
     body: web::Json<UpdateMerchantRequest>,
 ) -> HttpResponse {
     let merchant = match resolve_session(&req, &pool).await {
@@ -244,6 +247,10 @@ pub async fn update_me(
             }));
         }
     };
+
+    if let Err(e) = validate_update(&body, config.is_testnet()) {
+        return HttpResponse::BadRequest().json(e.to_json());
+    }
 
     if let Some(ref name) = body.name {
         sqlx::query("UPDATE merchants SET name = ? WHERE id = ?")
@@ -354,10 +361,14 @@ pub async fn recover(
         }));
     }
 
+    if let Err(e) = validation::validate_email_format("email", &body.email) {
+        return HttpResponse::BadRequest().json(e.to_json());
+    }
+
     let start = std::time::Instant::now();
 
     let result: Result<(), ()> = async {
-        let merchant = match merchants::find_by_email(pool.get_ref(), &body.email).await {
+        let merchant = match merchants::find_by_email(pool.get_ref(), &body.email, &config.encryption_key).await {
             Ok(Some(m)) => m,
             _ => return Err(()),
         };
@@ -440,4 +451,24 @@ async fn get_merchant_stats(pool: &SqlitePool, merchant_id: &str) -> serde_json:
         "confirmed": row.1,
         "total_zec": row.2,
     })
+}
+
+fn validate_update(
+    req: &UpdateMerchantRequest,
+    is_testnet: bool,
+) -> Result<(), validation::ValidationError> {
+    if let Some(ref name) = req.name {
+        validation::validate_length("name", name, 100)?;
+    }
+    if let Some(ref url) = req.webhook_url {
+        if !url.is_empty() {
+            validation::validate_webhook_url("webhook_url", url, is_testnet)?;
+        }
+    }
+    if let Some(ref email) = req.recovery_email {
+        if !email.is_empty() {
+            validation::validate_email_format("recovery_email", email)?;
+        }
+    }
+    Ok(())
 }

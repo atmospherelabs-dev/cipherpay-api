@@ -5,6 +5,7 @@ pub mod products;
 pub mod rates;
 pub mod status;
 
+use actix_governor::{Governor, GovernorConfigBuilder};
 use actix_web::web;
 use actix_web_lab::sse;
 use base64::Engine;
@@ -13,23 +14,37 @@ use std::time::Duration;
 use tokio::time::interval;
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
+    let auth_rate_limit = GovernorConfigBuilder::default()
+        .seconds_per_request(10)
+        .burst_size(5)
+        .finish()
+        .expect("Failed to build auth rate limiter");
+
     cfg.service(
         web::scope("/api")
             .route("/health", web::get().to(health))
-            // Merchant registration (public)
-            .route("/merchants", web::post().to(merchants::create))
-            // Auth / session management
-            .route("/auth/session", web::post().to(auth::create_session))
-            .route("/auth/logout", web::post().to(auth::logout))
-            .route("/auth/recover", web::post().to(auth::recover))
-            .route("/auth/recover/confirm", web::post().to(auth::recover_confirm))
-            // Dashboard endpoints (cookie auth)
-            .route("/merchants/me", web::get().to(auth::me))
-            .route("/merchants/me", web::patch().to(auth::update_me))
-            .route("/merchants/me/invoices", web::get().to(auth::my_invoices))
-            .route("/merchants/me/regenerate-api-key", web::post().to(auth::regenerate_api_key))
-            .route("/merchants/me/regenerate-dashboard-token", web::post().to(auth::regenerate_dashboard_token))
-            .route("/merchants/me/regenerate-webhook-secret", web::post().to(auth::regenerate_webhook_secret))
+            .service(
+                web::scope("/merchants")
+                    .wrap(Governor::new(&auth_rate_limit))
+                    .route("", web::post().to(merchants::create))
+                    .route("/me", web::get().to(auth::me))
+                    .route("/me", web::patch().to(auth::update_me))
+                    .route("/me/invoices", web::get().to(auth::my_invoices))
+                    .route("/me/regenerate-api-key", web::post().to(auth::regenerate_api_key))
+                    .route("/me/regenerate-dashboard-token", web::post().to(auth::regenerate_dashboard_token))
+                    .route("/me/regenerate-webhook-secret", web::post().to(auth::regenerate_webhook_secret))
+                    .route("/me/billing", web::get().to(billing_summary))
+                    .route("/me/billing/history", web::get().to(billing_history))
+                    .route("/me/billing/settle", web::post().to(billing_settle))
+            )
+            .service(
+                web::scope("/auth")
+                    .wrap(Governor::new(&auth_rate_limit))
+                    .route("/session", web::post().to(auth::create_session))
+                    .route("/logout", web::post().to(auth::logout))
+                    .route("/recover", web::post().to(auth::recover))
+                    .route("/recover/confirm", web::post().to(auth::recover_confirm))
+            )
             // Product endpoints (dashboard auth)
             .route("/products", web::post().to(products::create))
             .route("/products", web::get().to(products::list))
@@ -54,14 +69,9 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 web::post().to(simulate_confirm),
             )
             .route("/invoices/{id}/cancel", web::post().to(cancel_invoice))
-            .route("/invoices/{id}/ship", web::post().to(ship_invoice))
             .route("/invoices/{id}/refund", web::post().to(refund_invoice))
             .route("/invoices/{id}/qr", web::get().to(qr_code))
-            .route("/rates", web::get().to(rates::get))
-            // Billing endpoints (dashboard auth)
-            .route("/merchants/me/billing", web::get().to(billing_summary))
-            .route("/merchants/me/billing/history", web::get().to(billing_history))
-            .route("/merchants/me/billing/settle", web::post().to(billing_settle)),
+            .route("/rates", web::get().to(rates::get)),
     );
 }
 
@@ -73,6 +83,10 @@ async fn checkout(
     price_service: web::Data<crate::invoices::pricing::PriceService>,
     body: web::Json<CheckoutRequest>,
 ) -> actix_web::HttpResponse {
+    if let Err(e) = validate_checkout(&body) {
+        return actix_web::HttpResponse::BadRequest().json(e.to_json());
+    }
+
     let product = match crate::products::get_product(pool.get_ref(), &body.product_id).await {
         Ok(Some(p)) if p.active == 1 => p,
         Ok(Some(_)) => {
@@ -97,7 +111,7 @@ async fn checkout(
         }
     }
 
-    let merchant = match crate::merchants::get_all_merchants(pool.get_ref()).await {
+    let merchant = match crate::merchants::get_all_merchants(pool.get_ref(), &config.encryption_key).await {
         Ok(merchants) => match merchants.into_iter().find(|m| m.id == product.merchant_id) {
             Some(m) => m,
             None => {
@@ -140,9 +154,6 @@ async fn checkout(
         size: body.variant.clone(),
         price_eur: product.price_eur,
         currency: Some(product.currency.clone()),
-        shipping_alias: body.shipping_alias.clone(),
-        shipping_address: body.shipping_address.clone(),
-        shipping_region: body.shipping_region.clone(),
         refund_address: body.refund_address.clone(),
     };
 
@@ -158,7 +169,7 @@ async fn checkout(
     match crate::invoices::create_invoice(
         pool.get_ref(),
         &merchant.id,
-        &merchant.payment_address,
+        &merchant.ufvk,
         &invoice_req,
         rates.zec_eur,
         rates.zec_usd,
@@ -181,10 +192,18 @@ async fn checkout(
 struct CheckoutRequest {
     product_id: String,
     variant: Option<String>,
-    shipping_alias: Option<String>,
-    shipping_address: Option<String>,
-    shipping_region: Option<String>,
     refund_address: Option<String>,
+}
+
+fn validate_checkout(req: &CheckoutRequest) -> Result<(), crate::validation::ValidationError> {
+    crate::validation::validate_length("product_id", &req.product_id, 100)?;
+    crate::validation::validate_optional_length("variant", &req.variant, 100)?;
+    if let Some(ref addr) = req.refund_address {
+        if !addr.is_empty() {
+            crate::validation::validate_zcash_address("refund_address", addr)?;
+        }
+    }
+    Ok(())
 }
 
 async fn health() -> actix_web::HttpResponse {
@@ -206,7 +225,9 @@ async fn list_invoices(
             if let Some(auth_header) = req.headers().get("Authorization") {
                 if let Ok(auth_str) = auth_header.to_str() {
                     let key = auth_str.strip_prefix("Bearer ").unwrap_or(auth_str).trim();
-                    match crate::merchants::authenticate(&pool, key).await {
+                    let enc_key = req.app_data::<web::Data<crate::config::Config>>()
+                        .map(|c| c.encryption_key.clone()).unwrap_or_default();
+                    match crate::merchants::authenticate(&pool, key, &enc_key).await {
                         Ok(Some(m)) => m,
                         _ => return actix_web::HttpResponse::Unauthorized().json(serde_json::json!({"error": "Invalid API key"})),
                     }
@@ -223,9 +244,8 @@ async fn list_invoices(
         "SELECT id, merchant_id, memo_code, product_name, size,
          price_eur, price_usd, currency, price_zec, zec_rate_at_creation, payment_address, zcash_uri,
          status, detected_txid,
-         detected_at, expires_at, confirmed_at, shipped_at, refunded_at,
-         shipping_alias, shipping_address, shipping_region, refund_address,
-         created_at
+         detected_at, expires_at, confirmed_at, refunded_at,
+         refund_address, created_at
          FROM invoices WHERE merchant_id = ? ORDER BY created_at DESC LIMIT 50",
     )
     .bind(&merchant.id)
@@ -256,11 +276,7 @@ async fn list_invoices(
                         "detected_at": r.get::<Option<String>, _>("detected_at"),
                         "expires_at": r.get::<String, _>("expires_at"),
                         "confirmed_at": r.get::<Option<String>, _>("confirmed_at"),
-                        "shipped_at": r.get::<Option<String>, _>("shipped_at"),
                         "refunded_at": r.get::<Option<String>, _>("refunded_at"),
-                        "shipping_alias": r.get::<Option<String>, _>("shipping_alias"),
-                        "shipping_address": r.get::<Option<String>, _>("shipping_address"),
-                        "shipping_region": r.get::<Option<String>, _>("shipping_region"),
                         "refund_address": r.get::<Option<String>, _>("refund_address"),
                         "created_at": r.get::<String, _>("created_at"),
                     })
@@ -284,7 +300,27 @@ async fn lookup_by_memo(
     let memo_code = path.into_inner();
 
     match crate::invoices::get_invoice_by_memo(pool.get_ref(), &memo_code).await {
-        Ok(Some(invoice)) => actix_web::HttpResponse::Ok().json(invoice),
+        Ok(Some(inv)) => actix_web::HttpResponse::Ok().json(serde_json::json!({
+            "id": inv.id,
+            "memo_code": inv.memo_code,
+            "product_name": inv.product_name,
+            "size": inv.size,
+            "price_eur": inv.price_eur,
+            "price_usd": inv.price_usd,
+            "currency": inv.currency,
+            "price_zec": inv.price_zec,
+            "zec_rate_at_creation": inv.zec_rate_at_creation,
+            "payment_address": inv.payment_address,
+            "zcash_uri": inv.zcash_uri,
+            "merchant_name": inv.merchant_name,
+            "status": inv.status,
+            "detected_txid": inv.detected_txid,
+            "detected_at": inv.detected_at,
+            "confirmed_at": inv.confirmed_at,
+            "refunded_at": inv.refunded_at,
+            "expires_at": inv.expires_at,
+            "created_at": inv.created_at,
+        })),
         Ok(None) => actix_web::HttpResponse::NotFound().json(serde_json::json!({
             "error": "No invoice found for this memo code"
         })),
@@ -463,46 +499,6 @@ async fn cancel_invoice(
     }
 }
 
-/// Mark a confirmed invoice as shipped (dashboard auth)
-async fn ship_invoice(
-    req: actix_web::HttpRequest,
-    pool: web::Data<SqlitePool>,
-    config: web::Data<crate::config::Config>,
-    path: web::Path<String>,
-) -> actix_web::HttpResponse {
-    let merchant = match auth::resolve_session(&req, &pool).await {
-        Some(m) => m,
-        None => {
-            return actix_web::HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Not authenticated"
-            }));
-        }
-    };
-
-    let invoice_id = path.into_inner();
-
-    match crate::invoices::get_invoice(pool.get_ref(), &invoice_id).await {
-        Ok(Some(inv)) if inv.merchant_id == merchant.id && inv.status == "confirmed" => {
-            if let Err(e) = crate::invoices::mark_shipped(pool.get_ref(), &invoice_id, config.data_purge_days).await {
-                return actix_web::HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": format!("{}", e)
-                }));
-            }
-            actix_web::HttpResponse::Ok().json(serde_json::json!({ "status": "shipped" }))
-        }
-        Ok(Some(_)) => {
-            actix_web::HttpResponse::BadRequest().json(serde_json::json!({
-                "error": "Only confirmed invoices can be marked as shipped"
-            }))
-        }
-        _ => {
-            actix_web::HttpResponse::NotFound().json(serde_json::json!({
-                "error": "Invoice not found"
-            }))
-        }
-    }
-}
-
 /// Mark an invoice as refunded (dashboard auth)
 async fn refund_invoice(
     req: actix_web::HttpRequest,
@@ -521,7 +517,7 @@ async fn refund_invoice(
     let invoice_id = path.into_inner();
 
     match crate::invoices::get_invoice(pool.get_ref(), &invoice_id).await {
-        Ok(Some(inv)) if inv.merchant_id == merchant.id && (inv.status == "confirmed" || inv.status == "shipped") => {
+        Ok(Some(inv)) if inv.merchant_id == merchant.id && inv.status == "confirmed" => {
             if let Err(e) = crate::invoices::mark_refunded(pool.get_ref(), &invoice_id).await {
                 return actix_web::HttpResponse::InternalServerError().json(serde_json::json!({
                     "error": format!("{}", e)
@@ -535,7 +531,7 @@ async fn refund_invoice(
         }
         Ok(Some(_)) => {
             actix_web::HttpResponse::BadRequest().json(serde_json::json!({
-                "error": "Only confirmed or shipped invoices can be refunded"
+                "error": "Only confirmed invoices can be refunded"
             }))
         }
         _ => {

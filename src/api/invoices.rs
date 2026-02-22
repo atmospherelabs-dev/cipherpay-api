@@ -4,6 +4,7 @@ use sqlx::SqlitePool;
 use crate::config::Config;
 use crate::invoices::{self, CreateInvoiceRequest};
 use crate::invoices::pricing::PriceService;
+use crate::validation;
 
 pub async fn create(
     req: HttpRequest,
@@ -12,6 +13,10 @@ pub async fn create(
     price_service: web::Data<PriceService>,
     body: web::Json<CreateInvoiceRequest>,
 ) -> HttpResponse {
+    if let Err(e) = validate_invoice_request(&body) {
+        return HttpResponse::BadRequest().json(e.to_json());
+    }
+
     let merchant = match resolve_merchant(&req, &pool, &config).await {
         Some(m) => m,
         None => {
@@ -54,7 +59,7 @@ pub async fn create(
     match invoices::create_invoice(
         pool.get_ref(),
         &merchant.id,
-        &merchant.payment_address,
+        &merchant.ufvk,
         &body,
         rates.zec_eur,
         rates.zec_usd,
@@ -114,7 +119,6 @@ pub async fn get(
                 "detected_txid": inv.detected_txid,
                 "detected_at": inv.detected_at,
                 "confirmed_at": inv.confirmed_at,
-                "shipped_at": inv.shipped_at,
                 "refunded_at": inv.refunded_at,
                 "expires_at": inv.expires_at,
                 "created_at": inv.created_at,
@@ -143,7 +147,7 @@ async fn resolve_merchant(
                 .trim();
 
             if key.starts_with("cpay_sk_") || key.starts_with("cpay_") {
-                return crate::merchants::authenticate(pool, key)
+                return crate::merchants::authenticate(pool, key, &config.encryption_key)
                     .await
                     .ok()
                     .flatten();
@@ -157,7 +161,7 @@ async fn resolve_merchant(
 
     // Single-tenant fallback: ONLY in testnet mode
     if config.is_testnet() {
-        return crate::merchants::get_all_merchants(pool)
+        return crate::merchants::get_all_merchants(pool, &config.encryption_key)
             .await
             .ok()
             .and_then(|m| {
@@ -174,4 +178,20 @@ async fn resolve_merchant(
     }
 
     None
+}
+
+fn validate_invoice_request(req: &CreateInvoiceRequest) -> Result<(), validation::ValidationError> {
+    validation::validate_optional_length("product_id", &req.product_id, 100)?;
+    validation::validate_optional_length("product_name", &req.product_name, 200)?;
+    validation::validate_optional_length("size", &req.size, 100)?;
+    validation::validate_optional_length("currency", &req.currency, 10)?;
+    if let Some(ref addr) = req.refund_address {
+        if !addr.is_empty() {
+            validation::validate_zcash_address("refund_address", addr)?;
+        }
+    }
+    if req.price_eur < 0.0 {
+        return Err(validation::ValidationError::invalid("price_eur", "must be non-negative"));
+    }
+    Ok(())
 }

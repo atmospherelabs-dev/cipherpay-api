@@ -59,7 +59,6 @@ pub async fn run(config: Config, pool: SqlitePool, http: reqwest::Client) {
         loop {
             interval.tick().await;
             let _ = invoices::expire_old_invoices(&block_pool).await;
-            let _ = invoices::purge_old_data(&block_pool).await;
 
             if let Err(e) = scan_blocks(&block_config, &block_pool, &block_http, &block_seen, &last_height).await {
                 tracing::error!(error = %e, "Block scan error");
@@ -81,7 +80,7 @@ async fn scan_mempool(
         return Ok(());
     }
 
-    let merchants = crate::merchants::get_all_merchants(pool).await?;
+    let merchants = crate::merchants::get_all_merchants(pool, &config.encryption_key).await?;
     if merchants.is_empty() {
         return Ok(());
     }
@@ -111,26 +110,29 @@ async fn scan_mempool(
 
     for (txid, raw_hex) in &raw_txs {
         for merchant in &merchants {
-            match decrypt::try_decrypt_outputs(raw_hex, &merchant.ufvk) {
-                Ok(Some(output)) => {
-                    tracing::info!(txid, memo = %output.memo, amount = output.amount_zec, "Decrypted mempool tx");
-                    if let Some(invoice) = matching::find_matching_invoice(&pending, &output.memo) {
-                        let min_amount = invoice.price_zec * decrypt::SLIPPAGE_TOLERANCE;
-                        if output.amount_zec >= min_amount {
-                            invoices::mark_detected(pool, &invoice.id, txid).await?;
-                            webhooks::dispatch(pool, http, &invoice.id, "detected", txid).await?;
-                            try_detect_fee(pool, config, raw_hex, &invoice.id).await;
-                        } else {
-                            tracing::warn!(
-                                txid,
-                                expected = invoice.price_zec,
-                                received = output.amount_zec,
-                                "Underpaid invoice, ignoring"
-                            );
+            match decrypt::try_decrypt_all_outputs(raw_hex, &merchant.ufvk) {
+                Ok(outputs) => {
+                    for output in &outputs {
+                        let recipient_hex = hex::encode(output.recipient_raw);
+                        tracing::info!(txid, memo = %output.memo, amount = output.amount_zec, "Decrypted mempool tx");
+
+                        if let Some(invoice) = matching::find_matching_invoice(&pending, &recipient_hex, &output.memo) {
+                            let min_amount = invoice.price_zec * decrypt::SLIPPAGE_TOLERANCE;
+                            if output.amount_zec >= min_amount {
+                                invoices::mark_detected(pool, &invoice.id, txid).await?;
+                                webhooks::dispatch(pool, http, &invoice.id, "detected", txid).await?;
+                                try_detect_fee(pool, config, raw_hex, &invoice.id).await;
+                            } else {
+                                tracing::warn!(
+                                    txid,
+                                    expected = invoice.price_zec,
+                                    received = output.amount_zec,
+                                    "Underpaid invoice, ignoring"
+                                );
+                            }
                         }
                     }
                 }
-                Ok(None) => {}
                 Err(_) => {}
             }
         }
@@ -177,7 +179,7 @@ async fn scan_blocks(
     };
 
     if start_height <= current_height && start_height < current_height {
-        let merchants = crate::merchants::get_all_merchants(pool).await?;
+        let merchants = crate::merchants::get_all_merchants(pool, &config.encryption_key).await?;
         let block_txids = blocks::fetch_block_txids(http, &config.cipherscan_api_url, start_height, current_height).await?;
 
         for txid in &block_txids {
@@ -191,22 +193,25 @@ async fn scan_blocks(
             };
 
             for merchant in &merchants {
-                if let Ok(Some(output)) = decrypt::try_decrypt_outputs(&raw_hex, &merchant.ufvk) {
-                    if let Some(invoice) = matching::find_matching_invoice(&pending, &output.memo) {
-                        let min_amount = invoice.price_zec * decrypt::SLIPPAGE_TOLERANCE;
-                        if invoice.status == "pending" && output.amount_zec >= min_amount {
-                            invoices::mark_detected(pool, &invoice.id, txid).await?;
-                            invoices::mark_confirmed(pool, &invoice.id).await?;
-                            webhooks::dispatch(pool, http, &invoice.id, "confirmed", txid).await?;
-                            on_invoice_confirmed(pool, config, invoice).await;
-                            try_detect_fee(pool, config, &raw_hex, &invoice.id).await;
-                        } else if output.amount_zec < min_amount {
-                            tracing::warn!(
-                                txid,
-                                expected = invoice.price_zec,
-                                received = output.amount_zec,
-                                "Underpaid invoice in block, ignoring"
-                            );
+                if let Ok(outputs) = decrypt::try_decrypt_all_outputs(&raw_hex, &merchant.ufvk) {
+                    for output in &outputs {
+                        let recipient_hex = hex::encode(output.recipient_raw);
+                        if let Some(invoice) = matching::find_matching_invoice(&pending, &recipient_hex, &output.memo) {
+                            let min_amount = invoice.price_zec * decrypt::SLIPPAGE_TOLERANCE;
+                            if invoice.status == "pending" && output.amount_zec >= min_amount {
+                                invoices::mark_detected(pool, &invoice.id, txid).await?;
+                                invoices::mark_confirmed(pool, &invoice.id).await?;
+                                webhooks::dispatch(pool, http, &invoice.id, "confirmed", txid).await?;
+                                on_invoice_confirmed(pool, config, invoice).await;
+                                try_detect_fee(pool, config, &raw_hex, &invoice.id).await;
+                            } else if output.amount_zec < min_amount {
+                                tracing::warn!(
+                                    txid,
+                                    expected = invoice.price_zec,
+                                    received = output.amount_zec,
+                                    "Underpaid invoice in block, ignoring"
+                                );
+                            }
                         }
                     }
                 }

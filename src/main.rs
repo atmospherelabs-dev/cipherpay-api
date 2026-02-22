@@ -1,12 +1,15 @@
+mod addresses;
 mod api;
 mod billing;
 mod config;
+mod crypto;
 mod db;
 mod email;
 mod invoices;
 mod merchants;
 mod products;
 mod scanner;
+mod validation;
 mod webhooks;
 
 use actix_cors::Cors;
@@ -26,6 +29,7 @@ async fn main() -> anyhow::Result<()> {
 
     let config = config::Config::from_env()?;
     let pool = db::create_pool(&config.database_url).await?;
+    db::migrate_encrypt_ufvks(&pool, &config.encryption_key).await?;
     let http_client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
@@ -110,6 +114,7 @@ async fn main() -> anyhow::Result<()> {
         App::new()
             .wrap(cors)
             .wrap(Governor::new(&rate_limit))
+            .app_data(web::JsonConfig::default().limit(65_536))
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(config.clone()))
             .app_data(web::Data::new(price_service.clone()))

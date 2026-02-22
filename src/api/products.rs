@@ -2,6 +2,7 @@ use actix_web::{web, HttpRequest, HttpResponse};
 use sqlx::SqlitePool;
 
 use crate::products::{self, CreateProductRequest, UpdateProductRequest};
+use crate::validation;
 
 pub async fn create(
     req: HttpRequest,
@@ -16,6 +17,10 @@ pub async fn create(
             }));
         }
     };
+
+    if let Err(e) = validate_product_create(&body) {
+        return HttpResponse::BadRequest().json(e.to_json());
+    }
 
     match products::create_product(pool.get_ref(), &merchant.id, &body).await {
         Ok(product) => HttpResponse::Created().json(product),
@@ -75,6 +80,10 @@ pub async fn update(
     };
 
     let product_id = path.into_inner();
+
+    if let Err(e) = validate_product_update(&body) {
+        return HttpResponse::BadRequest().json(e.to_json());
+    }
 
     match products::update_product(pool.get_ref(), &product_id, &merchant.id, &body).await {
         Ok(Some(product)) => HttpResponse::Ok().json(product),
@@ -143,4 +152,47 @@ pub async fn get_public(
             "error": "Product not found"
         })),
     }
+}
+
+fn validate_product_create(req: &CreateProductRequest) -> Result<(), validation::ValidationError> {
+    validation::validate_length("slug", &req.slug, 100)?;
+    validation::validate_length("name", &req.name, 200)?;
+    if let Some(ref desc) = req.description {
+        validation::validate_length("description", desc, 2000)?;
+    }
+    if req.price_eur < 0.0 {
+        return Err(validation::ValidationError::invalid("price_eur", "must be non-negative"));
+    }
+    if let Some(ref variants) = req.variants {
+        if variants.len() > 50 {
+            return Err(validation::ValidationError::invalid("variants", "too many variants (max 50)"));
+        }
+        for v in variants {
+            validation::validate_length("variant", v, 100)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_product_update(req: &UpdateProductRequest) -> Result<(), validation::ValidationError> {
+    if let Some(ref name) = req.name {
+        validation::validate_length("name", name, 200)?;
+    }
+    if let Some(ref desc) = req.description {
+        validation::validate_length("description", desc, 2000)?;
+    }
+    if let Some(price) = req.price_eur {
+        if price < 0.0 {
+            return Err(validation::ValidationError::invalid("price_eur", "must be non-negative"));
+        }
+    }
+    if let Some(ref variants) = req.variants {
+        if variants.len() > 50 {
+            return Err(validation::ValidationError::invalid("variants", "too many variants (max 50)"));
+        }
+        for v in variants {
+            validation::validate_length("variant", v, 100)?;
+        }
+    }
+    Ok(())
 }

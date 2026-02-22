@@ -22,19 +22,20 @@ pub struct Invoice {
     pub payment_address: String,
     pub zcash_uri: String,
     pub merchant_name: Option<String>,
-    pub shipping_alias: Option<String>,
-    pub shipping_address: Option<String>,
-    pub shipping_region: Option<String>,
     pub refund_address: Option<String>,
     pub status: String,
     pub detected_txid: Option<String>,
     pub detected_at: Option<String>,
     pub confirmed_at: Option<String>,
-    pub shipped_at: Option<String>,
     pub refunded_at: Option<String>,
     pub expires_at: String,
     pub purge_after: Option<String>,
     pub created_at: String,
+    #[serde(skip_serializing)]
+    pub orchard_receiver_hex: Option<String>,
+    #[serde(skip_serializing)]
+    #[allow(dead_code)]
+    pub diversifier_index: Option<i64>,
 }
 
 #[derive(Debug, Serialize, FromRow)]
@@ -52,9 +53,6 @@ pub struct CreateInvoiceRequest {
     pub size: Option<String>,
     pub price_eur: f64,
     pub currency: Option<String>,
-    pub shipping_alias: Option<String>,
-    pub shipping_address: Option<String>,
-    pub shipping_region: Option<String>,
     pub refund_address: Option<String>,
 }
 
@@ -84,7 +82,7 @@ pub struct FeeConfig {
 pub async fn create_invoice(
     pool: &SqlitePool,
     merchant_id: &str,
-    payment_address: &str,
+    merchant_ufvk: &str,
     req: &CreateInvoiceRequest,
     zec_eur: f64,
     zec_usd: f64,
@@ -108,6 +106,10 @@ pub async fn create_invoice(
         .format("%Y-%m-%dT%H:%M:%SZ")
         .to_string();
     let created_at = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+
+    let div_index = crate::merchants::next_diversifier_index(pool, merchant_id).await?;
+    let derived = crate::addresses::derive_invoice_address(merchant_ufvk, div_index)?;
+    let payment_address = &derived.ua_string;
 
     let memo_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .encode(memo_code.as_bytes());
@@ -133,9 +135,9 @@ pub async fn create_invoice(
     sqlx::query(
         "INSERT INTO invoices (id, merchant_id, memo_code, product_id, product_name, size,
          price_eur, price_usd, currency, price_zec, zec_rate_at_creation, payment_address, zcash_uri,
-         shipping_alias, shipping_address,
-         shipping_region, refund_address, status, expires_at, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)"
+         refund_address, status, expires_at, created_at,
+         diversifier_index, orchard_receiver_hex)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)"
     )
     .bind(&id)
     .bind(merchant_id)
@@ -150,16 +152,20 @@ pub async fn create_invoice(
     .bind(zec_eur)
     .bind(payment_address)
     .bind(&zcash_uri)
-    .bind(&req.shipping_alias)
-    .bind(&req.shipping_address)
-    .bind(&req.shipping_region)
     .bind(&req.refund_address)
     .bind(&expires_at)
     .bind(&created_at)
+    .bind(div_index as i64)
+    .bind(&derived.orchard_receiver_hex)
     .execute(pool)
     .await?;
 
-    tracing::info!(invoice_id = %id, memo = %memo_code, "Invoice created");
+    tracing::info!(
+        invoice_id = %id,
+        memo = %memo_code,
+        diversifier_index = div_index,
+        "Invoice created with unique address"
+    );
 
     Ok(CreateInvoiceResponse {
         invoice_id: id,
@@ -181,9 +187,9 @@ pub async fn get_invoice(pool: &SqlitePool, id: &str) -> anyhow::Result<Option<I
          COALESCE(NULLIF(i.payment_address, ''), m.payment_address) AS payment_address,
          i.zcash_uri,
          NULLIF(m.name, '') AS merchant_name,
-         i.shipping_alias, i.shipping_address,
-         i.shipping_region, i.refund_address, i.status, i.detected_txid, i.detected_at,
-         i.confirmed_at, i.shipped_at, i.refunded_at, i.expires_at, i.purge_after, i.created_at
+         i.refund_address, i.status, i.detected_txid, i.detected_at,
+         i.confirmed_at, i.refunded_at, i.expires_at, i.purge_after, i.created_at,
+         i.orchard_receiver_hex, i.diversifier_index
          FROM invoices i
          LEFT JOIN merchants m ON m.id = i.merchant_id
          WHERE i.id = ?"
@@ -203,9 +209,9 @@ pub async fn get_invoice_by_memo(pool: &SqlitePool, memo_code: &str) -> anyhow::
          COALESCE(NULLIF(i.payment_address, ''), m.payment_address) AS payment_address,
          i.zcash_uri,
          NULLIF(m.name, '') AS merchant_name,
-         i.shipping_alias, i.shipping_address,
-         i.shipping_region, i.refund_address, i.status, i.detected_txid, i.detected_at,
-         i.confirmed_at, i.shipped_at, i.refunded_at, i.expires_at, i.purge_after, i.created_at
+         i.refund_address, i.status, i.detected_txid, i.detected_at,
+         i.confirmed_at, i.refunded_at, i.expires_at, i.purge_after, i.created_at,
+         i.orchard_receiver_hex, i.diversifier_index
          FROM invoices i
          LEFT JOIN merchants m ON m.id = i.merchant_id
          WHERE i.memo_code = ?"
@@ -233,9 +239,9 @@ pub async fn get_pending_invoices(pool: &SqlitePool) -> anyhow::Result<Vec<Invoi
         "SELECT id, merchant_id, memo_code, product_name, size,
          price_eur, price_usd, currency, price_zec, zec_rate_at_creation, payment_address, zcash_uri,
          NULL AS merchant_name,
-         shipping_alias, shipping_address,
-         shipping_region, refund_address, status, detected_txid, detected_at,
-         confirmed_at, shipped_at, NULL AS refunded_at, expires_at, purge_after, created_at
+         refund_address, status, detected_txid, detected_at,
+         confirmed_at, NULL AS refunded_at, expires_at, purge_after, created_at,
+         orchard_receiver_hex, diversifier_index
          FROM invoices WHERE status IN ('pending', 'detected')
          AND expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
     )
@@ -243,6 +249,25 @@ pub async fn get_pending_invoices(pool: &SqlitePool) -> anyhow::Result<Vec<Invoi
     .await?;
 
     Ok(rows)
+}
+
+/// Find a pending invoice by its Orchard receiver hex (O(1) indexed lookup).
+pub async fn find_by_orchard_receiver(pool: &SqlitePool, receiver_hex: &str) -> anyhow::Result<Option<Invoice>> {
+    let row = sqlx::query_as::<_, Invoice>(
+        "SELECT id, merchant_id, memo_code, product_name, size,
+         price_eur, price_usd, currency, price_zec, zec_rate_at_creation, payment_address, zcash_uri,
+         NULL AS merchant_name,
+         refund_address, status, detected_txid, detected_at,
+         confirmed_at, NULL AS refunded_at, expires_at, purge_after, created_at,
+         orchard_receiver_hex, diversifier_index
+         FROM invoices WHERE orchard_receiver_hex = ? AND status IN ('pending', 'detected')
+         AND expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
+    )
+    .bind(receiver_hex)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row)
 }
 
 pub async fn mark_detected(pool: &SqlitePool, invoice_id: &str, txid: &str) -> anyhow::Result<()> {
@@ -276,31 +301,11 @@ pub async fn mark_confirmed(pool: &SqlitePool, invoice_id: &str) -> anyhow::Resu
     Ok(())
 }
 
-pub async fn mark_shipped(pool: &SqlitePool, invoice_id: &str, purge_days: i64) -> anyhow::Result<()> {
-    let now = Utc::now();
-    let now_str = now.format("%Y-%m-%dT%H:%M:%SZ").to_string();
-    let purge_after = (now + Duration::days(purge_days))
-        .format("%Y-%m-%dT%H:%M:%SZ")
-        .to_string();
-    sqlx::query(
-        "UPDATE invoices SET status = 'shipped', shipped_at = ?, purge_after = ?
-         WHERE id = ? AND status = 'confirmed'"
-    )
-    .bind(&now_str)
-    .bind(&purge_after)
-    .bind(invoice_id)
-    .execute(pool)
-    .await?;
-
-    tracing::info!(invoice_id, purge_after = %purge_after, "Invoice marked as shipped");
-    Ok(())
-}
-
 pub async fn mark_refunded(pool: &SqlitePool, invoice_id: &str) -> anyhow::Result<()> {
     let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     sqlx::query(
         "UPDATE invoices SET status = 'refunded', refunded_at = ?
-         WHERE id = ? AND status IN ('confirmed', 'shipped')"
+         WHERE id = ? AND status = 'confirmed'"
     )
     .bind(&now)
     .bind(invoice_id)
@@ -339,19 +344,3 @@ pub async fn expire_old_invoices(pool: &SqlitePool) -> anyhow::Result<u64> {
     Ok(count)
 }
 
-pub async fn purge_old_data(pool: &SqlitePool) -> anyhow::Result<u64> {
-    let result = sqlx::query(
-        "UPDATE invoices SET shipping_alias = NULL, shipping_address = NULL
-         WHERE purge_after IS NOT NULL
-         AND purge_after < strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-         AND shipping_address IS NOT NULL"
-    )
-    .execute(pool)
-    .await?;
-
-    let count = result.rows_affected();
-    if count > 0 {
-        tracing::info!(count, "Purged shipping data");
-    }
-    Ok(count)
-}

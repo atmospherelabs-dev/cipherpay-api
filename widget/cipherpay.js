@@ -15,7 +15,7 @@
     detected: 'Payment detected! Confirming...',
     confirmed: 'Payment confirmed!',
     expired: 'Invoice expired',
-    shipped: 'Order shipped',
+    refunded: 'Payment refunded',
   };
 
   function loadStyles(apiUrl) {

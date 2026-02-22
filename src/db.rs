@@ -105,19 +105,21 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
         .await
         .ok();
 
-    // Remove old CHECK constraint on invoices.status to allow 'refunded'
+    // Remove old CHECK constraint on invoices.status to allow 'refunded' and remove 'shipped'
     // SQLite doesn't support ALTER CONSTRAINT, so we check if the constraint blocks us
     // and recreate the table if needed.
     let needs_migrate: bool = sqlx::query_scalar::<_, i32>(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='invoices'
-         AND sql LIKE '%CHECK%' AND sql NOT LIKE '%refunded%'"
+         AND sql LIKE '%CHECK%' AND (sql NOT LIKE '%refunded%' OR sql LIKE '%shipped%')"
     )
     .fetch_one(&pool)
     .await
     .unwrap_or(0) > 0;
 
     if needs_migrate {
-        tracing::info!("Migrating invoices table to add 'refunded' status...");
+        tracing::info!("Migrating invoices table (removing shipped status)...");
+        sqlx::query("UPDATE invoices SET status = 'confirmed' WHERE status = 'shipped'")
+            .execute(&pool).await.ok();
         sqlx::query("ALTER TABLE invoices RENAME TO invoices_old")
             .execute(&pool).await.ok();
         sqlx::query(
@@ -135,16 +137,12 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
                 zec_rate_at_creation REAL NOT NULL,
                 payment_address TEXT NOT NULL DEFAULT '',
                 zcash_uri TEXT NOT NULL DEFAULT '',
-                shipping_alias TEXT,
-                shipping_address TEXT,
-                shipping_region TEXT,
                 refund_address TEXT,
                 status TEXT NOT NULL DEFAULT 'pending'
-                    CHECK (status IN ('pending', 'detected', 'confirmed', 'expired', 'shipped', 'refunded')),
+                    CHECK (status IN ('pending', 'detected', 'confirmed', 'expired', 'refunded')),
                 detected_txid TEXT,
                 detected_at TEXT,
                 confirmed_at TEXT,
-                shipped_at TEXT,
                 refunded_at TEXT,
                 expires_at TEXT NOT NULL,
                 purge_after TEXT,
@@ -155,9 +153,8 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
             "INSERT INTO invoices SELECT
                 id, merchant_id, memo_code, product_id, product_name, size,
                 price_eur, price_usd, currency, price_zec, zec_rate_at_creation,
-                payment_address, zcash_uri, shipping_alias, shipping_address,
-                shipping_region, refund_address, status, detected_txid, detected_at,
-                confirmed_at, shipped_at, refunded_at, expires_at, purge_after, created_at
+                payment_address, zcash_uri, refund_address, status, detected_txid, detected_at,
+                confirmed_at, refunded_at, expires_at, purge_after, created_at
              FROM invoices_old"
         ).execute(&pool).await.ok();
         sqlx::query("DROP TABLE invoices_old").execute(&pool).await.ok();
@@ -172,6 +169,16 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
         .execute(&pool)
         .await
         .ok();
+
+    // Diversified addresses: per-invoice unique address derivation
+    sqlx::query("ALTER TABLE merchants ADD COLUMN diversifier_index INTEGER NOT NULL DEFAULT 0")
+        .execute(&pool).await.ok();
+    sqlx::query("ALTER TABLE invoices ADD COLUMN diversifier_index INTEGER")
+        .execute(&pool).await.ok();
+    sqlx::query("ALTER TABLE invoices ADD COLUMN orchard_receiver_hex TEXT")
+        .execute(&pool).await.ok();
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_invoices_orchard_receiver ON invoices(orchard_receiver_hex)")
+        .execute(&pool).await.ok();
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS recovery_tokens (
@@ -246,4 +253,34 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
 
     tracing::info!("Database ready (SQLite)");
     Ok(pool)
+}
+
+/// Encrypt any plaintext UFVKs in the database. Called once at startup when
+/// ENCRYPTION_KEY is set. Plaintext UFVKs are identified by their "uview"/"utest" prefix.
+pub async fn migrate_encrypt_ufvks(pool: &SqlitePool, encryption_key: &str) -> anyhow::Result<()> {
+    if encryption_key.is_empty() {
+        return Ok(());
+    }
+
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT id, ufvk FROM merchants WHERE ufvk LIKE 'uview%' OR ufvk LIKE 'utest%'"
+    )
+    .fetch_all(pool)
+    .await?;
+
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    tracing::info!(count = rows.len(), "Encrypting plaintext UFVKs at rest");
+    for (id, ufvk) in &rows {
+        let encrypted = crate::crypto::encrypt(ufvk, encryption_key)?;
+        sqlx::query("UPDATE merchants SET ufvk = ? WHERE id = ?")
+            .bind(&encrypted)
+            .bind(id)
+            .execute(pool)
+            .await?;
+    }
+    tracing::info!("UFVK encryption migration complete");
+    Ok(())
 }

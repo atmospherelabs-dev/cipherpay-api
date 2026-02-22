@@ -32,15 +32,11 @@ CREATE TABLE IF NOT EXISTS invoices (
     zec_rate_at_creation REAL NOT NULL,
     payment_address TEXT NOT NULL DEFAULT '',
     zcash_uri TEXT NOT NULL DEFAULT '',
-    shipping_alias TEXT,
-    shipping_address TEXT,
-    shipping_region TEXT,
     status TEXT NOT NULL DEFAULT 'pending'
-        CHECK (status IN ('pending', 'detected', 'confirmed', 'expired', 'shipped', 'refunded')),
+        CHECK (status IN ('pending', 'detected', 'confirmed', 'expired', 'refunded')),
     detected_txid TEXT,
     detected_at TEXT,
     confirmed_at TEXT,
-    shipped_at TEXT,
     expires_at TEXT NOT NULL,
     purge_after TEXT,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))

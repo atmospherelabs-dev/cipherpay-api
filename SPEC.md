@@ -12,7 +12,7 @@ CipherPay is a standalone Rust microservice for accepting shielded Zcash payment
 - **Mempool detection** for near-instant payment feedback (~5s vs ~75s+ for competitors)
 - **No extra infrastructure** -- uses CipherScan APIs, no Zebra node needed
 - **Embeddable widget** -- drop-in JS for any website, not just WooCommerce
-- **Privacy-first** -- shipping data auto-purged after 30 days
+- **Privacy-first** -- no buyer PII stored, pure payment processor
 
 ---
 
@@ -86,10 +86,7 @@ Create a payment invoice.
 {
   "product_name": "[REDACTED] Tee",
   "size": "L",
-  "price_eur": 65.00,
-  "shipping_alias": "anon",
-  "shipping_address": "PO Box 42, Berlin",
-  "shipping_region": "eu"
+  "price_eur": 65.00
 }
 ```
 
@@ -140,7 +137,7 @@ Lightweight status endpoint for widget polling.
 }
 ```
 
-Status values: `pending` → `detected` → `confirmed` → `shipped` (or `expired`)
+Status values: `pending` → `detected` → `confirmed` (or `expired` / `refunded`)
 
 ### `GET /api/rates`
 
@@ -186,8 +183,6 @@ The widget:
 4. **Status: detected** -- invoice updated, webhook fired, widget shows "Payment detected!"
 5. **Block confirmation (~75s)** -- scanner checks if the detected txid is now in a block
 6. **Status: confirmed** -- invoice updated, webhook fired, widget shows "Confirmed!"
-7. **Merchant ships** -- updates invoice to "shipped", purge timer starts
-8. **30 days later** -- shipping data auto-purged from database
 
 ---
 
@@ -213,16 +208,13 @@ The widget:
 | price_eur | FLOAT | Price in EUR |
 | price_zec | FLOAT | Price in ZEC at creation |
 | zec_rate_at_creation | FLOAT | ZEC/EUR rate when invoice was created |
-| shipping_alias | TEXT | Buyer's chosen name |
-| shipping_address | TEXT | Drop point / PO box (purged after 30d) |
-| shipping_region | TEXT | "eu" or "international" |
-| status | TEXT | pending/detected/confirmed/expired/shipped |
+| refund_address | TEXT | Buyer's optional Zcash refund address |
+| status | TEXT | pending/detected/confirmed/expired/refunded |
 | detected_txid | TEXT | Transaction ID when payment detected |
 | detected_at | TIMESTAMPTZ | When payment was first seen |
 | confirmed_at | TIMESTAMPTZ | When block confirmation received |
-| shipped_at | TIMESTAMPTZ | When merchant marked as shipped |
+| refunded_at | TIMESTAMPTZ | When merchant marked as refunded |
 | expires_at | TIMESTAMPTZ | Invoice expiration time |
-| purge_after | TIMESTAMPTZ | Auto-set to shipped_at + 30 days |
 | created_at | TIMESTAMPTZ | Invoice creation timestamp |
 
 ### webhook_deliveries
@@ -268,7 +260,7 @@ cargo run
 | MEMPOOL_POLL_INTERVAL_SECS | 5 | How often to check mempool |
 | BLOCK_POLL_INTERVAL_SECS | 15 | How often to check for new blocks |
 | INVOICE_EXPIRY_MINUTES | 30 | Default invoice expiration |
-| DATA_PURGE_DAYS | 30 | Days after shipping to purge address data |
+| DATA_PURGE_DAYS | 30 | Reserved for future data retention policy |
 
 ### Docker (Production)
 
@@ -335,7 +327,7 @@ The scanner performs trial decryption on shielded transaction outputs:
 
 - **Viewing keys**: Stored on the server. Use a dedicated store wallet, not a personal wallet
 - **API keys**: SHA-256 hashed before storage, never stored in plaintext
-- **Shipping data**: Auto-purged 30 days after order is shipped
+- **No buyer PII**: CipherPay does not store shipping addresses, names, or other buyer personal data
 - **Webhooks**: Delivery tracked with retry, failed deliveries logged
 - **CORS**: Configurable, defaults to allow all origins for widget embedding
 - **No private keys**: CipherPay never holds spending keys. It's watch-only

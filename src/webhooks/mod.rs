@@ -45,6 +45,11 @@ pub async fn dispatch(
         _ => return Ok(()),
     };
 
+    if let Err(reason) = crate::validation::resolve_and_check_host(&webhook_url) {
+        tracing::warn!(invoice_id, url = %webhook_url, %reason, "Webhook blocked: SSRF protection");
+        return Ok(());
+    }
+
     let timestamp = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
     let payload = serde_json::json!({
@@ -118,6 +123,15 @@ pub async fn retry_failed(pool: &SqlitePool, http: &reqwest::Client) -> anyhow::
     .await?;
 
     for (id, url, payload, secret, attempts) in rows {
+        if let Err(reason) = crate::validation::resolve_and_check_host(&url) {
+            tracing::warn!(delivery_id = %id, %url, %reason, "Webhook retry blocked: SSRF protection");
+            sqlx::query("UPDATE webhook_deliveries SET status = 'failed' WHERE id = ?")
+                .bind(&id)
+                .execute(pool)
+                .await?;
+            continue;
+        }
+
         let body: serde_json::Value = serde_json::from_str(&payload)?;
         let ts = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
         let signature = sign_payload(&secret, &ts, &payload);

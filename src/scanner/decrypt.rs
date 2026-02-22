@@ -16,10 +16,11 @@ pub const SLIPPAGE_TOLERANCE: f64 = 0.995;
 pub struct DecryptedOutput {
     pub memo: String,
     pub amount_zec: f64,
+    pub recipient_raw: [u8; 43],
 }
 
 /// Parse a UFVK string and extract the Orchard FullViewingKey.
-fn parse_orchard_fvk(ufvk_str: &str) -> Result<FullViewingKey> {
+pub(crate) fn parse_orchard_fvk(ufvk_str: &str) -> Result<FullViewingKey> {
     let (_network, ufvk) = Ufvk::decode(ufvk_str)
         .map_err(|e| anyhow::anyhow!("UFVK decode failed: {:?}", e))?;
 
@@ -81,32 +82,35 @@ pub fn try_decrypt_all_outputs(raw_hex: &str, ufvk_str: &str) -> Result<Vec<Decr
             let prepared_ivk = PreparedIncomingViewingKey::new(&ivk);
 
             if let Some((note, _recipient, memo)) = try_note_decryption(&domain, &prepared_ivk, *action) {
+                let recipient_raw = note.recipient().to_raw_address_bytes();
                 let memo_bytes = memo.as_slice();
                 let memo_len = memo_bytes.iter()
                     .position(|&b| b == 0)
                     .unwrap_or(memo_bytes.len());
 
-                if memo_len == 0 {
-                    continue;
+                let memo_text = if memo_len > 0 {
+                    String::from_utf8(memo_bytes[..memo_len].to_vec())
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                };
+
+                let amount_zatoshis = note.value().inner();
+                let amount_zec = amount_zatoshis as f64 / 100_000_000.0;
+
+                if !memo_text.trim().is_empty() {
+                    tracing::info!(
+                        memo = %memo_text,
+                        amount_zec,
+                        "Decrypted Orchard output"
+                    );
                 }
 
-                if let Ok(memo_text) = String::from_utf8(memo_bytes[..memo_len].to_vec()) {
-                    if !memo_text.trim().is_empty() {
-                        let amount_zatoshis = note.value().inner();
-                        let amount_zec = amount_zatoshis as f64 / 100_000_000.0;
-
-                        tracing::info!(
-                            memo = %memo_text,
-                            amount_zec,
-                            "Decrypted Orchard output"
-                        );
-
-                        outputs.push(DecryptedOutput {
-                            memo: memo_text,
-                            amount_zec,
-                        });
-                    }
-                }
+                outputs.push(DecryptedOutput {
+                    memo: memo_text,
+                    amount_zec,
+                    recipient_raw,
+                });
             }
         }
     }
