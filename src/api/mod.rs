@@ -55,6 +55,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             )
             .route("/invoices/{id}/cancel", web::post().to(cancel_invoice))
             .route("/invoices/{id}/ship", web::post().to(ship_invoice))
+            .route("/invoices/{id}/refund", web::post().to(refund_invoice))
             .route("/invoices/{id}/qr", web::get().to(qr_code))
             .route("/rates", web::get().to(rates::get)),
     );
@@ -123,6 +124,7 @@ async fn checkout(
         product_name: Some(product.name.clone()),
         size: body.variant.clone(),
         price_eur: product.price_eur,
+        currency: Some(product.currency.clone()),
         shipping_alias: body.shipping_alias.clone(),
         shipping_address: body.shipping_address.clone(),
         shipping_region: body.shipping_region.clone(),
@@ -135,6 +137,7 @@ async fn checkout(
         &merchant.payment_address,
         &invoice_req,
         rates.zec_eur,
+        rates.zec_usd,
         config.invoice_expiry_minutes,
     )
     .await
@@ -191,16 +194,13 @@ async fn list_invoices(
         }
     };
 
-    let rows = sqlx::query_as::<_, (
-        String, String, String, Option<String>, Option<String>,
-        f64, f64, f64, String, String,
-        String, Option<String>,
-        Option<String>, String, Option<String>, String,
-    )>(
+    let rows = sqlx::query(
         "SELECT id, merchant_id, memo_code, product_name, size,
-         price_eur, price_zec, zec_rate_at_creation, payment_address, zcash_uri,
+         price_eur, price_usd, currency, price_zec, zec_rate_at_creation, payment_address, zcash_uri,
          status, detected_txid,
-         detected_at, expires_at, confirmed_at, created_at
+         detected_at, expires_at, confirmed_at, shipped_at, refunded_at,
+         shipping_alias, shipping_address, shipping_region, refund_address,
+         created_at
          FROM invoices WHERE merchant_id = ? ORDER BY created_at DESC LIMIT 50",
     )
     .bind(&merchant.id)
@@ -209,17 +209,35 @@ async fn list_invoices(
 
     match rows {
         Ok(rows) => {
+            use sqlx::Row;
             let invoices: Vec<_> = rows
                 .into_iter()
                 .map(|r| {
                     serde_json::json!({
-                        "id": r.0, "merchant_id": r.1, "memo_code": r.2,
-                        "product_name": r.3, "size": r.4, "price_eur": r.5,
-                        "price_zec": r.6, "zec_rate": r.7,
-                        "payment_address": r.8, "zcash_uri": r.9,
-                        "status": r.10,
-                        "detected_txid": r.11, "detected_at": r.12,
-                        "expires_at": r.13, "confirmed_at": r.14, "created_at": r.15,
+                        "id": r.get::<String, _>("id"),
+                        "merchant_id": r.get::<String, _>("merchant_id"),
+                        "memo_code": r.get::<String, _>("memo_code"),
+                        "product_name": r.get::<Option<String>, _>("product_name"),
+                        "size": r.get::<Option<String>, _>("size"),
+                        "price_eur": r.get::<f64, _>("price_eur"),
+                        "price_usd": r.get::<Option<f64>, _>("price_usd"),
+                        "currency": r.get::<Option<String>, _>("currency"),
+                        "price_zec": r.get::<f64, _>("price_zec"),
+                        "zec_rate": r.get::<f64, _>("zec_rate_at_creation"),
+                        "payment_address": r.get::<String, _>("payment_address"),
+                        "zcash_uri": r.get::<String, _>("zcash_uri"),
+                        "status": r.get::<String, _>("status"),
+                        "detected_txid": r.get::<Option<String>, _>("detected_txid"),
+                        "detected_at": r.get::<Option<String>, _>("detected_at"),
+                        "expires_at": r.get::<String, _>("expires_at"),
+                        "confirmed_at": r.get::<Option<String>, _>("confirmed_at"),
+                        "shipped_at": r.get::<Option<String>, _>("shipped_at"),
+                        "refunded_at": r.get::<Option<String>, _>("refunded_at"),
+                        "shipping_alias": r.get::<Option<String>, _>("shipping_alias"),
+                        "shipping_address": r.get::<Option<String>, _>("shipping_address"),
+                        "shipping_region": r.get::<Option<String>, _>("shipping_region"),
+                        "refund_address": r.get::<Option<String>, _>("refund_address"),
+                        "created_at": r.get::<String, _>("created_at"),
                     })
                 })
                 .collect();
@@ -431,6 +449,7 @@ async fn cancel_invoice(
 async fn ship_invoice(
     req: actix_web::HttpRequest,
     pool: web::Data<SqlitePool>,
+    config: web::Data<crate::config::Config>,
     path: web::Path<String>,
 ) -> actix_web::HttpResponse {
     let merchant = match auth::resolve_session(&req, &pool).await {
@@ -446,7 +465,7 @@ async fn ship_invoice(
 
     match crate::invoices::get_invoice(pool.get_ref(), &invoice_id).await {
         Ok(Some(inv)) if inv.merchant_id == merchant.id && inv.status == "confirmed" => {
-            if let Err(e) = crate::invoices::mark_shipped(pool.get_ref(), &invoice_id).await {
+            if let Err(e) = crate::invoices::mark_shipped(pool.get_ref(), &invoice_id, config.data_purge_days).await {
                 return actix_web::HttpResponse::InternalServerError().json(serde_json::json!({
                     "error": format!("{}", e)
                 }));
@@ -456,6 +475,49 @@ async fn ship_invoice(
         Ok(Some(_)) => {
             actix_web::HttpResponse::BadRequest().json(serde_json::json!({
                 "error": "Only confirmed invoices can be marked as shipped"
+            }))
+        }
+        _ => {
+            actix_web::HttpResponse::NotFound().json(serde_json::json!({
+                "error": "Invoice not found"
+            }))
+        }
+    }
+}
+
+/// Mark an invoice as refunded (dashboard auth)
+async fn refund_invoice(
+    req: actix_web::HttpRequest,
+    pool: web::Data<SqlitePool>,
+    path: web::Path<String>,
+) -> actix_web::HttpResponse {
+    let merchant = match auth::resolve_session(&req, &pool).await {
+        Some(m) => m,
+        None => {
+            return actix_web::HttpResponse::Unauthorized().json(serde_json::json!({
+                "error": "Not authenticated"
+            }));
+        }
+    };
+
+    let invoice_id = path.into_inner();
+
+    match crate::invoices::get_invoice(pool.get_ref(), &invoice_id).await {
+        Ok(Some(inv)) if inv.merchant_id == merchant.id && (inv.status == "confirmed" || inv.status == "shipped") => {
+            if let Err(e) = crate::invoices::mark_refunded(pool.get_ref(), &invoice_id).await {
+                return actix_web::HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("{}", e)
+                }));
+            }
+            let response = serde_json::json!({
+                "status": "refunded",
+                "refund_address": inv.refund_address,
+            });
+            actix_web::HttpResponse::Ok().json(response)
+        }
+        Ok(Some(_)) => {
+            actix_web::HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "Only confirmed or shipped invoices can be refunded"
             }))
         }
         _ => {

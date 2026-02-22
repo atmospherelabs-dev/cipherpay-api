@@ -37,6 +37,7 @@ pub async fn create(
         &merchant.payment_address,
         &body,
         rates.zec_eur,
+        rates.zec_usd,
         config.invoice_expiry_minutes,
     )
     .await
@@ -81,6 +82,8 @@ pub async fn get(
                 "product_name": inv.product_name,
                 "size": inv.size,
                 "price_eur": inv.price_eur,
+                "price_usd": inv.price_usd,
+                "currency": inv.currency,
                 "price_zec": inv.price_zec,
                 "zec_rate_at_creation": inv.zec_rate_at_creation,
                 "payment_address": inv.payment_address,
@@ -91,6 +94,7 @@ pub async fn get(
                 "detected_at": inv.detected_at,
                 "confirmed_at": inv.confirmed_at,
                 "shipped_at": inv.shipped_at,
+                "refunded_at": inv.refunded_at,
                 "expires_at": inv.expires_at,
                 "created_at": inv.created_at,
             }))

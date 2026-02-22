@@ -134,6 +134,7 @@ pub async fn get_public(
                 "name": product.name,
                 "description": product.description,
                 "price_eur": product.price_eur,
+                "currency": product.currency,
                 "variants": product.variants_list(),
                 "slug": product.slug,
             }))

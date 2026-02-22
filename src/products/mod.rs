@@ -10,6 +10,7 @@ pub struct Product {
     pub name: String,
     pub description: Option<String>,
     pub price_eur: f64,
+    pub currency: String,
     pub variants: Option<String>,
     pub active: i32,
     pub created_at: String,
@@ -21,6 +22,7 @@ pub struct CreateProductRequest {
     pub name: String,
     pub description: Option<String>,
     pub price_eur: f64,
+    pub currency: Option<String>,
     pub variants: Option<Vec<String>>,
 }
 
@@ -29,6 +31,7 @@ pub struct UpdateProductRequest {
     pub name: Option<String>,
     pub description: Option<String>,
     pub price_eur: Option<f64>,
+    pub currency: Option<String>,
     pub variants: Option<Vec<String>>,
     pub active: Option<bool>,
 }
@@ -55,12 +58,17 @@ pub async fn create_product(
         anyhow::bail!("slug must only contain letters, numbers, underscores, hyphens");
     }
 
+    let currency = req.currency.as_deref().unwrap_or("EUR");
+    if currency != "EUR" && currency != "USD" {
+        anyhow::bail!("currency must be EUR or USD");
+    }
+
     let id = Uuid::new_v4().to_string();
     let variants_json = req.variants.as_ref().map(|v| serde_json::to_string(v).unwrap_or_default());
 
     sqlx::query(
-        "INSERT INTO products (id, merchant_id, slug, name, description, price_eur, variants)
-         VALUES (?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO products (id, merchant_id, slug, name, description, price_eur, currency, variants)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
     )
     .bind(&id)
     .bind(merchant_id)
@@ -68,6 +76,7 @@ pub async fn create_product(
     .bind(&req.name)
     .bind(&req.description)
     .bind(req.price_eur)
+    .bind(currency)
     .bind(&variants_json)
     .execute(pool)
     .await?;
@@ -81,7 +90,7 @@ pub async fn create_product(
 
 pub async fn list_products(pool: &SqlitePool, merchant_id: &str) -> anyhow::Result<Vec<Product>> {
     let rows = sqlx::query_as::<_, Product>(
-        "SELECT id, merchant_id, slug, name, description, price_eur, variants, active, created_at
+        "SELECT id, merchant_id, slug, name, description, price_eur, currency, variants, active, created_at
          FROM products WHERE merchant_id = ? ORDER BY created_at DESC"
     )
     .bind(merchant_id)
@@ -93,7 +102,7 @@ pub async fn list_products(pool: &SqlitePool, merchant_id: &str) -> anyhow::Resu
 
 pub async fn get_product(pool: &SqlitePool, id: &str) -> anyhow::Result<Option<Product>> {
     let row = sqlx::query_as::<_, Product>(
-        "SELECT id, merchant_id, slug, name, description, price_eur, variants, active, created_at
+        "SELECT id, merchant_id, slug, name, description, price_eur, currency, variants, active, created_at
          FROM products WHERE id = ?"
     )
     .bind(id)
@@ -109,7 +118,7 @@ pub async fn get_product_by_slug(
     slug: &str,
 ) -> anyhow::Result<Option<Product>> {
     let row = sqlx::query_as::<_, Product>(
-        "SELECT id, merchant_id, slug, name, description, price_eur, variants, active, created_at
+        "SELECT id, merchant_id, slug, name, description, price_eur, currency, variants, active, created_at
          FROM products WHERE merchant_id = ? AND slug = ?"
     )
     .bind(merchant_id)
@@ -135,6 +144,10 @@ pub async fn update_product(
     let name = req.name.as_deref().unwrap_or(&existing.name);
     let description = req.description.as_ref().or(existing.description.as_ref());
     let price_eur = req.price_eur.unwrap_or(existing.price_eur);
+    let currency = req.currency.as_deref().unwrap_or(&existing.currency);
+    if currency != "EUR" && currency != "USD" {
+        anyhow::bail!("currency must be EUR or USD");
+    }
     let active = req.active.map(|a| if a { 1 } else { 0 }).unwrap_or(existing.active);
     let variants_json = req.variants.as_ref()
         .map(|v| serde_json::to_string(v).unwrap_or_default())
@@ -145,12 +158,13 @@ pub async fn update_product(
     }
 
     sqlx::query(
-        "UPDATE products SET name = ?, description = ?, price_eur = ?, variants = ?, active = ?
+        "UPDATE products SET name = ?, description = ?, price_eur = ?, currency = ?, variants = ?, active = ?
          WHERE id = ? AND merchant_id = ?"
     )
     .bind(name)
     .bind(description)
     .bind(price_eur)
+    .bind(currency)
     .bind(&variants_json)
     .bind(active)
     .bind(id)

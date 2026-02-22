@@ -85,6 +85,89 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
         .await
         .ok();
 
+    sqlx::query("ALTER TABLE invoices ADD COLUMN price_usd REAL")
+        .execute(&pool)
+        .await
+        .ok();
+
+    sqlx::query("ALTER TABLE invoices ADD COLUMN refunded_at TEXT")
+        .execute(&pool)
+        .await
+        .ok();
+
+    sqlx::query("ALTER TABLE products ADD COLUMN currency TEXT NOT NULL DEFAULT 'EUR'")
+        .execute(&pool)
+        .await
+        .ok();
+
+    sqlx::query("ALTER TABLE invoices ADD COLUMN currency TEXT")
+        .execute(&pool)
+        .await
+        .ok();
+
+    // Remove old CHECK constraint on invoices.status to allow 'refunded'
+    // SQLite doesn't support ALTER CONSTRAINT, so we check if the constraint blocks us
+    // and recreate the table if needed.
+    let needs_migrate: bool = sqlx::query_scalar::<_, i32>(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='invoices'
+         AND sql LIKE '%CHECK%' AND sql NOT LIKE '%refunded%'"
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap_or(0) > 0;
+
+    if needs_migrate {
+        tracing::info!("Migrating invoices table to add 'refunded' status...");
+        sqlx::query("ALTER TABLE invoices RENAME TO invoices_old")
+            .execute(&pool).await.ok();
+        sqlx::query(
+            "CREATE TABLE invoices (
+                id TEXT PRIMARY KEY,
+                merchant_id TEXT NOT NULL REFERENCES merchants(id),
+                memo_code TEXT NOT NULL UNIQUE,
+                product_id TEXT REFERENCES products(id),
+                product_name TEXT,
+                size TEXT,
+                price_eur REAL NOT NULL,
+                price_usd REAL,
+                currency TEXT,
+                price_zec REAL NOT NULL,
+                zec_rate_at_creation REAL NOT NULL,
+                payment_address TEXT NOT NULL DEFAULT '',
+                zcash_uri TEXT NOT NULL DEFAULT '',
+                shipping_alias TEXT,
+                shipping_address TEXT,
+                shipping_region TEXT,
+                refund_address TEXT,
+                status TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending', 'detected', 'confirmed', 'expired', 'shipped', 'refunded')),
+                detected_txid TEXT,
+                detected_at TEXT,
+                confirmed_at TEXT,
+                shipped_at TEXT,
+                refunded_at TEXT,
+                expires_at TEXT NOT NULL,
+                purge_after TEXT,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            )"
+        ).execute(&pool).await.ok();
+        sqlx::query(
+            "INSERT INTO invoices SELECT
+                id, merchant_id, memo_code, product_id, product_name, size,
+                price_eur, price_usd, currency, price_zec, zec_rate_at_creation,
+                payment_address, zcash_uri, shipping_alias, shipping_address,
+                shipping_region, refund_address, status, detected_txid, detected_at,
+                confirmed_at, shipped_at, refunded_at, expires_at, purge_after, created_at
+             FROM invoices_old"
+        ).execute(&pool).await.ok();
+        sqlx::query("DROP TABLE invoices_old").execute(&pool).await.ok();
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_invoices_status ON invoices(status)")
+            .execute(&pool).await.ok();
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_invoices_memo ON invoices(memo_code)")
+            .execute(&pool).await.ok();
+        tracing::info!("Invoices table migration complete");
+    }
+
     sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS idx_merchants_ufvk ON merchants(ufvk)")
         .execute(&pool)
         .await

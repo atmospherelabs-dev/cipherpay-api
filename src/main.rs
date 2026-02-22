@@ -9,6 +9,7 @@ mod scanner;
 mod webhooks;
 
 use actix_cors::Cors;
+use actix_governor::{Governor, GovernorConfigBuilder};
 use actix_web::{web, App, HttpServer};
 
 #[tokio::main]
@@ -60,6 +61,12 @@ async fn main() -> anyhow::Result<()> {
 
     let bind_addr = format!("{}:{}", config.api_host, config.api_port);
 
+    let rate_limit = GovernorConfigBuilder::default()
+        .seconds_per_request(1)
+        .burst_size(60)
+        .finish()
+        .expect("Failed to build rate limiter");
+
     HttpServer::new(move || {
         let cors = if config.is_testnet() || config.allowed_origins.is_empty() {
             Cors::default()
@@ -82,6 +89,7 @@ async fn main() -> anyhow::Result<()> {
 
         App::new()
             .wrap(cors)
+            .wrap(Governor::new(&rate_limit))
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(config.clone()))
             .app_data(web::Data::new(price_service.clone()))

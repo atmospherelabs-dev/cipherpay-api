@@ -10,6 +10,7 @@ license = "MIT"
 actix-web = "4"
 actix-cors = "0.7"
 actix-web-lab = "0.24"
+actix-governor = "0.7"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }

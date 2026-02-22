@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS invoices (
     shipping_address TEXT,
     shipping_region TEXT,
     status TEXT NOT NULL DEFAULT 'pending'
-        CHECK (status IN ('pending', 'detected', 'confirmed', 'expired', 'shipped')),
+        CHECK (status IN ('pending', 'detected', 'confirmed', 'expired', 'shipped', 'refunded')),
     detected_txid TEXT,
     detected_at TEXT,
     confirmed_at TEXT,
