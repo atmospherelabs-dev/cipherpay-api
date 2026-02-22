@@ -7,6 +7,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use sqlx::SqlitePool;
 
+use crate::billing;
 use crate::config::Config;
 use crate::invoices;
 use crate::invoices::matching;
@@ -38,6 +39,10 @@ pub async fn run(config: Config, pool: SqlitePool, http: reqwest::Client) {
             interval.tick().await;
             if let Err(e) = scan_mempool(&mempool_config, &mempool_pool, &mempool_http, &mempool_seen).await {
                 tracing::error!(error = %e, "Mempool scan error");
+            }
+
+            if mempool_config.fee_enabled() {
+                let _ = billing::check_settlement_payments(&mempool_pool).await;
             }
         }
     });
@@ -114,6 +119,7 @@ async fn scan_mempool(
                         if output.amount_zec >= min_amount {
                             invoices::mark_detected(pool, &invoice.id, txid).await?;
                             webhooks::dispatch(pool, http, &invoice.id, "detected", txid).await?;
+                            try_detect_fee(pool, config, raw_hex, &invoice.id).await;
                         } else {
                             tracing::warn!(
                                 txid,
@@ -153,6 +159,7 @@ async fn scan_blocks(
                 Ok(true) => {
                     invoices::mark_confirmed(pool, &invoice.id).await?;
                     webhooks::dispatch(pool, http, &invoice.id, "confirmed", txid).await?;
+                    on_invoice_confirmed(pool, config, invoice).await;
                 }
                 Ok(false) => {}
                 Err(e) => tracing::debug!(txid, error = %e, "Confirmation check failed"),
@@ -191,6 +198,8 @@ async fn scan_blocks(
                             invoices::mark_detected(pool, &invoice.id, txid).await?;
                             invoices::mark_confirmed(pool, &invoice.id).await?;
                             webhooks::dispatch(pool, http, &invoice.id, "confirmed", txid).await?;
+                            on_invoice_confirmed(pool, config, invoice).await;
+                            try_detect_fee(pool, config, &raw_hex, &invoice.id).await;
                         } else if output.amount_zec < min_amount {
                             tracing::warn!(
                                 txid,
@@ -208,4 +217,54 @@ async fn scan_blocks(
 
     *last_height.write().await = Some(current_height);
     Ok(())
+}
+
+/// When an invoice is confirmed, create a fee ledger entry and ensure a billing cycle exists.
+async fn on_invoice_confirmed(pool: &SqlitePool, config: &Config, invoice: &invoices::Invoice) {
+    if !config.fee_enabled() {
+        return;
+    }
+
+    let fee_amount = invoice.price_zec * config.fee_rate;
+    if fee_amount < 0.00000001 {
+        return;
+    }
+
+    if let Err(e) = billing::ensure_billing_cycle(pool, &invoice.merchant_id, config).await {
+        tracing::error!(error = %e, "Failed to ensure billing cycle");
+    }
+
+    if let Err(e) = billing::create_fee_entry(pool, &invoice.id, &invoice.merchant_id, fee_amount).await {
+        tracing::error!(error = %e, "Failed to create fee entry");
+    }
+}
+
+/// After a merchant payment is detected, try to decrypt the same tx against
+/// the CipherPay fee UFVK to check if the fee output was included (ZIP 321).
+async fn try_detect_fee(pool: &SqlitePool, config: &Config, raw_hex: &str, invoice_id: &str) {
+    let fee_ufvk = match &config.fee_ufvk {
+        Some(u) => u,
+        None => return,
+    };
+
+    let fee_memo_prefix = format!("FEE-{}", invoice_id);
+
+    match decrypt::try_decrypt_all_outputs(raw_hex, fee_ufvk) {
+        Ok(outputs) => {
+            for output in &outputs {
+                if output.memo.starts_with(&fee_memo_prefix) {
+                    tracing::info!(
+                        invoice_id,
+                        fee_zec = output.amount_zec,
+                        "Fee auto-collected via ZIP 321"
+                    );
+                    let _ = billing::mark_fee_collected(pool, invoice_id).await;
+                    return;
+                }
+            }
+        }
+        Err(e) => {
+            tracing::debug!(error = %e, "Fee UFVK decryption failed (non-critical)");
+        }
+    }
 }

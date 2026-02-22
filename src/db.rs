@@ -186,6 +186,64 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
     .await
     .ok();
 
+    // Billing: merchant columns
+    let billing_upgrades = [
+        "ALTER TABLE merchants ADD COLUMN trust_tier TEXT NOT NULL DEFAULT 'new'",
+        "ALTER TABLE merchants ADD COLUMN billing_status TEXT NOT NULL DEFAULT 'active'",
+        "ALTER TABLE merchants ADD COLUMN billing_started_at TEXT",
+    ];
+    for sql in &billing_upgrades {
+        sqlx::query(sql).execute(&pool).await.ok();
+    }
+
+    // Fee ledger
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS fee_ledger (
+            id TEXT PRIMARY KEY,
+            invoice_id TEXT NOT NULL REFERENCES invoices(id),
+            merchant_id TEXT NOT NULL REFERENCES merchants(id),
+            fee_amount_zec REAL NOT NULL,
+            auto_collected INTEGER NOT NULL DEFAULT 0,
+            collected_at TEXT,
+            billing_cycle_id TEXT,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        )"
+    )
+    .execute(&pool)
+    .await
+    .ok();
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_fee_ledger_merchant ON fee_ledger(merchant_id)")
+        .execute(&pool).await.ok();
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_fee_ledger_cycle ON fee_ledger(billing_cycle_id)")
+        .execute(&pool).await.ok();
+    sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS idx_fee_ledger_invoice ON fee_ledger(invoice_id)")
+        .execute(&pool).await.ok();
+
+    // Billing cycles
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS billing_cycles (
+            id TEXT PRIMARY KEY,
+            merchant_id TEXT NOT NULL REFERENCES merchants(id),
+            period_start TEXT NOT NULL,
+            period_end TEXT NOT NULL,
+            total_fees_zec REAL NOT NULL DEFAULT 0.0,
+            auto_collected_zec REAL NOT NULL DEFAULT 0.0,
+            outstanding_zec REAL NOT NULL DEFAULT 0.0,
+            settlement_invoice_id TEXT,
+            status TEXT NOT NULL DEFAULT 'open'
+                CHECK (status IN ('open', 'invoiced', 'paid', 'past_due', 'suspended')),
+            grace_until TEXT,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        )"
+    )
+    .execute(&pool)
+    .await
+    .ok();
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_billing_cycles_merchant ON billing_cycles(merchant_id)")
+        .execute(&pool).await.ok();
+
     tracing::info!("Database ready (SQLite)");
     Ok(pool)
 }

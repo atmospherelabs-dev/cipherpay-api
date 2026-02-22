@@ -57,7 +57,11 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/invoices/{id}/ship", web::post().to(ship_invoice))
             .route("/invoices/{id}/refund", web::post().to(refund_invoice))
             .route("/invoices/{id}/qr", web::get().to(qr_code))
-            .route("/rates", web::get().to(rates::get)),
+            .route("/rates", web::get().to(rates::get))
+            // Billing endpoints (dashboard auth)
+            .route("/merchants/me/billing", web::get().to(billing_summary))
+            .route("/merchants/me/billing/history", web::get().to(billing_history))
+            .route("/merchants/me/billing/settle", web::post().to(billing_settle)),
     );
 }
 
@@ -109,6 +113,17 @@ async fn checkout(
         }
     };
 
+    if config.fee_enabled() {
+        if let Ok(status) = crate::billing::get_merchant_billing_status(pool.get_ref(), &merchant.id).await {
+            if status == "past_due" || status == "suspended" {
+                return actix_web::HttpResponse::PaymentRequired().json(serde_json::json!({
+                    "error": "Merchant account has outstanding fees",
+                    "billing_status": status,
+                }));
+            }
+        }
+    }
+
     let rates = match price_service.get_rates().await {
         Ok(r) => r,
         Err(e) => {
@@ -131,6 +146,15 @@ async fn checkout(
         refund_address: body.refund_address.clone(),
     };
 
+    let fee_config = if config.fee_enabled() {
+        config.fee_address.as_ref().map(|addr| crate::invoices::FeeConfig {
+            fee_address: addr.clone(),
+            fee_rate: config.fee_rate,
+        })
+    } else {
+        None
+    };
+
     match crate::invoices::create_invoice(
         pool.get_ref(),
         &merchant.id,
@@ -139,6 +163,7 @@ async fn checkout(
         rates.zec_eur,
         rates.zec_usd,
         config.invoice_expiry_minutes,
+        fee_config.as_ref(),
     )
     .await
     {
@@ -367,20 +392,13 @@ async fn qr_code(
         _ => return actix_web::HttpResponse::NotFound().finish(),
     };
 
-    let merchant = match crate::merchants::get_all_merchants(pool.get_ref()).await {
-        Ok(merchants) => match merchants.into_iter().find(|m| m.id == invoice.merchant_id) {
-            Some(m) => m,
-            None => return actix_web::HttpResponse::NotFound().finish(),
-        },
-        _ => return actix_web::HttpResponse::InternalServerError().finish(),
+    let uri = if invoice.zcash_uri.is_empty() {
+        let memo_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(invoice.memo_code.as_bytes());
+        format!("zcash:{}?amount={:.8}&memo={}", invoice.payment_address, invoice.price_zec, memo_b64)
+    } else {
+        invoice.zcash_uri.clone()
     };
-
-    let memo_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .encode(invoice.memo_code.as_bytes());
-    let uri = format!(
-        "zcash:{}?amount={:.8}&memo={}",
-        merchant.payment_address, invoice.price_zec, memo_b64
-    );
 
     match generate_qr_png(&uri) {
         Ok(png_bytes) => actix_web::HttpResponse::Ok()
@@ -550,5 +568,143 @@ async fn simulate_confirm(
         Err(e) => actix_web::HttpResponse::BadRequest().json(serde_json::json!({
             "error": format!("{}", e)
         })),
+    }
+}
+
+async fn billing_summary(
+    req: actix_web::HttpRequest,
+    pool: web::Data<SqlitePool>,
+    config: web::Data<crate::config::Config>,
+) -> actix_web::HttpResponse {
+    let merchant = match auth::resolve_session(&req, &pool).await {
+        Some(m) => m,
+        None => {
+            return actix_web::HttpResponse::Unauthorized().json(serde_json::json!({
+                "error": "Not authenticated"
+            }));
+        }
+    };
+
+    if !config.fee_enabled() {
+        return actix_web::HttpResponse::Ok().json(serde_json::json!({
+            "fee_enabled": false,
+            "fee_rate": 0.0,
+            "billing_status": "active",
+            "trust_tier": "standard",
+        }));
+    }
+
+    match crate::billing::get_billing_summary(pool.get_ref(), &merchant.id, &config).await {
+        Ok(summary) => actix_web::HttpResponse::Ok().json(serde_json::json!({
+            "fee_enabled": true,
+            "fee_rate": summary.fee_rate,
+            "trust_tier": summary.trust_tier,
+            "billing_status": summary.billing_status,
+            "current_cycle": summary.current_cycle,
+            "total_fees_zec": summary.total_fees_zec,
+            "auto_collected_zec": summary.auto_collected_zec,
+            "outstanding_zec": summary.outstanding_zec,
+        })),
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to get billing summary");
+            actix_web::HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Internal error"
+            }))
+        }
+    }
+}
+
+async fn billing_history(
+    req: actix_web::HttpRequest,
+    pool: web::Data<SqlitePool>,
+) -> actix_web::HttpResponse {
+    let merchant = match auth::resolve_session(&req, &pool).await {
+        Some(m) => m,
+        None => {
+            return actix_web::HttpResponse::Unauthorized().json(serde_json::json!({
+                "error": "Not authenticated"
+            }));
+        }
+    };
+
+    match crate::billing::get_billing_history(pool.get_ref(), &merchant.id).await {
+        Ok(cycles) => actix_web::HttpResponse::Ok().json(cycles),
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to get billing history");
+            actix_web::HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Internal error"
+            }))
+        }
+    }
+}
+
+async fn billing_settle(
+    req: actix_web::HttpRequest,
+    pool: web::Data<SqlitePool>,
+    config: web::Data<crate::config::Config>,
+) -> actix_web::HttpResponse {
+    let merchant = match auth::resolve_session(&req, &pool).await {
+        Some(m) => m,
+        None => {
+            return actix_web::HttpResponse::Unauthorized().json(serde_json::json!({
+                "error": "Not authenticated"
+            }));
+        }
+    };
+
+    let fee_address = match &config.fee_address {
+        Some(addr) => addr.clone(),
+        None => {
+            return actix_web::HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "Billing not enabled"
+            }));
+        }
+    };
+
+    let summary = match crate::billing::get_billing_summary(pool.get_ref(), &merchant.id, &config).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to get billing for settle");
+            return actix_web::HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Internal error"
+            }));
+        }
+    };
+
+    if summary.outstanding_zec < 0.00001 {
+        return actix_web::HttpResponse::Ok().json(serde_json::json!({
+            "message": "No outstanding balance",
+            "outstanding_zec": 0.0,
+        }));
+    }
+
+    match crate::billing::create_settlement_invoice(
+        pool.get_ref(), &merchant.id, summary.outstanding_zec, &fee_address,
+    ).await {
+        Ok(invoice_id) => {
+            if let Some(cycle) = &summary.current_cycle {
+                let _ = sqlx::query(
+                    "UPDATE billing_cycles SET settlement_invoice_id = ?, status = 'invoiced',
+                     grace_until = strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '+7 days')
+                     WHERE id = ? AND status = 'open'"
+                )
+                .bind(&invoice_id)
+                .bind(&cycle.id)
+                .execute(pool.get_ref())
+                .await;
+            }
+
+            actix_web::HttpResponse::Created().json(serde_json::json!({
+                "invoice_id": invoice_id,
+                "outstanding_zec": summary.outstanding_zec,
+                "message": "Settlement invoice created. Pay to restore full access.",
+            }))
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to create settlement invoice");
+            actix_web::HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Failed to create settlement invoice"
+            }))
+        }
     }
 }

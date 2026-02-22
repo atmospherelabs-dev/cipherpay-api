@@ -1,4 +1,5 @@
 mod api;
+mod billing;
 mod config;
 mod db;
 mod email;
@@ -58,6 +59,25 @@ async fn main() -> anyhow::Result<()> {
             let _ = webhooks::retry_failed(&retry_pool, &retry_http).await;
         }
     });
+
+    if config.fee_enabled() {
+        let billing_pool = pool.clone();
+        let billing_config = config.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+            tracing::info!(
+                fee_rate = billing_config.fee_rate,
+                fee_address = ?billing_config.fee_address,
+                "Billing system enabled"
+            );
+            loop {
+                interval.tick().await;
+                if let Err(e) = billing::process_billing_cycles(&billing_pool, &billing_config).await {
+                    tracing::error!(error = %e, "Billing cycle processing error");
+                }
+            }
+        });
+    }
 
     let bind_addr = format!("{}:{}", config.api_host, config.api_port);
 

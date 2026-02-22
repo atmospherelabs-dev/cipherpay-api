@@ -76,6 +76,11 @@ fn generate_memo_code() -> String {
     format!("CP-{}", hex::encode(bytes).to_uppercase())
 }
 
+pub struct FeeConfig {
+    pub fee_address: String,
+    pub fee_rate: f64,
+}
+
 pub async fn create_invoice(
     pool: &SqlitePool,
     merchant_id: &str,
@@ -84,12 +89,13 @@ pub async fn create_invoice(
     zec_eur: f64,
     zec_usd: f64,
     expiry_minutes: i64,
+    fee_config: Option<&FeeConfig>,
 ) -> anyhow::Result<CreateInvoiceResponse> {
     let id = Uuid::new_v4().to_string();
     let memo_code = generate_memo_code();
     let currency = req.currency.as_deref().unwrap_or("EUR");
     let (price_eur, price_usd, price_zec) = if currency == "USD" {
-        let usd = req.price_eur; // price_eur field is reused as the input amount regardless of currency
+        let usd = req.price_eur;
         let zec = usd / zec_usd;
         let eur = zec * zec_eur;
         (eur, usd, zec)
@@ -105,10 +111,24 @@ pub async fn create_invoice(
 
     let memo_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .encode(memo_code.as_bytes());
-    let zcash_uri = format!(
-        "zcash:{}?amount={:.8}&memo={}",
-        payment_address, price_zec, memo_b64
-    );
+
+    let zcash_uri = if let Some(fc) = fee_config {
+        let fee_amount = price_zec * fc.fee_rate;
+        if fee_amount >= 0.00000001 {
+            let fee_memo = format!("FEE-{}", id);
+            let fee_memo_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(fee_memo.as_bytes());
+            format!(
+                "zcash:?address={}&amount={:.8}&memo={}&address.1={}&amount.1={:.8}&memo.1={}",
+                payment_address, price_zec, memo_b64,
+                fc.fee_address, fee_amount, fee_memo_b64
+            )
+        } else {
+            format!("zcash:{}?amount={:.8}&memo={}", payment_address, price_zec, memo_b64)
+        }
+    } else {
+        format!("zcash:{}?amount={:.8}&memo={}", payment_address, price_zec, memo_b64)
+    };
 
     sqlx::query(
         "INSERT INTO invoices (id, merchant_id, memo_code, product_id, product_name, size,

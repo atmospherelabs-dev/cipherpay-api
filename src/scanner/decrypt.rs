@@ -38,31 +38,40 @@ fn parse_orchard_fvk(ufvk_str: &str) -> Result<FullViewingKey> {
 /// provided UFVK. Returns the first successfully decrypted output with
 /// its memo text and amount.
 pub fn try_decrypt_outputs(raw_hex: &str, ufvk_str: &str) -> Result<Option<DecryptedOutput>> {
+    let results = try_decrypt_all_outputs(raw_hex, ufvk_str)?;
+    Ok(results.into_iter().next())
+}
+
+/// Trial-decrypt ALL Orchard outputs in a raw transaction for a given UFVK.
+/// Returns all successfully decrypted outputs (used for fee detection where
+/// multiple outputs in the same tx may belong to different viewing keys).
+pub fn try_decrypt_all_outputs(raw_hex: &str, ufvk_str: &str) -> Result<Vec<DecryptedOutput>> {
     let tx_bytes = hex::decode(raw_hex)?;
     if tx_bytes.len() < 4 {
-        return Ok(None);
+        return Ok(vec![]);
     }
 
     let fvk = match parse_orchard_fvk(ufvk_str) {
         Ok(fvk) => fvk,
         Err(e) => {
             tracing::debug!(error = %e, "UFVK parsing failed");
-            return Ok(None);
+            return Ok(vec![]);
         }
     };
 
     let mut cursor = Cursor::new(&tx_bytes[..]);
     let tx = match Transaction::read(&mut cursor, zcash_primitives::consensus::BranchId::Nu5) {
         Ok(tx) => tx,
-        Err(_) => return Ok(None),
+        Err(_) => return Ok(vec![]),
     };
 
     let bundle = match tx.orchard_bundle() {
         Some(b) => b,
-        None => return Ok(None),
+        None => return Ok(vec![]),
     };
 
     let actions: Vec<_> = bundle.actions().iter().collect();
+    let mut outputs = Vec::new();
 
     for action in &actions {
         let domain = OrchardDomain::for_action(*action);
@@ -92,17 +101,17 @@ pub fn try_decrypt_outputs(raw_hex: &str, ufvk_str: &str) -> Result<Option<Decry
                             "Decrypted Orchard output"
                         );
 
-                        return Ok(Some(DecryptedOutput {
+                        outputs.push(DecryptedOutput {
                             memo: memo_text,
                             amount_zec,
-                        }));
+                        });
                     }
                 }
             }
         }
     }
 
-    Ok(None)
+    Ok(outputs)
 }
 
 /// Returns just the memo string (convenience wrapper).

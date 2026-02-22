@@ -23,6 +23,11 @@ pub struct Config {
     pub smtp_user: Option<String>,
     pub smtp_pass: Option<String>,
     pub smtp_from: Option<String>,
+    pub fee_ufvk: Option<String>,
+    pub fee_address: Option<String>,
+    pub fee_rate: f64,
+    pub billing_cycle_days_new: i64,
+    pub billing_cycle_days_standard: i64,
 }
 
 impl Config {
@@ -67,6 +72,17 @@ impl Config {
             smtp_user: env::var("SMTP_USER").ok().filter(|s| !s.is_empty()),
             smtp_pass: env::var("SMTP_PASS").ok().filter(|s| !s.is_empty()),
             smtp_from: env::var("SMTP_FROM").ok().filter(|s| !s.is_empty()),
+            fee_ufvk: env::var("FEE_UFVK").ok().filter(|s| !s.is_empty()),
+            fee_address: env::var("FEE_ADDRESS").ok().filter(|s| !s.is_empty()),
+            fee_rate: env::var("FEE_RATE")
+                .unwrap_or_else(|_| "0.01".into())
+                .parse()?,
+            billing_cycle_days_new: env::var("BILLING_CYCLE_DAYS_NEW")
+                .unwrap_or_else(|_| "7".into())
+                .parse()?,
+            billing_cycle_days_standard: env::var("BILLING_CYCLE_DAYS_STANDARD")
+                .unwrap_or_else(|_| "30".into())
+                .parse()?,
         })
     }
 
@@ -76,5 +92,9 @@ impl Config {
 
     pub fn smtp_configured(&self) -> bool {
         self.smtp_host.is_some() && self.smtp_from.is_some()
+    }
+
+    pub fn fee_enabled(&self) -> bool {
+        self.fee_address.is_some() && self.fee_ufvk.is_some() && self.fee_rate > 0.0
     }
 }

@@ -21,6 +21,17 @@ pub async fn create(
         }
     };
 
+    if config.fee_enabled() {
+        if let Ok(status) = crate::billing::get_merchant_billing_status(pool.get_ref(), &merchant.id).await {
+            if status == "past_due" || status == "suspended" {
+                return HttpResponse::PaymentRequired().json(serde_json::json!({
+                    "error": "Merchant account has outstanding fees",
+                    "billing_status": status,
+                }));
+            }
+        }
+    }
+
     let rates = match price_service.get_rates().await {
         Ok(r) => r,
         Err(e) => {
@@ -31,6 +42,15 @@ pub async fn create(
         }
     };
 
+    let fee_config = if config.fee_enabled() {
+        config.fee_address.as_ref().map(|addr| invoices::FeeConfig {
+            fee_address: addr.clone(),
+            fee_rate: config.fee_rate,
+        })
+    } else {
+        None
+    };
+
     match invoices::create_invoice(
         pool.get_ref(),
         &merchant.id,
@@ -39,6 +59,7 @@ pub async fn create(
         rates.zec_eur,
         rates.zec_usd,
         config.invoice_expiry_minutes,
+        fee_config.as_ref(),
     )
     .await
     {
