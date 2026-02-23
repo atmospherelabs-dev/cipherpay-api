@@ -277,7 +277,7 @@ async fn list_invoices(
                         "received_zec": crate::invoices::zatoshis_to_zec(rz),
                         "price_zatoshis": pz,
                         "received_zatoshis": rz,
-                        "overpaid": rz > pz && pz > 0,
+                        "overpaid": rz > pz + 1000 && pz > 0,
                     })
                 })
                 .collect();
@@ -301,7 +301,7 @@ async fn lookup_by_memo(
     match crate::invoices::get_invoice_by_memo(pool.get_ref(), &memo_code).await {
         Ok(Some(inv)) => {
             let received_zec = crate::invoices::zatoshis_to_zec(inv.received_zatoshis);
-            let overpaid = inv.received_zatoshis > inv.price_zatoshis && inv.price_zatoshis > 0;
+            let overpaid = inv.received_zatoshis > inv.price_zatoshis + 1000 && inv.price_zatoshis > 0;
             actix_web::HttpResponse::Ok().json(serde_json::json!({
                 "id": inv.id,
                 "memo_code": inv.memo_code,
@@ -638,6 +638,7 @@ async fn billing_settle(
     req: actix_web::HttpRequest,
     pool: web::Data<SqlitePool>,
     config: web::Data<crate::config::Config>,
+    price_service: web::Data<crate::invoices::pricing::PriceService>,
 ) -> actix_web::HttpResponse {
     let merchant = match auth::resolve_session(&req, &pool).await {
         Some(m) => m,
@@ -674,8 +675,13 @@ async fn billing_settle(
         }));
     }
 
+    let (zec_eur, zec_usd) = match price_service.get_rates().await {
+        Ok(rates) => (rates.zec_eur, rates.zec_usd),
+        Err(_) => (0.0, 0.0),
+    };
+
     match crate::billing::create_settlement_invoice(
-        pool.get_ref(), &merchant.id, summary.outstanding_zec, &fee_address,
+        pool.get_ref(), &merchant.id, summary.outstanding_zec, &fee_address, zec_eur, zec_usd,
     ).await {
         Ok(invoice_id) => {
             if let Some(cycle) = &summary.current_cycle {

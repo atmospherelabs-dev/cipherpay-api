@@ -103,7 +103,7 @@ pub async fn get(
     match invoice {
         Some(inv) => {
             let received_zec = invoices::zatoshis_to_zec(inv.received_zatoshis);
-            let overpaid = inv.received_zatoshis > inv.price_zatoshis && inv.price_zatoshis > 0;
+            let overpaid = inv.received_zatoshis > inv.price_zatoshis + 1000 && inv.price_zatoshis > 0;
 
             let merchant_origin = get_merchant_webhook_origin(pool.get_ref(), &inv.merchant_id).await;
 

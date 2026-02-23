@@ -255,7 +255,7 @@ async fn scan_mempool(
             if new_received >= min {
                 let changed = invoices::mark_detected(pool, invoice_id, txid, new_received).await?;
                 if changed {
-                    let overpaid = new_received > invoice.price_zatoshis;
+                    let overpaid = new_received > invoice.price_zatoshis + 1000;
                     spawn_payment_webhook(pool, http, invoice_id, "detected", txid,
                         invoice.price_zatoshis, new_received, overpaid);
                     try_detect_fee(pool, config, raw_hex, invoice_id).await;
@@ -362,7 +362,7 @@ async fn scan_blocks(
                     if detected {
                         let confirmed = invoices::mark_confirmed(pool, invoice_id).await?;
                         if confirmed {
-                            let overpaid = new_received > invoice.price_zatoshis;
+                            let overpaid = new_received > invoice.price_zatoshis + 1000;
                             spawn_payment_webhook(pool, http, invoice_id, "confirmed", txid,
                                 invoice.price_zatoshis, new_received, overpaid);
                             on_invoice_confirmed(pool, config, invoice).await;

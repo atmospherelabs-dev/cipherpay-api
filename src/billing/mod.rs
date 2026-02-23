@@ -144,7 +144,7 @@ pub async fn get_billing_summary(
     .await?;
 
     let current_cycle: Option<BillingCycle> = sqlx::query_as(
-        "SELECT * FROM billing_cycles WHERE merchant_id = ? AND status = 'open'
+        "SELECT * FROM billing_cycles WHERE merchant_id = ? AND status IN ('open', 'invoiced')
          ORDER BY created_at DESC LIMIT 1"
     )
     .bind(merchant_id)
@@ -239,12 +239,18 @@ pub async fn create_settlement_invoice(
     merchant_id: &str,
     outstanding_zec: f64,
     fee_address: &str,
+    zec_eur_rate: f64,
+    zec_usd_rate: f64,
 ) -> anyhow::Result<String> {
     let id = Uuid::new_v4().to_string();
     let memo_code = format!("SETTLE-{}", &Uuid::new_v4().to_string()[..8].to_uppercase());
     let now = Utc::now();
     let expires_at = (now + Duration::days(7)).format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let created_at = now.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+
+    let price_eur = outstanding_zec * zec_eur_rate;
+    let price_usd = outstanding_zec * zec_usd_rate;
+    let price_zatoshis = (outstanding_zec * 100_000_000.0) as i64;
 
     let memo_b64 = base64::Engine::encode(
         &base64::engine::general_purpose::URL_SAFE_NO_PAD,
@@ -256,27 +262,36 @@ pub async fn create_settlement_invoice(
     );
 
     sqlx::query(
-        "INSERT INTO invoices (id, merchant_id, memo_code, product_name, price_eur, price_zec,
-         zec_rate_at_creation, payment_address, zcash_uri, status, expires_at, created_at)
-         VALUES (?, ?, ?, 'Fee Settlement', 0.0, ?, 0.0, ?, ?, 'pending', ?, ?)"
+        "INSERT INTO invoices (id, merchant_id, memo_code, product_name, price_eur, price_usd, currency, price_zec,
+         zec_rate_at_creation, payment_address, zcash_uri, status, expires_at, created_at, price_zatoshis)
+         VALUES (?, ?, ?, 'Fee Settlement', ?, ?, 'EUR', ?, ?, ?, ?, 'pending', ?, ?, ?)"
     )
     .bind(&id)
     .bind(merchant_id)
     .bind(&memo_code)
+    .bind(price_eur)
+    .bind(price_usd)
     .bind(outstanding_zec)
+    .bind(zec_eur_rate)
     .bind(fee_address)
     .bind(&zcash_uri)
     .bind(&expires_at)
     .bind(&created_at)
+    .bind(price_zatoshis)
     .execute(pool)
     .await?;
 
-    tracing::info!(merchant_id, outstanding_zec, invoice_id = %id, "Settlement invoice created");
+    tracing::info!(merchant_id, outstanding_zec, price_eur, invoice_id = %id, "Settlement invoice created");
     Ok(id)
 }
 
 /// Runs billing cycle processing: close expired cycles, enforce, upgrade tiers.
-pub async fn process_billing_cycles(pool: &SqlitePool, config: &Config) -> anyhow::Result<()> {
+pub async fn process_billing_cycles(
+    pool: &SqlitePool,
+    config: &Config,
+    zec_eur: f64,
+    zec_usd: f64,
+) -> anyhow::Result<()> {
     if !config.fee_enabled() {
         return Ok(());
     }
@@ -308,7 +323,7 @@ pub async fn process_billing_cycles(pool: &SqlitePool, config: &Config) -> anyho
                 .format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
             let settlement_id = create_settlement_invoice(
-                pool, &cycle.merchant_id, cycle.outstanding_zec, fee_addr,
+                pool, &cycle.merchant_id, cycle.outstanding_zec, fee_addr, zec_eur, zec_usd,
             ).await?;
 
             sqlx::query(

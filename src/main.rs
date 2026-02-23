@@ -67,6 +67,7 @@ async fn main() -> anyhow::Result<()> {
     if config.fee_enabled() {
         let billing_pool = pool.clone();
         let billing_config = config.clone();
+        let billing_prices = price_service.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
             tracing::info!(
@@ -76,7 +77,11 @@ async fn main() -> anyhow::Result<()> {
             );
             loop {
                 interval.tick().await;
-                if let Err(e) = billing::process_billing_cycles(&billing_pool, &billing_config).await {
+                let (zec_eur, zec_usd) = match billing_prices.get_rates().await {
+                    Ok(r) => (r.zec_eur, r.zec_usd),
+                    Err(_) => (0.0, 0.0),
+                };
+                if let Err(e) = billing::process_billing_cycles(&billing_pool, &billing_config, zec_eur, zec_usd).await {
                     tracing::error!(error = %e, "Billing cycle processing error");
                 }
             }
