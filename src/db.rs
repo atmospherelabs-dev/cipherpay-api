@@ -105,9 +105,10 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
         .await
         .ok();
 
-    // Remove old CHECK constraint on invoices.status to allow 'refunded' and remove 'shipped'
-    // SQLite doesn't support ALTER CONSTRAINT, so we check if the constraint blocks us
-    // and recreate the table if needed.
+    // Disable FK checks during table-rename migrations so SQLite doesn't
+    // auto-rewrite FK references in other tables (webhook_deliveries, fee_ledger).
+    sqlx::query("PRAGMA foreign_keys = OFF").execute(&pool).await.ok();
+
     let needs_migrate: bool = sqlx::query_scalar::<_, i32>(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='invoices'
          AND sql LIKE '%CHECK%' AND (sql NOT LIKE '%refunded%' OR sql LIKE '%shipped%')"
@@ -250,6 +251,71 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
             .execute(&pool).await.ok();
         tracing::info!("Invoices table migration (underpaid) complete");
     }
+
+    // Clean up leftover temp tables from migrations
+    sqlx::query("DROP TABLE IF EXISTS invoices_old").execute(&pool).await.ok();
+    sqlx::query("DROP TABLE IF EXISTS invoices_old2").execute(&pool).await.ok();
+
+    // Repair FK references in webhook_deliveries/fee_ledger that may have been
+    // auto-rewritten by SQLite during RENAME TABLE (pointing to invoices_old).
+    let wd_schema: Option<String> = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='webhook_deliveries'"
+    ).fetch_optional(&pool).await.ok().flatten();
+    if let Some(ref schema) = wd_schema {
+        if schema.contains("invoices_old") {
+            tracing::info!("Repairing webhook_deliveries FK references...");
+            sqlx::query("ALTER TABLE webhook_deliveries RENAME TO _wd_repair")
+                .execute(&pool).await.ok();
+            sqlx::query(
+                "CREATE TABLE IF NOT EXISTS webhook_deliveries (
+                    id TEXT PRIMARY KEY,
+                    invoice_id TEXT NOT NULL REFERENCES invoices(id),
+                    url TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending'
+                        CHECK (status IN ('pending', 'delivered', 'failed')),
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    last_attempt_at TEXT,
+                    next_retry_at TEXT,
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+                )"
+            ).execute(&pool).await.ok();
+            sqlx::query("INSERT OR IGNORE INTO webhook_deliveries SELECT * FROM _wd_repair")
+                .execute(&pool).await.ok();
+            sqlx::query("DROP TABLE _wd_repair").execute(&pool).await.ok();
+            tracing::info!("webhook_deliveries FK repair complete");
+        }
+    }
+
+    let fl_schema: Option<String> = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='fee_ledger'"
+    ).fetch_optional(&pool).await.ok().flatten();
+    if let Some(ref schema) = fl_schema {
+        if schema.contains("invoices_old") {
+            tracing::info!("Repairing fee_ledger FK references...");
+            sqlx::query("ALTER TABLE fee_ledger RENAME TO _fl_repair")
+                .execute(&pool).await.ok();
+            sqlx::query(
+                "CREATE TABLE IF NOT EXISTS fee_ledger (
+                    id TEXT PRIMARY KEY,
+                    invoice_id TEXT NOT NULL REFERENCES invoices(id),
+                    merchant_id TEXT NOT NULL REFERENCES merchants(id),
+                    fee_amount_zec REAL NOT NULL,
+                    auto_collected INTEGER NOT NULL DEFAULT 0,
+                    collected_at TEXT,
+                    billing_cycle_id TEXT,
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+                )"
+            ).execute(&pool).await.ok();
+            sqlx::query("INSERT OR IGNORE INTO fee_ledger SELECT * FROM _fl_repair")
+                .execute(&pool).await.ok();
+            sqlx::query("DROP TABLE _fl_repair").execute(&pool).await.ok();
+            tracing::info!("fee_ledger FK repair complete");
+        }
+    }
+
+    // Re-enable FK enforcement after all migrations
+    sqlx::query("PRAGMA foreign_keys = ON").execute(&pool).await.ok();
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS recovery_tokens (
