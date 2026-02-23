@@ -106,6 +106,94 @@ pub async fn dispatch(
     Ok(())
 }
 
+pub async fn dispatch_payment(
+    pool: &SqlitePool,
+    http: &reqwest::Client,
+    invoice_id: &str,
+    event: &str,
+    txid: &str,
+    price_zatoshis: i64,
+    received_zatoshis: i64,
+    overpaid: bool,
+) -> anyhow::Result<()> {
+    let merchant_row = sqlx::query_as::<_, (Option<String>, String)>(
+        "SELECT m.webhook_url, m.webhook_secret FROM invoices i
+         JOIN merchants m ON i.merchant_id = m.id
+         WHERE i.id = ?"
+    )
+    .bind(invoice_id)
+    .fetch_optional(pool)
+    .await?;
+
+    let (webhook_url, webhook_secret) = match merchant_row {
+        Some((Some(url), secret)) if !url.is_empty() => (url, secret),
+        _ => return Ok(()),
+    };
+
+    if let Err(reason) = crate::validation::resolve_and_check_host(&webhook_url) {
+        tracing::warn!(invoice_id, url = %webhook_url, %reason, "Webhook blocked: SSRF protection");
+        return Ok(());
+    }
+
+    let timestamp = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+
+    let payload = serde_json::json!({
+        "event": event,
+        "invoice_id": invoice_id,
+        "txid": txid,
+        "timestamp": &timestamp,
+        "price_zec": crate::invoices::zatoshis_to_zec(price_zatoshis),
+        "received_zec": crate::invoices::zatoshis_to_zec(received_zatoshis),
+        "overpaid": overpaid,
+    });
+
+    let payload_str = payload.to_string();
+    let signature = sign_payload(&webhook_secret, &timestamp, &payload_str);
+
+    let delivery_id = Uuid::new_v4().to_string();
+    let next_retry = (Utc::now() + chrono::Duration::seconds(retry_delay_secs(1)))
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+
+    sqlx::query(
+        "INSERT INTO webhook_deliveries (id, invoice_id, url, payload, status, attempts, last_attempt_at, next_retry_at)
+         VALUES (?, ?, ?, ?, 'pending', 1, ?, ?)"
+    )
+    .bind(&delivery_id)
+    .bind(invoice_id)
+    .bind(&webhook_url)
+    .bind(&payload_str)
+    .bind(&timestamp)
+    .bind(&next_retry)
+    .execute(pool)
+    .await?;
+
+    match http.post(&webhook_url)
+        .header("X-CipherPay-Signature", &signature)
+        .header("X-CipherPay-Timestamp", &timestamp)
+        .json(&payload)
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            sqlx::query("UPDATE webhook_deliveries SET status = 'delivered' WHERE id = ?")
+                .bind(&delivery_id)
+                .execute(pool)
+                .await?;
+            tracing::info!(invoice_id, event, "Payment webhook delivered");
+        }
+        Ok(resp) => {
+            tracing::warn!(invoice_id, event, status = %resp.status(), "Payment webhook rejected, will retry");
+        }
+        Err(e) => {
+            tracing::warn!(invoice_id, event, error = %e, "Payment webhook failed, will retry");
+        }
+    }
+
+    Ok(())
+}
+
 pub async fn retry_failed(pool: &SqlitePool, http: &reqwest::Client) -> anyhow::Result<()> {
     let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
 

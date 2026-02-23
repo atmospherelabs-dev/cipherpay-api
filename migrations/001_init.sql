@@ -33,13 +33,15 @@ CREATE TABLE IF NOT EXISTS invoices (
     payment_address TEXT NOT NULL DEFAULT '',
     zcash_uri TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'pending'
-        CHECK (status IN ('pending', 'detected', 'confirmed', 'expired', 'refunded')),
+        CHECK (status IN ('pending', 'underpaid', 'detected', 'confirmed', 'expired', 'refunded')),
     detected_txid TEXT,
     detected_at TEXT,
     confirmed_at TEXT,
     expires_at TEXT NOT NULL,
     purge_after TEXT,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    price_zatoshis INTEGER NOT NULL DEFAULT 0,
+    received_zatoshis INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_invoices_status ON invoices(status);

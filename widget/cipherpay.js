@@ -12,6 +12,7 @@
   const POLL_INTERVAL = 5000;
   const STATUS_LABELS = {
     pending: 'Waiting for payment...',
+    underpaid: 'Partial payment received. Send remaining balance.',
     detected: 'Payment detected! Confirming...',
     confirmed: 'Payment confirmed!',
     expired: 'Invoice expired',
@@ -146,8 +147,7 @@
       var invoice = await fetchInvoice(apiUrl, invoiceId);
       var widget = renderWidget(container, invoice);
 
-      // Poll for status changes
-      if (invoice.status === 'pending' || invoice.status === 'detected') {
+      if (invoice.status === 'pending' || invoice.status === 'detected' || invoice.status === 'underpaid') {
         var pollInterval = setInterval(async function () {
           try {
             var statusResp = await fetchStatus(apiUrl, invoiceId);

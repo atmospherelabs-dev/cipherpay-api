@@ -102,6 +102,8 @@ pub async fn get(
 
     match invoice {
         Some(inv) => {
+            let received_zec = invoices::zatoshis_to_zec(inv.received_zatoshis);
+            let overpaid = inv.received_zatoshis > inv.price_zatoshis && inv.price_zatoshis > 0;
             HttpResponse::Ok().json(serde_json::json!({
                 "id": inv.id,
                 "memo_code": inv.memo_code,
@@ -122,6 +124,10 @@ pub async fn get(
                 "refunded_at": inv.refunded_at,
                 "expires_at": inv.expires_at,
                 "created_at": inv.created_at,
+                "received_zec": received_zec,
+                "price_zatoshis": inv.price_zatoshis,
+                "received_zatoshis": inv.received_zatoshis,
+                "overpaid": overpaid,
             }))
         }
         None => HttpResponse::NotFound().json(serde_json::json!({

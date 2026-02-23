@@ -160,7 +160,8 @@ pub async fn my_invoices(
          NULL AS merchant_name,
          refund_address, status, detected_txid, detected_at,
          confirmed_at, refunded_at, expires_at, purge_after, created_at,
-         orchard_receiver_hex, diversifier_index
+         orchard_receiver_hex, diversifier_index,
+         price_zatoshis, received_zatoshis
          FROM invoices WHERE merchant_id = ?
          ORDER BY created_at DESC LIMIT 100"
     )

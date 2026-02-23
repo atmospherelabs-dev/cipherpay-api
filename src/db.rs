@@ -180,6 +180,77 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_invoices_orchard_receiver ON invoices(orchard_receiver_hex)")
         .execute(&pool).await.ok();
 
+    // Underpayment/overpayment: zatoshi-based amount tracking
+    sqlx::query("ALTER TABLE invoices ADD COLUMN price_zatoshis INTEGER NOT NULL DEFAULT 0")
+        .execute(&pool).await.ok();
+    sqlx::query("ALTER TABLE invoices ADD COLUMN received_zatoshis INTEGER NOT NULL DEFAULT 0")
+        .execute(&pool).await.ok();
+    sqlx::query("UPDATE invoices SET price_zatoshis = CAST(price_zec * 100000000 AS INTEGER) WHERE price_zatoshis = 0 AND price_zec > 0")
+        .execute(&pool).await.ok();
+
+    // Add 'underpaid' to status CHECK -- requires table recreation in SQLite
+    let needs_underpaid: bool = sqlx::query_scalar::<_, i32>(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='invoices'
+         AND sql LIKE '%CHECK%' AND sql NOT LIKE '%underpaid%'"
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap_or(0) > 0;
+
+    if needs_underpaid {
+        tracing::info!("Migrating invoices table (adding underpaid status)...");
+        sqlx::query("ALTER TABLE invoices RENAME TO invoices_old2")
+            .execute(&pool).await.ok();
+        sqlx::query(
+            "CREATE TABLE invoices (
+                id TEXT PRIMARY KEY,
+                merchant_id TEXT NOT NULL REFERENCES merchants(id),
+                memo_code TEXT NOT NULL UNIQUE,
+                product_id TEXT REFERENCES products(id),
+                product_name TEXT,
+                size TEXT,
+                price_eur REAL NOT NULL,
+                price_usd REAL,
+                currency TEXT,
+                price_zec REAL NOT NULL,
+                zec_rate_at_creation REAL NOT NULL,
+                payment_address TEXT NOT NULL DEFAULT '',
+                zcash_uri TEXT NOT NULL DEFAULT '',
+                refund_address TEXT,
+                status TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending', 'underpaid', 'detected', 'confirmed', 'expired', 'refunded')),
+                detected_txid TEXT,
+                detected_at TEXT,
+                confirmed_at TEXT,
+                refunded_at TEXT,
+                expires_at TEXT NOT NULL,
+                purge_after TEXT,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                diversifier_index INTEGER,
+                orchard_receiver_hex TEXT,
+                price_zatoshis INTEGER NOT NULL DEFAULT 0,
+                received_zatoshis INTEGER NOT NULL DEFAULT 0
+            )"
+        ).execute(&pool).await.ok();
+        sqlx::query(
+            "INSERT INTO invoices SELECT
+                id, merchant_id, memo_code, product_id, product_name, size,
+                price_eur, price_usd, currency, price_zec, zec_rate_at_creation,
+                payment_address, zcash_uri, refund_address, status, detected_txid, detected_at,
+                confirmed_at, refunded_at, expires_at, purge_after, created_at,
+                diversifier_index, orchard_receiver_hex, price_zatoshis, received_zatoshis
+             FROM invoices_old2"
+        ).execute(&pool).await.ok();
+        sqlx::query("DROP TABLE invoices_old2").execute(&pool).await.ok();
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_invoices_status ON invoices(status)")
+            .execute(&pool).await.ok();
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_invoices_memo ON invoices(memo_code)")
+            .execute(&pool).await.ok();
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_invoices_orchard_receiver ON invoices(orchard_receiver_hex)")
+            .execute(&pool).await.ok();
+        tracing::info!("Invoices table migration (underpaid) complete");
+    }
+
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS recovery_tokens (
             id TEXT PRIMARY KEY,

@@ -16,6 +16,7 @@ pub const SLIPPAGE_TOLERANCE: f64 = 0.995;
 pub struct DecryptedOutput {
     pub memo: String,
     pub amount_zec: f64,
+    pub amount_zatoshis: u64,
     pub recipient_raw: [u8; 43],
 }
 
@@ -109,6 +110,7 @@ pub fn try_decrypt_all_outputs(raw_hex: &str, ufvk_str: &str) -> Result<Vec<Decr
                 outputs.push(DecryptedOutput {
                     memo: memo_text,
                     amount_zec,
+                    amount_zatoshis,
                     recipient_raw,
                 });
             }

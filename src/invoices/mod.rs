@@ -36,6 +36,8 @@ pub struct Invoice {
     #[serde(skip_serializing)]
     #[allow(dead_code)]
     pub diversifier_index: Option<i64>,
+    pub price_zatoshis: i64,
+    pub received_zatoshis: i64,
 }
 
 #[derive(Debug, Serialize, FromRow)]
@@ -44,6 +46,8 @@ pub struct InvoiceStatus {
     pub invoice_id: String,
     pub status: String,
     pub detected_txid: Option<String>,
+    pub received_zatoshis: i64,
+    pub price_zatoshis: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -132,12 +136,14 @@ pub async fn create_invoice(
         format!("zcash:{}?amount={:.8}&memo={}", payment_address, price_zec, memo_b64)
     };
 
+    let price_zatoshis = (price_zec * 100_000_000.0) as i64;
+
     sqlx::query(
         "INSERT INTO invoices (id, merchant_id, memo_code, product_id, product_name, size,
          price_eur, price_usd, currency, price_zec, zec_rate_at_creation, payment_address, zcash_uri,
          refund_address, status, expires_at, created_at,
-         diversifier_index, orchard_receiver_hex)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)"
+         diversifier_index, orchard_receiver_hex, price_zatoshis)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)"
     )
     .bind(&id)
     .bind(merchant_id)
@@ -157,6 +163,7 @@ pub async fn create_invoice(
     .bind(&created_at)
     .bind(div_index as i64)
     .bind(&derived.orchard_receiver_hex)
+    .bind(price_zatoshis)
     .execute(pool)
     .await?;
 
@@ -189,7 +196,8 @@ pub async fn get_invoice(pool: &SqlitePool, id: &str) -> anyhow::Result<Option<I
          NULLIF(m.name, '') AS merchant_name,
          i.refund_address, i.status, i.detected_txid, i.detected_at,
          i.confirmed_at, i.refunded_at, i.expires_at, i.purge_after, i.created_at,
-         i.orchard_receiver_hex, i.diversifier_index
+         i.orchard_receiver_hex, i.diversifier_index,
+         i.price_zatoshis, i.received_zatoshis
          FROM invoices i
          LEFT JOIN merchants m ON m.id = i.merchant_id
          WHERE i.id = ?"
@@ -211,7 +219,8 @@ pub async fn get_invoice_by_memo(pool: &SqlitePool, memo_code: &str) -> anyhow::
          NULLIF(m.name, '') AS merchant_name,
          i.refund_address, i.status, i.detected_txid, i.detected_at,
          i.confirmed_at, i.refunded_at, i.expires_at, i.purge_after, i.created_at,
-         i.orchard_receiver_hex, i.diversifier_index
+         i.orchard_receiver_hex, i.diversifier_index,
+         i.price_zatoshis, i.received_zatoshis
          FROM invoices i
          LEFT JOIN merchants m ON m.id = i.merchant_id
          WHERE i.memo_code = ?"
@@ -225,7 +234,7 @@ pub async fn get_invoice_by_memo(pool: &SqlitePool, memo_code: &str) -> anyhow::
 
 pub async fn get_invoice_status(pool: &SqlitePool, id: &str) -> anyhow::Result<Option<InvoiceStatus>> {
     let row = sqlx::query_as::<_, InvoiceStatus>(
-        "SELECT id, status, detected_txid FROM invoices WHERE id = ?"
+        "SELECT id, status, detected_txid, received_zatoshis, price_zatoshis FROM invoices WHERE id = ?"
     )
     .bind(id)
     .fetch_optional(pool)
@@ -241,8 +250,9 @@ pub async fn get_pending_invoices(pool: &SqlitePool) -> anyhow::Result<Vec<Invoi
          NULL AS merchant_name,
          refund_address, status, detected_txid, detected_at,
          confirmed_at, NULL AS refunded_at, expires_at, purge_after, created_at,
-         orchard_receiver_hex, diversifier_index
-         FROM invoices WHERE status IN ('pending', 'detected')
+         orchard_receiver_hex, diversifier_index,
+         price_zatoshis, received_zatoshis
+         FROM invoices WHERE status IN ('pending', 'underpaid', 'detected')
          AND expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
     )
     .fetch_all(pool)
@@ -259,8 +269,9 @@ pub async fn find_by_orchard_receiver(pool: &SqlitePool, receiver_hex: &str) -> 
          NULL AS merchant_name,
          refund_address, status, detected_txid, detected_at,
          confirmed_at, NULL AS refunded_at, expires_at, purge_after, created_at,
-         orchard_receiver_hex, diversifier_index
-         FROM invoices WHERE orchard_receiver_hex = ? AND status IN ('pending', 'detected')
+         orchard_receiver_hex, diversifier_index,
+         price_zatoshis, received_zatoshis
+         FROM invoices WHERE orchard_receiver_hex = ? AND status IN ('pending', 'underpaid', 'detected')
          AND expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
     )
     .bind(receiver_hex)
@@ -270,19 +281,20 @@ pub async fn find_by_orchard_receiver(pool: &SqlitePool, receiver_hex: &str) -> 
     Ok(row)
 }
 
-pub async fn mark_detected(pool: &SqlitePool, invoice_id: &str, txid: &str) -> anyhow::Result<()> {
+pub async fn mark_detected(pool: &SqlitePool, invoice_id: &str, txid: &str, received_zatoshis: i64) -> anyhow::Result<()> {
     let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     sqlx::query(
-        "UPDATE invoices SET status = 'detected', detected_txid = ?, detected_at = ?
-         WHERE id = ? AND status = 'pending'"
+        "UPDATE invoices SET status = 'detected', detected_txid = ?, detected_at = ?, received_zatoshis = ?
+         WHERE id = ? AND status IN ('pending', 'underpaid')"
     )
     .bind(txid)
     .bind(&now)
+    .bind(received_zatoshis)
     .bind(invoice_id)
     .execute(pool)
     .await?;
 
-    tracing::info!(invoice_id, txid, "Payment detected");
+    tracing::info!(invoice_id, txid, received_zatoshis, "Payment detected");
     Ok(())
 }
 
@@ -332,7 +344,7 @@ pub async fn mark_expired(pool: &SqlitePool, invoice_id: &str) -> anyhow::Result
 pub async fn expire_old_invoices(pool: &SqlitePool) -> anyhow::Result<u64> {
     let result = sqlx::query(
         "UPDATE invoices SET status = 'expired'
-         WHERE status = 'pending' AND expires_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
+         WHERE status IN ('pending', 'underpaid') AND expires_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
     )
     .execute(pool)
     .await?;
@@ -342,5 +354,64 @@ pub async fn expire_old_invoices(pool: &SqlitePool) -> anyhow::Result<u64> {
         tracing::info!(count, "Expired old invoices");
     }
     Ok(count)
+}
+
+pub async fn mark_underpaid(pool: &SqlitePool, invoice_id: &str, received_zatoshis: i64, txid: &str) -> anyhow::Result<()> {
+    let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let new_expires = (Utc::now() + Duration::minutes(10))
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+    sqlx::query(
+        "UPDATE invoices SET status = 'underpaid', received_zatoshis = ?, detected_txid = ?,
+         detected_at = ?, expires_at = ?
+         WHERE id = ? AND status = 'pending'"
+    )
+    .bind(received_zatoshis)
+    .bind(txid)
+    .bind(&now)
+    .bind(&new_expires)
+    .bind(invoice_id)
+    .execute(pool)
+    .await?;
+
+    tracing::info!(invoice_id, received_zatoshis, "Invoice marked as underpaid");
+    Ok(())
+}
+
+/// Add additional zatoshis to an underpaid invoice and extend its expiry.
+/// Returns the new total received_zatoshis.
+pub async fn accumulate_payment(pool: &SqlitePool, invoice_id: &str, additional_zatoshis: i64) -> anyhow::Result<i64> {
+    let new_expires = (Utc::now() + Duration::minutes(10))
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+    let row: (i64,) = sqlx::query_as(
+        "UPDATE invoices SET received_zatoshis = received_zatoshis + ?, expires_at = ?
+         WHERE id = ? RETURNING received_zatoshis"
+    )
+    .bind(additional_zatoshis)
+    .bind(&new_expires)
+    .bind(invoice_id)
+    .fetch_one(pool)
+    .await?;
+
+    tracing::info!(invoice_id, additional_zatoshis, total = row.0, "Payment accumulated");
+    Ok(row.0)
+}
+
+pub async fn update_refund_address(pool: &SqlitePool, invoice_id: &str, address: &str) -> anyhow::Result<bool> {
+    let result = sqlx::query(
+        "UPDATE invoices SET refund_address = ?
+         WHERE id = ? AND status IN ('pending', 'underpaid', 'expired')"
+    )
+    .bind(address)
+    .bind(invoice_id)
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected() > 0)
+}
+
+pub fn zatoshis_to_zec(z: i64) -> f64 {
+    format!("{:.8}", z as f64 / 100_000_000.0).parse::<f64>().unwrap_or(0.0)
 }
 

@@ -70,6 +70,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             )
             .route("/invoices/{id}/cancel", web::post().to(cancel_invoice))
             .route("/invoices/{id}/refund", web::post().to(refund_invoice))
+            .route("/invoices/{id}/refund-address", web::patch().to(update_refund_address))
             .route("/invoices/{id}/qr", web::get().to(qr_code))
             .route("/rates", web::get().to(rates::get)),
     );
@@ -245,7 +246,7 @@ async fn list_invoices(
          price_eur, price_usd, currency, price_zec, zec_rate_at_creation, payment_address, zcash_uri,
          status, detected_txid,
          detected_at, expires_at, confirmed_at, refunded_at,
-         refund_address, created_at
+         refund_address, created_at, price_zatoshis, received_zatoshis
          FROM invoices WHERE merchant_id = ? ORDER BY created_at DESC LIMIT 50",
     )
     .bind(&merchant.id)
@@ -258,6 +259,8 @@ async fn list_invoices(
             let invoices: Vec<_> = rows
                 .into_iter()
                 .map(|r| {
+                    let pz = r.get::<i64, _>("price_zatoshis");
+                    let rz = r.get::<i64, _>("received_zatoshis");
                     serde_json::json!({
                         "id": r.get::<String, _>("id"),
                         "merchant_id": r.get::<String, _>("merchant_id"),
@@ -279,6 +282,10 @@ async fn list_invoices(
                         "refunded_at": r.get::<Option<String>, _>("refunded_at"),
                         "refund_address": r.get::<Option<String>, _>("refund_address"),
                         "created_at": r.get::<String, _>("created_at"),
+                        "received_zec": crate::invoices::zatoshis_to_zec(rz),
+                        "price_zatoshis": pz,
+                        "received_zatoshis": rz,
+                        "overpaid": rz > pz && pz > 0,
                     })
                 })
                 .collect();
@@ -300,27 +307,35 @@ async fn lookup_by_memo(
     let memo_code = path.into_inner();
 
     match crate::invoices::get_invoice_by_memo(pool.get_ref(), &memo_code).await {
-        Ok(Some(inv)) => actix_web::HttpResponse::Ok().json(serde_json::json!({
-            "id": inv.id,
-            "memo_code": inv.memo_code,
-            "product_name": inv.product_name,
-            "size": inv.size,
-            "price_eur": inv.price_eur,
-            "price_usd": inv.price_usd,
-            "currency": inv.currency,
-            "price_zec": inv.price_zec,
-            "zec_rate_at_creation": inv.zec_rate_at_creation,
-            "payment_address": inv.payment_address,
-            "zcash_uri": inv.zcash_uri,
-            "merchant_name": inv.merchant_name,
-            "status": inv.status,
-            "detected_txid": inv.detected_txid,
-            "detected_at": inv.detected_at,
-            "confirmed_at": inv.confirmed_at,
-            "refunded_at": inv.refunded_at,
-            "expires_at": inv.expires_at,
-            "created_at": inv.created_at,
-        })),
+        Ok(Some(inv)) => {
+            let received_zec = crate::invoices::zatoshis_to_zec(inv.received_zatoshis);
+            let overpaid = inv.received_zatoshis > inv.price_zatoshis && inv.price_zatoshis > 0;
+            actix_web::HttpResponse::Ok().json(serde_json::json!({
+                "id": inv.id,
+                "memo_code": inv.memo_code,
+                "product_name": inv.product_name,
+                "size": inv.size,
+                "price_eur": inv.price_eur,
+                "price_usd": inv.price_usd,
+                "currency": inv.currency,
+                "price_zec": inv.price_zec,
+                "zec_rate_at_creation": inv.zec_rate_at_creation,
+                "payment_address": inv.payment_address,
+                "zcash_uri": inv.zcash_uri,
+                "merchant_name": inv.merchant_name,
+                "status": inv.status,
+                "detected_txid": inv.detected_txid,
+                "detected_at": inv.detected_at,
+                "confirmed_at": inv.confirmed_at,
+                "refunded_at": inv.refunded_at,
+                "expires_at": inv.expires_at,
+                "created_at": inv.created_at,
+                "received_zec": received_zec,
+                "price_zatoshis": inv.price_zatoshis,
+                "received_zatoshis": inv.received_zatoshis,
+                "overpaid": overpaid,
+            }))
+        },
         Ok(None) => actix_web::HttpResponse::NotFound().json(serde_json::json!({
             "error": "No invoice found for this memo code"
         })),
@@ -352,22 +367,29 @@ async fn invoice_stream(
             let data = serde_json::json!({
                 "status": status.status,
                 "txid": status.detected_txid,
+                "received_zatoshis": status.received_zatoshis,
+                "price_zatoshis": status.price_zatoshis,
             });
             let _ = tx
                 .send(sse::Data::new(data.to_string()).event("status").into())
                 .await;
         }
 
+        let mut last_received: i64 = 0;
         loop {
             tick.tick().await;
 
             match crate::invoices::get_invoice_status(&pool, &invoice_id).await {
                 Ok(Some(status)) => {
-                    if status.status != last_status {
+                    let amounts_changed = status.received_zatoshis != last_received;
+                    if status.status != last_status || amounts_changed {
                         last_status.clone_from(&status.status);
+                        last_received = status.received_zatoshis;
                         let data = serde_json::json!({
                             "status": status.status,
                             "txid": status.detected_txid,
+                            "received_zatoshis": status.received_zatoshis,
+                            "price_zatoshis": status.price_zatoshis,
                         });
                         if tx
                             .send(sse::Data::new(data.to_string()).event("status").into())
@@ -404,7 +426,11 @@ async fn simulate_detect(
     let invoice_id = path.into_inner();
     let fake_txid = format!("sim_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
 
-    match crate::invoices::mark_detected(pool.get_ref(), &invoice_id, &fake_txid).await {
+    let price_zatoshis = match crate::invoices::get_invoice(pool.get_ref(), &invoice_id).await {
+        Ok(Some(inv)) => inv.price_zatoshis,
+        _ => 0,
+    };
+    match crate::invoices::mark_detected(pool.get_ref(), &invoice_id, &fake_txid, price_zatoshis).await {
         Ok(()) => actix_web::HttpResponse::Ok().json(serde_json::json!({
             "status": "detected",
             "txid": fake_txid,
@@ -537,6 +563,44 @@ async fn refund_invoice(
         _ => {
             actix_web::HttpResponse::NotFound().json(serde_json::json!({
                 "error": "Invoice not found"
+            }))
+        }
+    }
+}
+
+/// Public endpoint: buyer can save a refund address on their invoice.
+async fn update_refund_address(
+    pool: web::Data<SqlitePool>,
+    path: web::Path<String>,
+    body: web::Json<serde_json::Value>,
+) -> actix_web::HttpResponse {
+    let invoice_id = path.into_inner();
+
+    let address = match body.get("refund_address").and_then(|v| v.as_str()) {
+        Some(a) if !a.is_empty() => a,
+        _ => {
+            return actix_web::HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "refund_address is required"
+            }));
+        }
+    };
+
+    if let Err(e) = crate::validation::validate_zcash_address("refund_address", address) {
+        return actix_web::HttpResponse::BadRequest().json(e.to_json());
+    }
+
+    match crate::invoices::update_refund_address(pool.get_ref(), &invoice_id, address).await {
+        Ok(true) => actix_web::HttpResponse::Ok().json(serde_json::json!({
+            "status": "saved",
+            "refund_address": address,
+        })),
+        Ok(false) => actix_web::HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "Cannot update refund address for this invoice status"
+        })),
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to update refund address");
+            actix_web::HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Internal error"
             }))
         }
     }

@@ -117,19 +117,26 @@ async fn scan_mempool(
                         tracing::info!(txid, memo = %output.memo, amount = output.amount_zec, "Decrypted mempool tx");
 
                         if let Some(invoice) = matching::find_matching_invoice(&pending, &recipient_hex, &output.memo) {
-                            let min_amount = invoice.price_zec * decrypt::SLIPPAGE_TOLERANCE;
-                            if output.amount_zec >= min_amount {
-                                invoices::mark_detected(pool, &invoice.id, txid).await?;
-                                webhooks::dispatch(pool, http, &invoice.id, "detected", txid).await?;
-                                try_detect_fee(pool, config, raw_hex, &invoice.id).await;
+                            let new_received = if invoice.status == "underpaid" {
+                                invoices::accumulate_payment(pool, &invoice.id, output.amount_zatoshis as i64).await?
                             } else {
-                                tracing::warn!(
-                                    txid,
-                                    expected = invoice.price_zec,
-                                    received = output.amount_zec,
-                                    "Underpaid invoice, ignoring"
-                                );
+                                output.amount_zatoshis as i64
+                            };
+
+                            let min = (invoice.price_zatoshis as f64 * decrypt::SLIPPAGE_TOLERANCE) as i64;
+
+                            if new_received >= min {
+                                invoices::mark_detected(pool, &invoice.id, txid, new_received).await?;
+                                let overpaid = new_received > invoice.price_zatoshis;
+                                webhooks::dispatch_payment(pool, http, &invoice.id, "detected", txid,
+                                    invoice.price_zatoshis, new_received, overpaid).await?;
+                                try_detect_fee(pool, config, raw_hex, &invoice.id).await;
+                            } else if invoice.status == "pending" {
+                                invoices::mark_underpaid(pool, &invoice.id, new_received, txid).await?;
+                                webhooks::dispatch_payment(pool, http, &invoice.id, "underpaid", txid,
+                                    invoice.price_zatoshis, new_received, false).await?;
                             }
+                            // if already underpaid and still not enough, accumulate_payment already extended timer
                         }
                     }
                 }
@@ -197,20 +204,26 @@ async fn scan_blocks(
                     for output in &outputs {
                         let recipient_hex = hex::encode(output.recipient_raw);
                         if let Some(invoice) = matching::find_matching_invoice(&pending, &recipient_hex, &output.memo) {
-                            let min_amount = invoice.price_zec * decrypt::SLIPPAGE_TOLERANCE;
-                            if invoice.status == "pending" && output.amount_zec >= min_amount {
-                                invoices::mark_detected(pool, &invoice.id, txid).await?;
+                            let new_received = if invoice.status == "underpaid" {
+                                invoices::accumulate_payment(pool, &invoice.id, output.amount_zatoshis as i64).await?
+                            } else {
+                                output.amount_zatoshis as i64
+                            };
+
+                            let min = (invoice.price_zatoshis as f64 * decrypt::SLIPPAGE_TOLERANCE) as i64;
+
+                            if new_received >= min && (invoice.status == "pending" || invoice.status == "underpaid") {
+                                invoices::mark_detected(pool, &invoice.id, txid, new_received).await?;
                                 invoices::mark_confirmed(pool, &invoice.id).await?;
-                                webhooks::dispatch(pool, http, &invoice.id, "confirmed", txid).await?;
+                                let overpaid = new_received > invoice.price_zatoshis;
+                                webhooks::dispatch_payment(pool, http, &invoice.id, "confirmed", txid,
+                                    invoice.price_zatoshis, new_received, overpaid).await?;
                                 on_invoice_confirmed(pool, config, invoice).await;
                                 try_detect_fee(pool, config, &raw_hex, &invoice.id).await;
-                            } else if output.amount_zec < min_amount {
-                                tracing::warn!(
-                                    txid,
-                                    expected = invoice.price_zec,
-                                    received = output.amount_zec,
-                                    "Underpaid invoice in block, ignoring"
-                                );
+                            } else if new_received < min && invoice.status == "pending" {
+                                invoices::mark_underpaid(pool, &invoice.id, new_received, txid).await?;
+                                webhooks::dispatch_payment(pool, http, &invoice.id, "underpaid", txid,
+                                    invoice.price_zatoshis, new_received, false).await?;
                             }
                         }
                     }
