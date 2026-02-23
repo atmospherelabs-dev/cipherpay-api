@@ -724,6 +724,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
  "zcash_address 0.10.1",
  "zcash_note_encryption",

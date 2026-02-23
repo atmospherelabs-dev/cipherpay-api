@@ -60,14 +60,6 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/invoices/{id}", web::get().to(invoices::get))
             .route("/invoices/{id}/status", web::get().to(status::get))
             .route("/invoices/{id}/stream", web::get().to(invoice_stream))
-            .route(
-                "/invoices/{id}/simulate-detect",
-                web::post().to(simulate_detect),
-            )
-            .route(
-                "/invoices/{id}/simulate-confirm",
-                web::post().to(simulate_confirm),
-            )
             .route("/invoices/{id}/cancel", web::post().to(cancel_invoice))
             .route("/invoices/{id}/refund", web::post().to(refund_invoice))
             .route("/invoices/{id}/refund-address", web::patch().to(update_refund_address))
@@ -411,37 +403,6 @@ async fn invoice_stream(
     sse::Sse::from_infallible_receiver(rx).with_retry_duration(Duration::from_secs(5))
 }
 
-/// Test endpoint: simulate payment detection (testnet only)
-async fn simulate_detect(
-    pool: web::Data<SqlitePool>,
-    config: web::Data<crate::config::Config>,
-    path: web::Path<String>,
-) -> actix_web::HttpResponse {
-    if !config.is_testnet() {
-        return actix_web::HttpResponse::Forbidden().json(serde_json::json!({
-            "error": "Simulation endpoints disabled in production"
-        }));
-    }
-
-    let invoice_id = path.into_inner();
-    let fake_txid = format!("sim_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
-
-    let price_zatoshis = match crate::invoices::get_invoice(pool.get_ref(), &invoice_id).await {
-        Ok(Some(inv)) => inv.price_zatoshis,
-        _ => 0,
-    };
-    match crate::invoices::mark_detected(pool.get_ref(), &invoice_id, &fake_txid, price_zatoshis).await {
-        Ok(()) => actix_web::HttpResponse::Ok().json(serde_json::json!({
-            "status": "detected",
-            "txid": fake_txid,
-            "message": "Simulated payment detection"
-        })),
-        Err(e) => actix_web::HttpResponse::BadRequest().json(serde_json::json!({
-            "error": format!("{}", e)
-        })),
-    }
-}
-
 /// Generate a QR code PNG for a zcash: payment URI (ZIP-321 compliant)
 async fn qr_code(
     pool: web::Data<SqlitePool>,
@@ -603,31 +564,6 @@ async fn update_refund_address(
                 "error": "Internal error"
             }))
         }
-    }
-}
-
-/// Test endpoint: simulate payment confirmation (testnet only)
-async fn simulate_confirm(
-    pool: web::Data<SqlitePool>,
-    config: web::Data<crate::config::Config>,
-    path: web::Path<String>,
-) -> actix_web::HttpResponse {
-    if !config.is_testnet() {
-        return actix_web::HttpResponse::Forbidden().json(serde_json::json!({
-            "error": "Simulation endpoints disabled in production"
-        }));
-    }
-
-    let invoice_id = path.into_inner();
-
-    match crate::invoices::mark_confirmed(pool.get_ref(), &invoice_id).await {
-        Ok(()) => actix_web::HttpResponse::Ok().json(serde_json::json!({
-            "status": "confirmed",
-            "message": "Simulated payment confirmation"
-        })),
-        Err(e) => actix_web::HttpResponse::BadRequest().json(serde_json::json!({
-            "error": format!("{}", e)
-        })),
     }
 }
 

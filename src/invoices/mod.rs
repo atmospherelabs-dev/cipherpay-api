@@ -281,9 +281,10 @@ pub async fn find_by_orchard_receiver(pool: &SqlitePool, receiver_hex: &str) -> 
     Ok(row)
 }
 
-pub async fn mark_detected(pool: &SqlitePool, invoice_id: &str, txid: &str, received_zatoshis: i64) -> anyhow::Result<()> {
+/// Returns true if the status actually changed (used to gate webhook dispatch).
+pub async fn mark_detected(pool: &SqlitePool, invoice_id: &str, txid: &str, received_zatoshis: i64) -> anyhow::Result<bool> {
     let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-    sqlx::query(
+    let result = sqlx::query(
         "UPDATE invoices SET status = 'detected', detected_txid = ?, detected_at = ?, received_zatoshis = ?
          WHERE id = ? AND status IN ('pending', 'underpaid')"
     )
@@ -294,13 +295,17 @@ pub async fn mark_detected(pool: &SqlitePool, invoice_id: &str, txid: &str, rece
     .execute(pool)
     .await?;
 
-    tracing::info!(invoice_id, txid, received_zatoshis, "Payment detected");
-    Ok(())
+    let changed = result.rows_affected() > 0;
+    if changed {
+        tracing::info!(invoice_id, txid, received_zatoshis, "Payment detected");
+    }
+    Ok(changed)
 }
 
-pub async fn mark_confirmed(pool: &SqlitePool, invoice_id: &str) -> anyhow::Result<()> {
+/// Returns true if the status actually changed (used to gate webhook dispatch).
+pub async fn mark_confirmed(pool: &SqlitePool, invoice_id: &str) -> anyhow::Result<bool> {
     let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-    sqlx::query(
+    let result = sqlx::query(
         "UPDATE invoices SET status = 'confirmed', confirmed_at = ?
          WHERE id = ? AND status = 'detected'"
     )
@@ -309,8 +314,11 @@ pub async fn mark_confirmed(pool: &SqlitePool, invoice_id: &str) -> anyhow::Resu
     .execute(pool)
     .await?;
 
-    tracing::info!(invoice_id, "Payment confirmed");
-    Ok(())
+    let changed = result.rows_affected() > 0;
+    if changed {
+        tracing::info!(invoice_id, "Payment confirmed");
+    }
+    Ok(changed)
 }
 
 pub async fn mark_refunded(pool: &SqlitePool, invoice_id: &str) -> anyhow::Result<()> {
@@ -380,22 +388,31 @@ pub async fn mark_underpaid(pool: &SqlitePool, invoice_id: &str, received_zatosh
 
 /// Add additional zatoshis to an underpaid invoice and extend its expiry.
 /// Returns the new total received_zatoshis.
+/// Only operates on invoices in 'underpaid' status to prevent race conditions.
 pub async fn accumulate_payment(pool: &SqlitePool, invoice_id: &str, additional_zatoshis: i64) -> anyhow::Result<i64> {
     let new_expires = (Utc::now() + Duration::minutes(10))
         .format("%Y-%m-%dT%H:%M:%SZ")
         .to_string();
-    let row: (i64,) = sqlx::query_as(
+    let row: Option<(i64,)> = sqlx::query_as(
         "UPDATE invoices SET received_zatoshis = received_zatoshis + ?, expires_at = ?
-         WHERE id = ? RETURNING received_zatoshis"
+         WHERE id = ? AND status = 'underpaid' RETURNING received_zatoshis"
     )
     .bind(additional_zatoshis)
     .bind(&new_expires)
     .bind(invoice_id)
-    .fetch_one(pool)
+    .fetch_optional(pool)
     .await?;
 
-    tracing::info!(invoice_id, additional_zatoshis, total = row.0, "Payment accumulated");
-    Ok(row.0)
+    match row {
+        Some((total,)) => {
+            tracing::info!(invoice_id, additional_zatoshis, total, "Payment accumulated");
+            Ok(total)
+        }
+        None => {
+            tracing::warn!(invoice_id, "accumulate_payment: invoice not in underpaid status, skipping");
+            anyhow::bail!("invoice not in underpaid status")
+        }
+    }
 }
 
 pub async fn update_refund_address(pool: &SqlitePool, invoice_id: &str, address: &str) -> anyhow::Result<bool> {

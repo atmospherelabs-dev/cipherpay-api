@@ -104,6 +104,9 @@ pub async fn get(
         Some(inv) => {
             let received_zec = invoices::zatoshis_to_zec(inv.received_zatoshis);
             let overpaid = inv.received_zatoshis > inv.price_zatoshis && inv.price_zatoshis > 0;
+
+            let merchant_origin = get_merchant_webhook_origin(pool.get_ref(), &inv.merchant_id).await;
+
             HttpResponse::Ok().json(serde_json::json!({
                 "id": inv.id,
                 "memo_code": inv.memo_code,
@@ -117,6 +120,7 @@ pub async fn get(
                 "payment_address": inv.payment_address,
                 "zcash_uri": inv.zcash_uri,
                 "merchant_name": inv.merchant_name,
+                "merchant_origin": merchant_origin,
                 "status": inv.status,
                 "detected_txid": inv.detected_txid,
                 "detected_at": inv.detected_at,
@@ -134,6 +138,20 @@ pub async fn get(
             "error": "Invoice not found"
         })),
     }
+}
+
+/// Extract the origin (scheme+host+port) from a merchant's webhook URL.
+async fn get_merchant_webhook_origin(pool: &SqlitePool, merchant_id: &str) -> Option<String> {
+    let row: Option<(Option<String>,)> = sqlx::query_as(
+        "SELECT webhook_url FROM merchants WHERE id = ?"
+    )
+    .bind(merchant_id)
+    .fetch_optional(pool)
+    .await
+    .ok()?;
+
+    let webhook_url = row?.0?;
+    url::Url::parse(&webhook_url).ok().map(|u| u.origin().ascii_serialization())
 }
 
 /// Resolve the merchant from the request:

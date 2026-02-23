@@ -1,4 +1,5 @@
 use std::net::{IpAddr, ToSocketAddrs};
+use zcash_address::ZcashAddress;
 
 pub struct ValidationError {
     pub field: String,
@@ -70,34 +71,32 @@ pub fn validate_email_format(field: &str, email: &str) -> Result<(), ValidationE
 
 pub fn validate_webhook_url(
     field: &str,
-    url: &str,
+    url_str: &str,
     is_testnet: bool,
 ) -> Result<(), ValidationError> {
-    validate_length(field, url, 2000)?;
+    validate_length(field, url_str, 2000)?;
 
     if is_testnet {
-        if !url.starts_with("https://") && !url.starts_with("http://") {
+        if !url_str.starts_with("https://") && !url_str.starts_with("http://") {
             return Err(ValidationError::invalid(field, "must start with http:// or https://"));
         }
-    } else if !url.starts_with("https://") {
+    } else if !url_str.starts_with("https://") {
         return Err(ValidationError::invalid(field, "must start with https:// in production"));
     }
 
-    let host = url
-        .trim_start_matches("https://")
-        .trim_start_matches("http://")
-        .split('/')
-        .next()
-        .unwrap_or("")
-        .split(':')
-        .next()
-        .unwrap_or("");
+    let parsed = url::Url::parse(url_str)
+        .map_err(|_| ValidationError::invalid(field, "invalid URL"))?;
 
-    if host.is_empty() {
-        return Err(ValidationError::invalid(field, "missing hostname"));
+    let host = match parsed.host_str() {
+        Some(h) => h.to_string(),
+        None => return Err(ValidationError::invalid(field, "missing hostname")),
+    };
+
+    if parsed.username() != "" || parsed.password().is_some() {
+        return Err(ValidationError::invalid(field, "URL must not contain credentials"));
     }
 
-    if is_private_host(host) {
+    if is_private_host(&host) {
         return Err(ValidationError::invalid(field, "internal/private addresses are not allowed"));
     }
 
@@ -107,13 +106,12 @@ pub fn validate_webhook_url(
 pub fn validate_zcash_address(field: &str, addr: &str) -> Result<(), ValidationError> {
     validate_length(field, addr, 500)?;
 
-    let valid_prefixes = ["u1", "utest1", "zs1", "ztestsapling", "t1", "t3"];
-    if !valid_prefixes.iter().any(|p| addr.starts_with(p)) {
-        return Err(ValidationError::invalid(
+    ZcashAddress::try_from_encoded(addr).map_err(|_| {
+        ValidationError::invalid(
             field,
-            "must be a valid Zcash address (u1, utest1, zs1, t1, or t3 prefix)",
-        ));
-    }
+            "must be a valid Zcash address (failed checksum/encoding validation)",
+        )
+    })?;
 
     Ok(())
 }
@@ -137,40 +135,55 @@ pub fn is_private_ip(ip: &IpAddr) -> bool {
             v4.is_loopback()
                 || v4.is_private()
                 || v4.is_link_local()
-                || v4.octets()[0] == 169 && v4.octets()[1] == 254
+                || (v4.octets()[0] == 169 && v4.octets()[1] == 254)
                 || v4.is_broadcast()
                 || v4.is_unspecified()
         }
-        IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified(),
+        IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.octets()[0] == 0xfd        // unique-local (fd00::/8)
+                || v6.octets()[0] == 0xfc        // unique-local (fc00::/8)
+                || (v6.octets()[0] == 0xfe && (v6.octets()[1] & 0xc0) == 0x80) // link-local (fe80::/10)
+        }
     }
 }
 
 /// DNS-level SSRF check: resolve hostname and verify none of the IPs are private.
 /// Used at webhook dispatch time (not at URL save time) to catch DNS rebinding.
+/// Fails closed: if DNS resolution fails, the request is blocked.
 pub fn resolve_and_check_host(url: &str) -> Result<(), String> {
-    let host_port = url
-        .trim_start_matches("https://")
-        .trim_start_matches("http://")
-        .split('/')
-        .next()
-        .unwrap_or("");
-
-    let with_port = if host_port.contains(':') {
-        host_port.to_string()
-    } else {
-        format!("{}:443", host_port)
+    let parsed = match url::Url::parse(url) {
+        Ok(u) => u,
+        Err(_) => return Err("invalid URL".to_string()),
     };
+
+    let host = match parsed.host_str() {
+        Some(h) => h,
+        None => return Err("missing hostname".to_string()),
+    };
+
+    if parsed.username() != "" || parsed.password().is_some() {
+        return Err("URL must not contain credentials".to_string());
+    }
+
+    let port = parsed.port().unwrap_or(443);
+    let with_port = format!("{}:{}", host, port);
 
     match with_port.to_socket_addrs() {
         Ok(addrs) => {
-            for addr in addrs {
+            let addrs: Vec<_> = addrs.collect();
+            if addrs.is_empty() {
+                return Err("DNS resolved to no addresses".to_string());
+            }
+            for addr in &addrs {
                 if is_private_ip(&addr.ip()) {
                     return Err(format!("webhook URL resolves to private IP: {}", addr.ip()));
                 }
             }
             Ok(())
         }
-        Err(_) => Ok(()),
+        Err(e) => Err(format!("DNS resolution failed: {}", e)),
     }
 }
 
@@ -203,16 +216,20 @@ mod tests {
         assert!(validate_webhook_url("url", "https://localhost/hook", false).is_err());
         assert!(validate_webhook_url("url", "https://127.0.0.1/hook", false).is_err());
         assert!(validate_webhook_url("url", "https://192.168.1.1/hook", false).is_err());
+        // userinfo bypass attempt
+        assert!(validate_webhook_url("url", "https://evil@localhost/hook", false).is_err());
+        assert!(validate_webhook_url("url", "https://user:pass@example.com/hook", false).is_err());
     }
 
     #[test]
     fn test_validate_zcash_address() {
-        assert!(validate_zcash_address("addr", "u1abc123").is_ok());
-        assert!(validate_zcash_address("addr", "utest1abc").is_ok());
-        assert!(validate_zcash_address("addr", "t1abc").is_ok());
-        assert!(validate_zcash_address("addr", "zs1abc").is_ok());
+        // Valid addresses should pass, invalid ones should fail
         assert!(validate_zcash_address("addr", "invalid123").is_err());
         assert!(validate_zcash_address("addr", "bc1qxyz").is_err());
+        assert!(validate_zcash_address("addr", "u1abc123").is_err()); // invalid checksum
+        assert!(validate_zcash_address("addr", "").is_err());
+        // A properly encoded t-address would pass; we verify the crate rejects garbage
+        assert!(validate_zcash_address("addr", "t1000000000000000000000000000000000").is_err());
     }
 
     #[test]
@@ -223,7 +240,11 @@ mod tests {
         assert!(is_private_ip(&"172.16.0.1".parse().unwrap()));
         assert!(is_private_ip(&"169.254.1.1".parse().unwrap()));
         assert!(is_private_ip(&"::1".parse().unwrap()));
+        // IPv6 unique-local and link-local
+        assert!(is_private_ip(&"fd00::1".parse().unwrap()));
+        assert!(is_private_ip(&"fe80::1".parse().unwrap()));
         assert!(!is_private_ip(&"8.8.8.8".parse().unwrap()));
         assert!(!is_private_ip(&"1.1.1.1".parse().unwrap()));
+        assert!(!is_private_ip(&"2607:f8b0:4004:800::200e".parse().unwrap())); // Google public IPv6
     }
 }

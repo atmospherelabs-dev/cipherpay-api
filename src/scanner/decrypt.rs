@@ -13,11 +13,93 @@ use zcash_primitives::transaction::Transaction;
 /// wallet rounding and network fee differences.
 pub const SLIPPAGE_TOLERANCE: f64 = 0.995;
 
+/// Minimum payment as a fraction of invoice price to accept as underpaid
+/// and extend expiry. Prevents dust-spam attacks that keep invoices alive.
+pub const DUST_THRESHOLD_FRACTION: f64 = 0.01; // 1% of invoice price
+pub const DUST_THRESHOLD_MIN_ZATOSHIS: i64 = 10_000; // 0.0001 ZEC absolute floor
+
 pub struct DecryptedOutput {
     pub memo: String,
     pub amount_zec: f64,
     pub amount_zatoshis: u64,
     pub recipient_raw: [u8; 43],
+}
+
+/// Pre-computed keys for a merchant, avoiding repeated curve operations.
+pub struct CachedKeys {
+    pub pivk_external: PreparedIncomingViewingKey,
+    pub pivk_internal: PreparedIncomingViewingKey,
+}
+
+/// Prepare cached keys from a UFVK string. Call once per merchant, reuse across scans.
+pub fn prepare_keys(ufvk_str: &str) -> Result<CachedKeys> {
+    let fvk = parse_orchard_fvk(ufvk_str)?;
+    let pivk_external = PreparedIncomingViewingKey::new(&fvk.to_ivk(Scope::External));
+    let pivk_internal = PreparedIncomingViewingKey::new(&fvk.to_ivk(Scope::Internal));
+    Ok(CachedKeys { pivk_external, pivk_internal })
+}
+
+/// Trial-decrypt all Orchard outputs using pre-computed keys (fast path).
+pub fn try_decrypt_with_keys(raw_hex: &str, keys: &CachedKeys) -> Result<Vec<DecryptedOutput>> {
+    let tx_bytes = hex::decode(raw_hex)?;
+    if tx_bytes.len() < 4 {
+        return Ok(vec![]);
+    }
+
+    let mut cursor = Cursor::new(&tx_bytes[..]);
+    let tx = match Transaction::read(&mut cursor, zcash_primitives::consensus::BranchId::Nu5) {
+        Ok(tx) => tx,
+        Err(_) => return Ok(vec![]),
+    };
+
+    let bundle = match tx.orchard_bundle() {
+        Some(b) => b,
+        None => return Ok(vec![]),
+    };
+
+    let actions: Vec<_> = bundle.actions().iter().collect();
+    let mut outputs = Vec::new();
+
+    for action in &actions {
+        let domain = OrchardDomain::for_action(*action);
+
+        for pivk in [&keys.pivk_external, &keys.pivk_internal] {
+            if let Some((note, _recipient, memo)) = try_note_decryption(&domain, pivk, *action) {
+                let recipient_raw = note.recipient().to_raw_address_bytes();
+                let memo_bytes = memo.as_slice();
+                let memo_len = memo_bytes.iter()
+                    .position(|&b| b == 0)
+                    .unwrap_or(memo_bytes.len());
+
+                let memo_text = if memo_len > 0 {
+                    String::from_utf8(memo_bytes[..memo_len].to_vec())
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                };
+
+                let amount_zatoshis = note.value().inner();
+                let amount_zec = amount_zatoshis as f64 / 100_000_000.0;
+
+                if !memo_text.trim().is_empty() {
+                    tracing::info!(
+                        memo = %memo_text,
+                        amount_zec,
+                        "Decrypted Orchard output"
+                    );
+                }
+
+                outputs.push(DecryptedOutput {
+                    memo: memo_text,
+                    amount_zec,
+                    amount_zatoshis,
+                    recipient_raw,
+                });
+            }
+        }
+    }
+
+    Ok(outputs)
 }
 
 /// Parse a UFVK string and extract the Orchard FullViewingKey.
