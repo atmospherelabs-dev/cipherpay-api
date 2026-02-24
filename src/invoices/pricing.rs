@@ -20,16 +20,19 @@ pub struct PriceService {
 
 impl PriceService {
     pub fn new(api_url: &str, cache_secs: u64) -> Self {
+        let http = reqwest::Client::builder()
+            .user_agent("CipherPay/1.0")
+            .build()
+            .expect("Failed to build HTTP client");
         Self {
             api_url: api_url.to_string(),
             cache_secs,
             cached: Arc::new(RwLock::new(None)),
-            http: reqwest::Client::new(),
+            http,
         }
     }
 
     pub async fn get_rates(&self) -> anyhow::Result<ZecRates> {
-        // Check cache
         {
             let cache = self.cached.read().await;
             if let Some(rates) = &*cache {
@@ -40,21 +43,21 @@ impl PriceService {
             }
         }
 
-        // Try to fetch from CoinGecko
         match self.fetch_live_rates().await {
             Ok(rates) => {
                 let mut cache = self.cached.write().await;
                 *cache = Some(rates.clone());
-                tracing::debug!(zec_eur = rates.zec_eur, zec_usd = rates.zec_usd, "Price feed updated");
+                tracing::info!(zec_eur = rates.zec_eur, zec_usd = rates.zec_usd, "Price feed updated");
                 Ok(rates)
             }
             Err(e) => {
-                tracing::warn!(error = %e, "CoinGecko unavailable, using fallback rate");
-                Ok(ZecRates {
-                    zec_eur: 220.0,
-                    zec_usd: 240.0,
-                    updated_at: Utc::now(),
-                })
+                let cache = self.cached.read().await;
+                if let Some(stale) = &*cache {
+                    tracing::warn!(error = %e, age_secs = (Utc::now() - stale.updated_at).num_seconds(), "CoinGecko unavailable, using last known rate");
+                    return Ok(stale.clone());
+                }
+                tracing::error!(error = %e, "CoinGecko unavailable and no cached rate — prices will be inaccurate");
+                anyhow::bail!("No price data available: {}", e)
             }
         }
     }
@@ -65,20 +68,26 @@ impl PriceService {
             self.api_url
         );
 
-        let resp: serde_json::Value = self.http
+        let response = self.http
             .get(&url)
-            .timeout(std::time::Duration::from_secs(5))
+            .timeout(std::time::Duration::from_secs(10))
             .send()
-            .await?
-            .json()
             .await?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("CoinGecko returned HTTP {}: {}", status, &body[..body.len().min(200)]);
+        }
+
+        let resp: serde_json::Value = response.json().await?;
 
         let zec_eur = resp["zcash"]["eur"]
             .as_f64()
-            .ok_or_else(|| anyhow::anyhow!("Missing ZEC/EUR rate"))?;
+            .ok_or_else(|| anyhow::anyhow!("Missing ZEC/EUR rate in response: {}", resp))?;
         let zec_usd = resp["zcash"]["usd"]
             .as_f64()
-            .ok_or_else(|| anyhow::anyhow!("Missing ZEC/USD rate"))?;
+            .ok_or_else(|| anyhow::anyhow!("Missing ZEC/USD rate in response: {}", resp))?;
 
         Ok(ZecRates {
             zec_eur,
