@@ -272,6 +272,36 @@ pub async fn create_recovery_token(pool: &SqlitePool, merchant_id: &str) -> anyh
     Ok(token)
 }
 
+pub async fn has_outstanding_balance(pool: &SqlitePool, merchant_id: &str) -> anyhow::Result<bool> {
+    let row: Option<(f64,)> = sqlx::query_as(
+        "SELECT COALESCE(SUM(outstanding_zec), 0) FROM billing_cycles
+         WHERE merchant_id = ? AND outstanding_zec > 0.0001"
+    )
+    .bind(merchant_id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|r| r.0 > 0.0001).unwrap_or(false))
+}
+
+pub async fn delete_merchant(pool: &SqlitePool, merchant_id: &str) -> anyhow::Result<()> {
+    sqlx::query("DELETE FROM sessions WHERE merchant_id = ?")
+        .bind(merchant_id).execute(pool).await?;
+    sqlx::query("DELETE FROM recovery_tokens WHERE merchant_id = ?")
+        .bind(merchant_id).execute(pool).await?;
+    sqlx::query("DELETE FROM fee_ledger WHERE merchant_id = ?")
+        .bind(merchant_id).execute(pool).await?;
+    sqlx::query("DELETE FROM billing_cycles WHERE merchant_id = ?")
+        .bind(merchant_id).execute(pool).await?;
+    sqlx::query("UPDATE products SET active = 0 WHERE merchant_id = ?")
+        .bind(merchant_id).execute(pool).await?;
+    sqlx::query("DELETE FROM merchants WHERE id = ?")
+        .bind(merchant_id).execute(pool).await?;
+
+    tracing::info!(merchant_id, "Merchant account deleted");
+    Ok(())
+}
+
 pub async fn confirm_recovery_token(pool: &SqlitePool, token: &str) -> anyhow::Result<Option<String>> {
     let token_hash = hash_key(token);
 

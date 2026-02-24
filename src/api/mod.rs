@@ -36,6 +36,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                     .route("/me/billing", web::get().to(billing_summary))
                     .route("/me/billing/history", web::get().to(billing_history))
                     .route("/me/billing/settle", web::post().to(billing_settle))
+                    .route("/me/delete", web::post().to(delete_account))
             )
             .service(
                 web::scope("/auth")
@@ -706,6 +707,51 @@ async fn billing_settle(
             tracing::error!(error = %e, "Failed to create settlement invoice");
             actix_web::HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": "Failed to create settlement invoice"
+            }))
+        }
+    }
+}
+
+async fn delete_account(
+    req: actix_web::HttpRequest,
+    pool: web::Data<SqlitePool>,
+    config: web::Data<crate::config::Config>,
+) -> actix_web::HttpResponse {
+    let merchant = match auth::resolve_session(&req, &pool).await {
+        Some(m) => m,
+        None => {
+            return actix_web::HttpResponse::Unauthorized().json(serde_json::json!({
+                "error": "Not authenticated"
+            }));
+        }
+    };
+
+    if config.fee_enabled() {
+        match crate::merchants::has_outstanding_balance(pool.get_ref(), &merchant.id).await {
+            Ok(true) => {
+                return actix_web::HttpResponse::Forbidden().json(serde_json::json!({
+                    "error": "Cannot delete account with outstanding billing balance. Please settle your fees first."
+                }));
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to check billing balance");
+                return actix_web::HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": "Internal error"
+                }));
+            }
+            _ => {}
+        }
+    }
+
+    match crate::merchants::delete_merchant(pool.get_ref(), &merchant.id).await {
+        Ok(()) => actix_web::HttpResponse::Ok().json(serde_json::json!({
+            "status": "deleted",
+            "message": "Your account and all associated data have been permanently deleted."
+        })),
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to delete merchant account");
+            actix_web::HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Failed to delete account"
             }))
         }
     }
