@@ -529,7 +529,7 @@ async fn refund_invoice(
     }
 }
 
-/// Public endpoint: buyer can save a refund address on their invoice.
+/// Buyer can save a refund address on their invoice (write-once).
 async fn update_refund_address(
     pool: web::Data<SqlitePool>,
     path: web::Path<String>,
@@ -555,8 +555,8 @@ async fn update_refund_address(
             "status": "saved",
             "refund_address": address,
         })),
-        Ok(false) => actix_web::HttpResponse::BadRequest().json(serde_json::json!({
-            "error": "Cannot update refund address for this invoice status"
+        Ok(false) => actix_web::HttpResponse::Conflict().json(serde_json::json!({
+            "error": "Refund address is already set or invoice status does not allow changes"
         })),
         Err(e) => {
             tracing::error!(error = %e, "Failed to update refund address");

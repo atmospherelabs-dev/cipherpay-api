@@ -418,7 +418,8 @@ pub async fn accumulate_payment(pool: &SqlitePool, invoice_id: &str, additional_
 pub async fn update_refund_address(pool: &SqlitePool, invoice_id: &str, address: &str) -> anyhow::Result<bool> {
     let result = sqlx::query(
         "UPDATE invoices SET refund_address = ?
-         WHERE id = ? AND status IN ('pending', 'underpaid', 'expired')"
+         WHERE id = ? AND status IN ('pending', 'underpaid', 'expired')
+         AND (refund_address IS NULL OR refund_address = '')"
     )
     .bind(address)
     .bind(invoice_id)

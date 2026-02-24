@@ -33,13 +33,7 @@ fn validate_registration(
         validation::validate_length("name", name, 100)?;
     }
     validation::validate_length("ufvk", &req.ufvk, 2000)?;
-    let valid_prefixes = ["uview", "utest"];
-    if !valid_prefixes.iter().any(|p| req.ufvk.starts_with(p)) {
-        return Err(validation::ValidationError::invalid(
-            "ufvk",
-            "must be a valid Zcash Unified Full Viewing Key (uview or utest prefix)",
-        ));
-    }
+    validation::validate_ufvk_network("ufvk", &req.ufvk, is_testnet)?;
     if let Some(ref url) = req.webhook_url {
         if !url.is_empty() {
             validation::validate_webhook_url("webhook_url", url, is_testnet)?;

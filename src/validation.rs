@@ -103,6 +103,35 @@ pub fn validate_webhook_url(
     Ok(())
 }
 
+pub fn validate_ufvk_network(
+    field: &str,
+    ufvk: &str,
+    is_testnet: bool,
+) -> Result<(), ValidationError> {
+    if is_testnet {
+        if !ufvk.starts_with("uviewtest") {
+            return Err(ValidationError::invalid(
+                field,
+                "this server is running on testnet — please use a testnet viewing key (uviewtest...)",
+            ));
+        }
+    } else {
+        if ufvk.starts_with("uviewtest") {
+            return Err(ValidationError::invalid(
+                field,
+                "this server is running on mainnet — please use a mainnet viewing key (uview1...)",
+            ));
+        }
+        if !ufvk.starts_with("uview") {
+            return Err(ValidationError::invalid(
+                field,
+                "must be a valid Zcash Unified Full Viewing Key (uview... prefix)",
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub fn validate_zcash_address(field: &str, addr: &str) -> Result<(), ValidationError> {
     validate_length(field, addr, 500)?;
 
@@ -219,6 +248,21 @@ mod tests {
         // userinfo bypass attempt
         assert!(validate_webhook_url("url", "https://evil@localhost/hook", false).is_err());
         assert!(validate_webhook_url("url", "https://user:pass@example.com/hook", false).is_err());
+    }
+
+    #[test]
+    fn test_validate_ufvk_network() {
+        // Testnet server should accept testnet keys, reject mainnet keys
+        assert!(validate_ufvk_network("ufvk", "uviewtest1abc", true).is_ok());
+        assert!(validate_ufvk_network("ufvk", "uview1abc", true).is_err());
+
+        // Mainnet server should accept mainnet keys, reject testnet keys
+        assert!(validate_ufvk_network("ufvk", "uview1abc", false).is_ok());
+        assert!(validate_ufvk_network("ufvk", "uviewtest1abc", false).is_err());
+
+        // Invalid prefix rejected on both
+        assert!(validate_ufvk_network("ufvk", "garbage", true).is_err());
+        assert!(validate_ufvk_network("ufvk", "garbage", false).is_err());
     }
 
     #[test]

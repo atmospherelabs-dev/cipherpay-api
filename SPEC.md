@@ -1,5 +1,10 @@
 # CipherPay Technical Specification
 
+> **⚠️ DEPRECATED** — This spec was the initial design document and is no longer maintained.
+> The implementation has diverged significantly (SQLite instead of PostgreSQL, 30+ API endpoints, billing system, product pages, WooCommerce plugin, etc.).
+> For current API documentation, see the live docs at [cipherpay.app/docs](https://cipherpay.app/docs).
+> For backend usage, refer to [README.md](./README.md) and the source code.
+
 > Shielded Zcash payment service with mempool detection.
 
 ## Overview
