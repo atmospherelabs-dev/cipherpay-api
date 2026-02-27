@@ -14,7 +14,7 @@ mod webhooks;
 
 use actix_cors::Cors;
 use actix_governor::{Governor, GovernorConfigBuilder};
-use actix_web::{web, App, HttpServer};
+use actix_web::{web, App, HttpServer, middleware};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -30,6 +30,7 @@ async fn main() -> anyhow::Result<()> {
     let config = config::Config::from_env()?;
     let pool = db::create_pool(&config.database_url).await?;
     db::migrate_encrypt_ufvks(&pool, &config.encryption_key).await?;
+    db::migrate_encrypt_webhook_secrets(&pool, &config.encryption_key).await?;
     let http_client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
@@ -43,7 +44,6 @@ async fn main() -> anyhow::Result<()> {
         network = %config.network,
         api = %format!("{}:{}", config.api_host, config.api_port),
         cipherscan = %config.cipherscan_api_url,
-        db = %config.database_url,
         "CipherPay starting"
     );
 
@@ -56,11 +56,24 @@ async fn main() -> anyhow::Result<()> {
 
     let retry_pool = pool.clone();
     let retry_http = http_client.clone();
+    let retry_enc_key = config.encryption_key.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
         loop {
             interval.tick().await;
-            let _ = webhooks::retry_failed(&retry_pool, &retry_http).await;
+            let _ = webhooks::retry_failed(&retry_pool, &retry_http, &retry_enc_key).await;
+        }
+    });
+
+    let purge_pool = pool.clone();
+    let purge_days = config.data_purge_days;
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+        loop {
+            interval.tick().await;
+            if let Err(e) = db::run_data_purge(&purge_pool, purge_days).await {
+                tracing::error!(error = %e, "Data purge error");
+            }
         }
     });
 
@@ -119,10 +132,18 @@ async fn main() -> anyhow::Result<()> {
         App::new()
             .wrap(cors)
             .wrap(Governor::new(&rate_limit))
+            .wrap(middleware::DefaultHeaders::new()
+                .add(("X-Content-Type-Options", "nosniff"))
+                .add(("X-Frame-Options", "DENY"))
+                .add(("Referrer-Policy", "strict-origin-when-cross-origin"))
+                .add(("Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload"))
+                .add(("Permissions-Policy", "camera=(), microphone=(), geolocation=()"))
+            )
             .app_data(web::JsonConfig::default().limit(65_536))
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(config.clone()))
             .app_data(web::Data::new(price_service.clone()))
+            .app_data(web::Data::new(http_client.clone()))
             .configure(api::configure)
             .route("/", web::get().to(serve_ui))
             .service(web::resource("/widget/{filename}")

@@ -399,6 +399,26 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
     .await
     .ok();
 
+    // x402 verification log
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS x402_verifications (
+            id TEXT PRIMARY KEY,
+            merchant_id TEXT NOT NULL REFERENCES merchants(id),
+            txid TEXT NOT NULL,
+            amount_zatoshis INTEGER,
+            amount_zec REAL,
+            status TEXT NOT NULL CHECK (status IN ('verified', 'rejected')),
+            reason TEXT,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        )"
+    )
+    .execute(&pool)
+    .await
+    .ok();
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_x402_merchant ON x402_verifications(merchant_id, created_at)")
+        .execute(&pool).await.ok();
+
     tracing::info!("Database ready (SQLite)");
     Ok(pool)
 }
@@ -423,6 +443,69 @@ pub async fn set_scanner_state(pool: &SqlitePool, key: &str, value: &str) -> any
     .bind(value)
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+/// Periodic data purge: cleans up expired sessions, old webhook deliveries,
+/// expired recovery tokens, and optionally old expired/refunded invoices.
+pub async fn run_data_purge(pool: &SqlitePool, purge_days: i64) -> anyhow::Result<()> {
+    let cutoff = format!("-{} days", purge_days);
+
+    // Expired sessions
+    let sessions = sqlx::query(
+        "DELETE FROM sessions WHERE expires_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
+    ).execute(pool).await?;
+
+    // Expired recovery tokens
+    let tokens = sqlx::query(
+        "DELETE FROM recovery_tokens WHERE expires_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
+    ).execute(pool).await?;
+
+    // Old delivered/failed webhook deliveries
+    let webhooks = sqlx::query(
+        "DELETE FROM webhook_deliveries WHERE status IN ('delivered', 'failed')
+         AND created_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?)"
+    ).bind(&cutoff).execute(pool).await?;
+
+    let total = sessions.rows_affected() + tokens.rows_affected() + webhooks.rows_affected();
+    if total > 0 {
+        tracing::info!(
+            sessions = sessions.rows_affected(),
+            tokens = tokens.rows_affected(),
+            webhooks = webhooks.rows_affected(),
+            "Data purge completed"
+        );
+    }
+    Ok(())
+}
+
+/// Encrypt any plaintext webhook secrets in the database. Called once at startup when
+/// ENCRYPTION_KEY is set. Plaintext secrets are identified by their "whsec_" prefix.
+pub async fn migrate_encrypt_webhook_secrets(pool: &SqlitePool, encryption_key: &str) -> anyhow::Result<()> {
+    if encryption_key.is_empty() {
+        return Ok(());
+    }
+
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT id, webhook_secret FROM merchants WHERE webhook_secret LIKE 'whsec_%'"
+    )
+    .fetch_all(pool)
+    .await?;
+
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    tracing::info!(count = rows.len(), "Encrypting plaintext webhook secrets at rest");
+    for (id, secret) in &rows {
+        let encrypted = crate::crypto::encrypt(secret, encryption_key)?;
+        sqlx::query("UPDATE merchants SET webhook_secret = ? WHERE id = ?")
+            .bind(&encrypted)
+            .bind(id)
+            .execute(pool)
+            .await?;
+    }
+    tracing::info!("Webhook secret encryption migration complete");
     Ok(())
 }
 

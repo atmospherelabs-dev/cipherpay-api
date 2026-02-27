@@ -83,6 +83,12 @@ pub async fn create_merchant(
         crate::crypto::encrypt(&req.ufvk, encryption_key)?
     };
 
+    let stored_webhook_secret = if encryption_key.is_empty() {
+        webhook_secret.clone()
+    } else {
+        crate::crypto::encrypt(&webhook_secret, encryption_key)?
+    };
+
     sqlx::query(
         "INSERT INTO merchants (id, name, api_key_hash, dashboard_token_hash, ufvk, payment_address, webhook_url, webhook_secret, recovery_email, diversifier_index)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)"
@@ -94,12 +100,12 @@ pub async fn create_merchant(
     .bind(&stored_ufvk)
     .bind(&payment_address)
     .bind(&req.webhook_url)
-    .bind(&webhook_secret)
+    .bind(&stored_webhook_secret)
     .bind(&req.email)
     .execute(pool)
     .await?;
 
-    tracing::info!(merchant_id = %id, address = %payment_address, "Merchant created with derived address");
+    tracing::info!(merchant_id = %id, "Merchant created with derived address");
 
     Ok(CreateMerchantResponse {
         merchant_id: id,
@@ -119,10 +125,15 @@ fn row_to_merchant(r: MerchantRow, encryption_key: &str) -> Merchant {
             tracing::error!(error = %e, "Failed to decrypt UFVK, using raw value");
             r.4.clone()
         });
+    let webhook_secret = crate::crypto::decrypt_webhook_secret(&r.7, encryption_key)
+        .unwrap_or_else(|e| {
+            tracing::error!(error = %e, "Failed to decrypt webhook secret, using raw value");
+            r.7.clone()
+        });
     Merchant {
         id: r.0, name: r.1, api_key_hash: r.2, dashboard_token_hash: r.3,
         ufvk, payment_address: r.5, webhook_url: r.6,
-        webhook_secret: r.7, recovery_email: r.8, created_at: r.9,
+        webhook_secret, recovery_email: r.8, created_at: r.9,
         diversifier_index: r.10,
     }
 }
@@ -210,10 +221,15 @@ pub async fn regenerate_dashboard_token(pool: &SqlitePool, merchant_id: &str) ->
     Ok(new_token)
 }
 
-pub async fn regenerate_webhook_secret(pool: &SqlitePool, merchant_id: &str) -> anyhow::Result<String> {
+pub async fn regenerate_webhook_secret(pool: &SqlitePool, merchant_id: &str, encryption_key: &str) -> anyhow::Result<String> {
     let new_secret = generate_webhook_secret();
+    let stored = if encryption_key.is_empty() {
+        new_secret.clone()
+    } else {
+        crate::crypto::encrypt(&new_secret, encryption_key)?
+    };
     sqlx::query("UPDATE merchants SET webhook_secret = ? WHERE id = ?")
-        .bind(&new_secret)
+        .bind(&stored)
         .bind(merchant_id)
         .execute(pool)
         .await?;

@@ -329,13 +329,14 @@ pub async fn regenerate_dashboard_token(
 pub async fn regenerate_webhook_secret(
     req: HttpRequest,
     pool: web::Data<SqlitePool>,
+    config: web::Data<Config>,
 ) -> HttpResponse {
     let merchant = match resolve_session(&req, &pool).await {
         Some(m) => m,
         None => return HttpResponse::Unauthorized().json(serde_json::json!({ "error": "Not authenticated" })),
     };
 
-    match merchants::regenerate_webhook_secret(pool.get_ref(), &merchant.id).await {
+    match merchants::regenerate_webhook_secret(pool.get_ref(), &merchant.id, &config.encryption_key).await {
         Ok(new_secret) => HttpResponse::Ok().json(serde_json::json!({ "webhook_secret": new_secret })),
         Err(e) => {
             tracing::error!(error = %e, "Failed to regenerate webhook secret");

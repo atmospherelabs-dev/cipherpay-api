@@ -72,6 +72,15 @@ pub fn decrypt_or_plaintext(data: &str, key_hex: &str) -> Result<String> {
     decrypt(data, key_hex)
 }
 
+/// Decrypt a webhook secret, handling migration from plaintext.
+/// Plaintext webhook secrets start with "whsec_".
+pub fn decrypt_webhook_secret(data: &str, key_hex: &str) -> Result<String> {
+    if key_hex.is_empty() || data.starts_with("whsec_") {
+        return Ok(data.to_string());
+    }
+    decrypt(data, key_hex)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -135,14 +135,15 @@ fn refresh_key_cache<'a>(
 }
 
 /// Fire a webhook without blocking the scan loop.
-fn spawn_webhook(pool: &SqlitePool, http: &reqwest::Client, invoice_id: &str, event: &str, txid: &str) {
+fn spawn_webhook(pool: &SqlitePool, http: &reqwest::Client, invoice_id: &str, event: &str, txid: &str, encryption_key: &str) {
     let pool = pool.clone();
     let http = http.clone();
     let invoice_id = invoice_id.to_string();
     let event = event.to_string();
     let txid = txid.to_string();
+    let enc_key = encryption_key.to_string();
     tokio::spawn(async move {
-        if let Err(e) = webhooks::dispatch(&pool, &http, &invoice_id, &event, &txid).await {
+        if let Err(e) = webhooks::dispatch(&pool, &http, &invoice_id, &event, &txid, &enc_key).await {
             tracing::error!(invoice_id, event, error = %e, "Async webhook failed");
         }
     });
@@ -153,16 +154,19 @@ fn spawn_payment_webhook(
     pool: &SqlitePool, http: &reqwest::Client,
     invoice_id: &str, event: &str, txid: &str,
     price_zatoshis: i64, received_zatoshis: i64, overpaid: bool,
+    encryption_key: &str,
 ) {
     let pool = pool.clone();
     let http = http.clone();
     let invoice_id = invoice_id.to_string();
     let event = event.to_string();
     let txid = txid.to_string();
+    let enc_key = encryption_key.to_string();
     tokio::spawn(async move {
         if let Err(e) = webhooks::dispatch_payment(
             &pool, &http, &invoice_id, &event, &txid,
             price_zatoshis, received_zatoshis, overpaid,
+            &enc_key,
         ).await {
             tracing::error!(invoice_id, event, error = %e, "Async payment webhook failed");
         }
@@ -257,13 +261,13 @@ async fn scan_mempool(
                 if changed {
                     let overpaid = new_received > invoice.price_zatoshis + 1000;
                     spawn_payment_webhook(pool, http, invoice_id, "detected", txid,
-                        invoice.price_zatoshis, new_received, overpaid);
+                        invoice.price_zatoshis, new_received, overpaid, &config.encryption_key);
                     try_detect_fee(pool, config, raw_hex, invoice_id).await;
                 }
             } else if invoice.status == "pending" {
                 invoices::mark_underpaid(pool, invoice_id, new_received, txid).await?;
                 spawn_payment_webhook(pool, http, invoice_id, "underpaid", txid,
-                    invoice.price_zatoshis, new_received, false);
+                    invoice.price_zatoshis, new_received, false, &config.encryption_key);
             }
         }
     }
@@ -291,7 +295,7 @@ async fn scan_blocks(
                 Ok(true) => {
                     let changed = invoices::mark_confirmed(pool, &invoice.id).await?;
                     if changed {
-                        spawn_webhook(pool, http, &invoice.id, "confirmed", txid);
+                        spawn_webhook(pool, http, &invoice.id, "confirmed", txid, &config.encryption_key);
                         on_invoice_confirmed(pool, config, invoice).await;
                     }
                 }
@@ -364,7 +368,7 @@ async fn scan_blocks(
                         if confirmed {
                             let overpaid = new_received > invoice.price_zatoshis + 1000;
                             spawn_payment_webhook(pool, http, invoice_id, "confirmed", txid,
-                                invoice.price_zatoshis, new_received, overpaid);
+                                invoice.price_zatoshis, new_received, overpaid, &config.encryption_key);
                             on_invoice_confirmed(pool, config, invoice).await;
                         }
                         try_detect_fee(pool, config, &raw_hex, invoice_id).await;
@@ -372,7 +376,7 @@ async fn scan_blocks(
                 } else if new_received < min && invoice.status == "pending" {
                     invoices::mark_underpaid(pool, invoice_id, new_received, txid).await?;
                     spawn_payment_webhook(pool, http, invoice_id, "underpaid", txid,
-                        invoice.price_zatoshis, new_received, false);
+                        invoice.price_zatoshis, new_received, false, &config.encryption_key);
                 }
             }
 

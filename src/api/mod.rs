@@ -4,6 +4,7 @@ pub mod merchants;
 pub mod products;
 pub mod rates;
 pub mod status;
+pub mod x402;
 
 use actix_governor::{Governor, GovernorConfigBuilder};
 use actix_web::web;
@@ -37,6 +38,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                     .route("/me/billing/history", web::get().to(billing_history))
                     .route("/me/billing/settle", web::post().to(billing_settle))
                     .route("/me/delete", web::post().to(delete_account))
+                    .route("/me/x402/history", web::get().to(x402::history))
             )
             .service(
                 web::scope("/auth")
@@ -65,7 +67,9 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/invoices/{id}/refund", web::post().to(refund_invoice))
             .route("/invoices/{id}/refund-address", web::patch().to(update_refund_address))
             .route("/invoices/{id}/qr", web::get().to(qr_code))
-            .route("/rates", web::get().to(rates::get)),
+            .route("/rates", web::get().to(rates::get))
+            // x402 facilitator
+            .route("/x402/verify", web::post().to(x402::verify)),
     );
 }
 
@@ -204,7 +208,6 @@ async fn health() -> actix_web::HttpResponse {
     actix_web::HttpResponse::Ok().json(serde_json::json!({
         "status": "ok",
         "service": "cipherpay",
-        "version": env!("CARGO_PKG_VERSION"),
     }))
 }
 

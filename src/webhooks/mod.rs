@@ -30,6 +30,7 @@ pub async fn dispatch(
     invoice_id: &str,
     event: &str,
     txid: &str,
+    encryption_key: &str,
 ) -> anyhow::Result<()> {
     let merchant_row = sqlx::query_as::<_, (Option<String>, String)>(
         "SELECT m.webhook_url, m.webhook_secret FROM invoices i
@@ -40,10 +41,11 @@ pub async fn dispatch(
     .fetch_optional(pool)
     .await?;
 
-    let (webhook_url, webhook_secret) = match merchant_row {
+    let (webhook_url, raw_secret) = match merchant_row {
         Some((Some(url), secret)) if !url.is_empty() => (url, secret),
         _ => return Ok(()),
     };
+    let webhook_secret = crate::crypto::decrypt_webhook_secret(&raw_secret, encryption_key)?;
 
     if let Err(reason) = crate::validation::resolve_and_check_host(&webhook_url) {
         tracing::warn!(invoice_id, url = %webhook_url, %reason, "Webhook blocked: SSRF protection");
@@ -115,6 +117,7 @@ pub async fn dispatch_payment(
     price_zatoshis: i64,
     received_zatoshis: i64,
     overpaid: bool,
+    encryption_key: &str,
 ) -> anyhow::Result<()> {
     let merchant_row = sqlx::query_as::<_, (Option<String>, String)>(
         "SELECT m.webhook_url, m.webhook_secret FROM invoices i
@@ -125,10 +128,11 @@ pub async fn dispatch_payment(
     .fetch_optional(pool)
     .await?;
 
-    let (webhook_url, webhook_secret) = match merchant_row {
+    let (webhook_url, raw_secret) = match merchant_row {
         Some((Some(url), secret)) if !url.is_empty() => (url, secret),
         _ => return Ok(()),
     };
+    let webhook_secret = crate::crypto::decrypt_webhook_secret(&raw_secret, encryption_key)?;
 
     if let Err(reason) = crate::validation::resolve_and_check_host(&webhook_url) {
         tracing::warn!(invoice_id, url = %webhook_url, %reason, "Webhook blocked: SSRF protection");
@@ -194,7 +198,7 @@ pub async fn dispatch_payment(
     Ok(())
 }
 
-pub async fn retry_failed(pool: &SqlitePool, http: &reqwest::Client) -> anyhow::Result<()> {
+pub async fn retry_failed(pool: &SqlitePool, http: &reqwest::Client, encryption_key: &str) -> anyhow::Result<()> {
     let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
     let rows = sqlx::query_as::<_, (String, String, String, String, i64)>(
@@ -210,7 +214,9 @@ pub async fn retry_failed(pool: &SqlitePool, http: &reqwest::Client) -> anyhow::
     .fetch_all(pool)
     .await?;
 
-    for (id, url, payload, secret, attempts) in rows {
+    for (id, url, payload, raw_secret, attempts) in rows {
+        let secret = crate::crypto::decrypt_webhook_secret(&raw_secret, encryption_key)
+            .unwrap_or(raw_secret);
         if let Err(reason) = crate::validation::resolve_and_check_host(&url) {
             tracing::warn!(delivery_id = %id, %url, %reason, "Webhook retry blocked: SSRF protection");
             sqlx::query("UPDATE webhook_deliveries SET status = 'failed' WHERE id = ?")
