@@ -137,7 +137,7 @@ cargo build --release
 # Binary at target/release/cipherpay
 ```
 
-See the companion frontend at [cipherpay](https://github.com/Kenbak/cipherpay) for the hosted checkout and merchant dashboard.
+See the companion frontend at [cipherpay](https://github.com/atmospherelabs-dev/cipherpay-web) for the hosted checkout and merchant dashboard.
 
 ## License
 
