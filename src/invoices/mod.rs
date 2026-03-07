@@ -55,7 +55,8 @@ pub struct CreateInvoiceRequest {
     pub product_id: Option<String>,
     pub product_name: Option<String>,
     pub size: Option<String>,
-    pub price_eur: f64,
+    #[serde(alias = "price_eur")]
+    pub amount: f64,
     pub currency: Option<String>,
     pub refund_address: Option<String>,
 }
@@ -97,14 +98,14 @@ pub async fn create_invoice(
     let memo_code = generate_memo_code();
     let currency = req.currency.as_deref().unwrap_or("EUR");
     let (price_eur, price_usd, price_zec) = if currency == "USD" {
-        let usd = req.price_eur;
+        let usd = req.amount;
         let zec = usd / zec_usd;
         let eur = zec * zec_eur;
         (eur, usd, zec)
     } else {
-        let zec = req.price_eur / zec_eur;
+        let zec = req.amount / zec_eur;
         let usd = zec * zec_usd;
-        (req.price_eur, usd, zec)
+        (req.amount, usd, zec)
     };
     let expires_at = (Utc::now() + Duration::minutes(expiry_minutes))
         .format("%Y-%m-%dT%H:%M:%SZ")
