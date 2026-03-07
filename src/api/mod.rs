@@ -470,6 +470,11 @@ async fn cancel_invoice(
 
     match crate::invoices::get_invoice(pool.get_ref(), &invoice_id).await {
         Ok(Some(inv)) if inv.merchant_id == merchant.id && inv.status == "pending" => {
+            if inv.product_name.as_deref() == Some("Fee Settlement") {
+                return actix_web::HttpResponse::Forbidden().json(serde_json::json!({
+                    "error": "Settlement invoices cannot be cancelled"
+                }));
+            }
             if let Err(e) = crate::invoices::mark_expired(pool.get_ref(), &invoice_id).await {
                 return actix_web::HttpResponse::InternalServerError().json(serde_json::json!({
                     "error": format!("{}", e)
