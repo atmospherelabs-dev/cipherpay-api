@@ -112,6 +112,7 @@ pub async fn me(
         "***".to_string()
     };
 
+
     let masked_email = merchant.recovery_email.as_deref().map(|email| {
         if let Some(at) = email.find('@') {
             let local = &email[..at];
