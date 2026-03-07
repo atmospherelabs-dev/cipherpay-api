@@ -211,16 +211,38 @@ pub async fn ensure_billing_cycle(pool: &SqlitePool, merchant_id: &str, config: 
     let period_start = now.format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let period_end = (now + Duration::days(cycle_days)).format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
+    let carried: f64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(outstanding_zec), 0.0) FROM billing_cycles
+         WHERE merchant_id = ? AND status = 'carried_over'"
+    )
+    .bind(merchant_id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0.0);
+
     sqlx::query(
-        "INSERT INTO billing_cycles (id, merchant_id, period_start, period_end, status)
-         VALUES (?, ?, ?, ?, 'open')"
+        "INSERT INTO billing_cycles (id, merchant_id, period_start, period_end, total_fees_zec, outstanding_zec, status)
+         VALUES (?, ?, ?, ?, ?, ?, 'open')"
     )
     .bind(&id)
     .bind(merchant_id)
     .bind(&period_start)
     .bind(&period_end)
+    .bind(carried)
+    .bind(carried)
     .execute(pool)
     .await?;
+
+    if carried > 0.0 {
+        sqlx::query(
+            "UPDATE billing_cycles SET status = 'paid', outstanding_zec = 0.0
+             WHERE merchant_id = ? AND status = 'carried_over'"
+        )
+        .bind(merchant_id)
+        .execute(pool)
+        .await?;
+        tracing::info!(merchant_id, carried, "Carried over outstanding fees to new cycle");
+    }
 
     sqlx::query(
         "UPDATE merchants SET billing_started_at = COALESCE(billing_started_at, ?) WHERE id = ?"
@@ -317,14 +339,14 @@ pub async fn process_billing_cycles(
                 .await?;
             tracing::info!(merchant_id = %cycle.merchant_id, "Billing cycle closed (fully collected)");
         } else if cycle.outstanding_zec < MIN_SETTLEMENT_ZEC {
-            sqlx::query("UPDATE billing_cycles SET status = 'paid' WHERE id = ?")
+            sqlx::query("UPDATE billing_cycles SET status = 'carried_over' WHERE id = ?")
                 .bind(&cycle.id)
                 .execute(pool)
                 .await?;
             tracing::info!(
                 merchant_id = %cycle.merchant_id,
                 outstanding = cycle.outstanding_zec,
-                "Billing cycle closed (below minimum settlement threshold, carried over)"
+                "Billing cycle closed (below minimum, carrying over to next cycle)"
             );
         } else if let Some(fee_addr) = &config.fee_address {
             let grace_days: i64 = match get_trust_tier(pool, &cycle.merchant_id).await?.as_str() {
@@ -370,7 +392,7 @@ pub async fn process_billing_cycles(
 
     for cycle in &overdue_cycles {
         if cycle.outstanding_zec < 0.05 {
-            sqlx::query("UPDATE billing_cycles SET status = 'paid' WHERE id = ?")
+            sqlx::query("UPDATE billing_cycles SET status = 'carried_over' WHERE id = ?")
                 .bind(&cycle.id)
                 .execute(pool)
                 .await?;
@@ -378,7 +400,7 @@ pub async fn process_billing_cycles(
                 .bind(&cycle.merchant_id)
                 .execute(pool)
                 .await?;
-            tracing::info!(merchant_id = %cycle.merchant_id, outstanding = cycle.outstanding_zec, "Overdue cycle forgiven (below minimum)");
+            tracing::info!(merchant_id = %cycle.merchant_id, outstanding = cycle.outstanding_zec, "Overdue cycle below minimum — carrying over");
             continue;
         }
         sqlx::query("UPDATE billing_cycles SET status = 'past_due' WHERE id = ?")
