@@ -214,8 +214,8 @@ fn validate_invoice_request(req: &CreateInvoiceRequest) -> Result<(), validation
             validation::validate_zcash_address("refund_address", addr)?;
         }
     }
-    if req.price_eur < 0.0 {
-        return Err(validation::ValidationError::invalid("price_eur", "must be non-negative"));
+    if req.amount < 0.0 {
+        return Err(validation::ValidationError::invalid("amount", "must be non-negative"));
     }
     Ok(())
 }

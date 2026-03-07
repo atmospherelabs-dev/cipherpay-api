@@ -150,7 +150,7 @@ async fn checkout(
         product_id: Some(product.id.clone()),
         product_name: Some(product.name.clone()),
         size: body.variant.clone(),
-        price_eur: product.price_eur,
+        amount: product.price_eur,
         currency: Some(product.currency.clone()),
         refund_address: body.refund_address.clone(),
     };
