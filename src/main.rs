@@ -31,8 +31,18 @@ async fn main() -> anyhow::Result<()> {
     let pool = db::create_pool(&config.database_url).await?;
     db::migrate_encrypt_ufvks(&pool, &config.encryption_key).await?;
     db::migrate_encrypt_webhook_secrets(&pool, &config.encryption_key).await?;
+    let mut default_headers = reqwest::header::HeaderMap::new();
+    default_headers.insert("User-Agent", reqwest::header::HeaderValue::from_static("CipherPay/1.0"));
+    if let Ok(key) = std::env::var("CIPHERSCAN_SERVICE_KEY") {
+        if !key.is_empty() {
+            if let Ok(val) = reqwest::header::HeaderValue::from_str(&key) {
+                default_headers.insert("X-Service-Key", val);
+            }
+        }
+    }
     let http_client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
+        .default_headers(default_headers)
         .build()?;
 
     let price_service = invoices::pricing::PriceService::new(
