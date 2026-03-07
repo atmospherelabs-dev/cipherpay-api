@@ -307,15 +307,28 @@ pub async fn process_billing_cycles(
     .await?;
 
     for cycle in &expired_cycles {
+        // Don't enforce for tiny balances — carry over to next cycle instead
+        const MIN_SETTLEMENT_ZEC: f64 = 0.05;
+
         if cycle.outstanding_zec <= 0.0001 {
             sqlx::query("UPDATE billing_cycles SET status = 'paid' WHERE id = ?")
                 .bind(&cycle.id)
                 .execute(pool)
                 .await?;
             tracing::info!(merchant_id = %cycle.merchant_id, "Billing cycle closed (fully collected)");
+        } else if cycle.outstanding_zec < MIN_SETTLEMENT_ZEC {
+            sqlx::query("UPDATE billing_cycles SET status = 'paid' WHERE id = ?")
+                .bind(&cycle.id)
+                .execute(pool)
+                .await?;
+            tracing::info!(
+                merchant_id = %cycle.merchant_id,
+                outstanding = cycle.outstanding_zec,
+                "Billing cycle closed (below minimum settlement threshold, carried over)"
+            );
         } else if let Some(fee_addr) = &config.fee_address {
             let grace_days: i64 = match get_trust_tier(pool, &cycle.merchant_id).await?.as_str() {
-                "new" => 3,
+                "new" => 7,
                 "trusted" => 14,
                 _ => 7,
             };
@@ -356,6 +369,18 @@ pub async fn process_billing_cycles(
     .await?;
 
     for cycle in &overdue_cycles {
+        if cycle.outstanding_zec < 0.05 {
+            sqlx::query("UPDATE billing_cycles SET status = 'paid' WHERE id = ?")
+                .bind(&cycle.id)
+                .execute(pool)
+                .await?;
+            sqlx::query("UPDATE merchants SET billing_status = 'active' WHERE id = ?")
+                .bind(&cycle.merchant_id)
+                .execute(pool)
+                .await?;
+            tracing::info!(merchant_id = %cycle.merchant_id, outstanding = cycle.outstanding_zec, "Overdue cycle forgiven (below minimum)");
+            continue;
+        }
         sqlx::query("UPDATE billing_cycles SET status = 'past_due' WHERE id = ?")
             .bind(&cycle.id)
             .execute(pool)
@@ -364,7 +389,7 @@ pub async fn process_billing_cycles(
             .bind(&cycle.merchant_id)
             .execute(pool)
             .await?;
-        tracing::warn!(merchant_id = %cycle.merchant_id, "Merchant billing past due");
+        tracing::warn!(merchant_id = %cycle.merchant_id, outstanding = cycle.outstanding_zec, "Merchant billing past due");
     }
 
     // 3. Enforce suspension (7 days after past_due for new, 14 for standard/trusted)
