@@ -95,6 +95,11 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
         .await
         .ok();
 
+    sqlx::query("ALTER TABLE invoices ADD COLUMN refund_txid TEXT")
+        .execute(&pool)
+        .await
+        .ok();
+
     sqlx::query("ALTER TABLE products ADD COLUMN currency TEXT NOT NULL DEFAULT 'EUR'")
         .execute(&pool)
         .await

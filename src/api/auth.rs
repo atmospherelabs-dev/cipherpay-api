@@ -160,7 +160,7 @@ pub async fn my_invoices(
          price_eur, price_usd, currency, price_zec, zec_rate_at_creation, payment_address, zcash_uri,
          NULL AS merchant_name,
          refund_address, status, detected_txid, detected_at,
-         confirmed_at, refunded_at, expires_at, purge_after, created_at,
+         confirmed_at, refunded_at, refund_txid, expires_at, purge_after, created_at,
          orchard_receiver_hex, diversifier_index,
          price_zatoshis, received_zatoshis
          FROM invoices WHERE merchant_id = ?

@@ -28,6 +28,7 @@ pub struct Invoice {
     pub detected_at: Option<String>,
     pub confirmed_at: Option<String>,
     pub refunded_at: Option<String>,
+    pub refund_txid: Option<String>,
     pub expires_at: String,
     pub purge_after: Option<String>,
     pub created_at: String,
@@ -196,7 +197,7 @@ pub async fn get_invoice(pool: &SqlitePool, id: &str) -> anyhow::Result<Option<I
          i.zcash_uri,
          NULLIF(m.name, '') AS merchant_name,
          i.refund_address, i.status, i.detected_txid, i.detected_at,
-         i.confirmed_at, i.refunded_at, i.expires_at, i.purge_after, i.created_at,
+         i.confirmed_at, i.refunded_at, i.refund_txid, i.expires_at, i.purge_after, i.created_at,
          i.orchard_receiver_hex, i.diversifier_index,
          i.price_zatoshis, i.received_zatoshis
          FROM invoices i
@@ -219,7 +220,7 @@ pub async fn get_invoice_by_memo(pool: &SqlitePool, memo_code: &str) -> anyhow::
          i.zcash_uri,
          NULLIF(m.name, '') AS merchant_name,
          i.refund_address, i.status, i.detected_txid, i.detected_at,
-         i.confirmed_at, i.refunded_at, i.expires_at, i.purge_after, i.created_at,
+         i.confirmed_at, i.refunded_at, i.refund_txid, i.expires_at, i.purge_after, i.created_at,
          i.orchard_receiver_hex, i.diversifier_index,
          i.price_zatoshis, i.received_zatoshis
          FROM invoices i
@@ -250,7 +251,7 @@ pub async fn get_pending_invoices(pool: &SqlitePool) -> anyhow::Result<Vec<Invoi
          price_eur, price_usd, currency, price_zec, zec_rate_at_creation, payment_address, zcash_uri,
          NULL AS merchant_name,
          refund_address, status, detected_txid, detected_at,
-         confirmed_at, NULL AS refunded_at, expires_at, purge_after, created_at,
+         confirmed_at, NULL AS refunded_at, NULL AS refund_txid, expires_at, purge_after, created_at,
          orchard_receiver_hex, diversifier_index,
          price_zatoshis, received_zatoshis
          FROM invoices WHERE status IN ('pending', 'underpaid', 'detected')
@@ -269,7 +270,7 @@ pub async fn find_by_orchard_receiver(pool: &SqlitePool, receiver_hex: &str) -> 
          price_eur, price_usd, currency, price_zec, zec_rate_at_creation, payment_address, zcash_uri,
          NULL AS merchant_name,
          refund_address, status, detected_txid, detected_at,
-         confirmed_at, NULL AS refunded_at, expires_at, purge_after, created_at,
+         confirmed_at, NULL AS refunded_at, NULL AS refund_txid, expires_at, purge_after, created_at,
          orchard_receiver_hex, diversifier_index,
          price_zatoshis, received_zatoshis
          FROM invoices WHERE orchard_receiver_hex = ? AND status IN ('pending', 'underpaid', 'detected')
@@ -322,13 +323,14 @@ pub async fn mark_confirmed(pool: &SqlitePool, invoice_id: &str) -> anyhow::Resu
     Ok(changed)
 }
 
-pub async fn mark_refunded(pool: &SqlitePool, invoice_id: &str) -> anyhow::Result<()> {
+pub async fn mark_refunded(pool: &SqlitePool, invoice_id: &str, refund_txid: Option<&str>) -> anyhow::Result<()> {
     let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     sqlx::query(
-        "UPDATE invoices SET status = 'refunded', refunded_at = ?
+        "UPDATE invoices SET status = 'refunded', refunded_at = ?, refund_txid = ?
          WHERE id = ? AND status = 'confirmed'"
     )
     .bind(&now)
+    .bind(refund_txid)
     .bind(invoice_id)
     .execute(pool)
     .await?;
