@@ -126,6 +126,7 @@ pub async fn get(
                 "detected_at": inv.detected_at,
                 "confirmed_at": inv.confirmed_at,
                 "refunded_at": inv.refunded_at,
+                "refund_txid": inv.refund_txid,
                 "expires_at": inv.expires_at,
                 "created_at": inv.created_at,
                 "received_zec": received_zec,

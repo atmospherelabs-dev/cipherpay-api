@@ -500,6 +500,7 @@ async fn refund_invoice(
     req: actix_web::HttpRequest,
     pool: web::Data<SqlitePool>,
     path: web::Path<String>,
+    body: web::Json<serde_json::Value>,
 ) -> actix_web::HttpResponse {
     let merchant = match auth::resolve_session(&req, &pool).await {
         Some(m) => m,
@@ -511,10 +512,11 @@ async fn refund_invoice(
     };
 
     let invoice_id = path.into_inner();
+    let refund_txid = body.get("refund_txid").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
 
     match crate::invoices::get_invoice(pool.get_ref(), &invoice_id).await {
         Ok(Some(inv)) if inv.merchant_id == merchant.id && inv.status == "confirmed" => {
-            if let Err(e) = crate::invoices::mark_refunded(pool.get_ref(), &invoice_id).await {
+            if let Err(e) = crate::invoices::mark_refunded(pool.get_ref(), &invoice_id, refund_txid).await {
                 return actix_web::HttpResponse::InternalServerError().json(serde_json::json!({
                     "error": format!("{}", e)
                 }));
@@ -522,6 +524,7 @@ async fn refund_invoice(
             let response = serde_json::json!({
                 "status": "refunded",
                 "refund_address": inv.refund_address,
+                "refund_txid": refund_txid,
             });
             actix_web::HttpResponse::Ok().json(response)
         }
