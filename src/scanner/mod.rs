@@ -391,8 +391,29 @@ async fn scan_blocks(
     Ok(())
 }
 
-/// When an invoice is confirmed, create a fee ledger entry and ensure a billing cycle exists.
+/// When an invoice is confirmed, create a fee ledger entry, ensure a billing cycle exists,
+/// and advance the subscription period if this is a subscription invoice.
 async fn on_invoice_confirmed(pool: &SqlitePool, config: &Config, invoice: &invoices::Invoice) {
+    // Advance subscription period immediately on payment
+    if let Some(ref sub_id) = invoice.subscription_id {
+        match crate::subscriptions::advance_subscription_period(pool, sub_id).await {
+            Ok(Some(sub)) => {
+                tracing::info!(
+                    sub_id,
+                    invoice_id = %invoice.id,
+                    new_period_end = %sub.current_period_end,
+                    "Subscription advanced on payment confirmation"
+                );
+            }
+            Ok(None) => {
+                tracing::warn!(sub_id, "Subscription not found for confirmed invoice");
+            }
+            Err(e) => {
+                tracing::error!(sub_id, error = %e, "Failed to advance subscription period");
+            }
+        }
+    }
+
     if !config.fee_enabled() {
         return;
     }

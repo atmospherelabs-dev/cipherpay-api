@@ -198,6 +198,100 @@ pub async fn dispatch_payment(
     Ok(())
 }
 
+/// Dispatch a generic lifecycle event webhook (subscription/invoice events).
+/// Unlike dispatch() which is invoice-centric, this takes a merchant_id directly
+/// and accepts an arbitrary JSON payload.
+pub async fn dispatch_event(
+    pool: &SqlitePool,
+    http: &reqwest::Client,
+    merchant_id: &str,
+    event: &str,
+    extra: serde_json::Value,
+    encryption_key: &str,
+) -> anyhow::Result<()> {
+    let merchant_row = sqlx::query_as::<_, (Option<String>, String)>(
+        "SELECT webhook_url, webhook_secret FROM merchants WHERE id = ?"
+    )
+    .bind(merchant_id)
+    .fetch_optional(pool)
+    .await?;
+
+    let (webhook_url, raw_secret) = match merchant_row {
+        Some((Some(url), secret)) if !url.is_empty() => (url, secret),
+        _ => return Ok(()),
+    };
+    let webhook_secret = crate::crypto::decrypt_webhook_secret(&raw_secret, encryption_key)?;
+
+    if let Err(reason) = crate::validation::resolve_and_check_host(&webhook_url) {
+        tracing::warn!(merchant_id, url = %webhook_url, %reason, "Webhook blocked: SSRF protection");
+        return Ok(());
+    }
+
+    let timestamp = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+
+    let mut payload = extra;
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert("event".to_string(), serde_json::Value::String(event.to_string()));
+        obj.insert("timestamp".to_string(), serde_json::Value::String(timestamp.clone()));
+    }
+
+    let payload_str = payload.to_string();
+    let signature = sign_payload(&webhook_secret, &timestamp, &payload_str);
+
+    let delivery_id = Uuid::new_v4().to_string();
+    let next_retry = (Utc::now() + chrono::Duration::seconds(retry_delay_secs(1)))
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+
+    // Use a synthetic invoice_id for the delivery record (webhook_deliveries requires invoice_id FK).
+    // For subscription events we'll use the invoice_id from the payload if available.
+    let invoice_id_for_fk = payload.get("invoice_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if !invoice_id_for_fk.is_empty() {
+        sqlx::query(
+            "INSERT INTO webhook_deliveries (id, invoice_id, url, payload, status, attempts, last_attempt_at, next_retry_at)
+             VALUES (?, ?, ?, ?, 'pending', 1, ?, ?)"
+        )
+        .bind(&delivery_id)
+        .bind(invoice_id_for_fk)
+        .bind(&webhook_url)
+        .bind(&payload_str)
+        .bind(&timestamp)
+        .bind(&next_retry)
+        .execute(pool)
+        .await?;
+    }
+
+    match http.post(&webhook_url)
+        .header("X-CipherPay-Signature", &signature)
+        .header("X-CipherPay-Timestamp", &timestamp)
+        .json(&payload)
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            if !invoice_id_for_fk.is_empty() {
+                sqlx::query("UPDATE webhook_deliveries SET status = 'delivered' WHERE id = ?")
+                    .bind(&delivery_id)
+                    .execute(pool)
+                    .await?;
+            }
+            tracing::info!(merchant_id, event, "Lifecycle webhook delivered");
+        }
+        Ok(resp) => {
+            tracing::warn!(merchant_id, event, status = %resp.status(), "Lifecycle webhook rejected, will retry");
+        }
+        Err(e) => {
+            tracing::warn!(merchant_id, event, error = %e, "Lifecycle webhook failed, will retry");
+        }
+    }
+
+    Ok(())
+}
+
 pub async fn retry_failed(pool: &SqlitePool, http: &reqwest::Client, encryption_key: &str) -> anyhow::Result<()> {
     let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
 

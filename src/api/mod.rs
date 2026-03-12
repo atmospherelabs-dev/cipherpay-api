@@ -75,6 +75,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/invoices/{id}", web::get().to(invoices::get))
             .route("/invoices/{id}/status", web::get().to(status::get))
             .route("/invoices/{id}/stream", web::get().to(invoice_stream))
+            .route("/invoices/{id}/finalize", web::post().to(invoices::finalize))
             .route("/invoices/{id}/cancel", web::post().to(cancel_invoice))
             .route("/invoices/{id}/refund", web::post().to(refund_invoice))
             .route("/invoices/{id}/refund-address", web::patch().to(update_refund_address))

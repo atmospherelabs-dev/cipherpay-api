@@ -658,6 +658,83 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
     sqlx::query("ALTER TABLE subscriptions ADD COLUMN label TEXT")
         .execute(&pool).await.ok();
 
+    // Subscription lifecycle: link invoices to subscriptions
+    sqlx::query("ALTER TABLE invoices ADD COLUMN subscription_id TEXT")
+        .execute(&pool).await.ok();
+    sqlx::query("ALTER TABLE subscriptions ADD COLUMN current_invoice_id TEXT")
+        .execute(&pool).await.ok();
+
+    // Add 'draft' to invoice status CHECK (for subscription pre-invoicing)
+    let needs_draft: bool = sqlx::query_scalar::<_, i32>(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='invoices'
+         AND sql LIKE '%CHECK%' AND sql NOT LIKE '%draft%'"
+    )
+    .fetch_one(&pool).await.unwrap_or(0) > 0;
+
+    if needs_draft {
+        tracing::info!("Migrating invoices table (adding draft status)...");
+        sqlx::query("PRAGMA foreign_keys = OFF").execute(&pool).await.ok();
+        sqlx::query("PRAGMA legacy_alter_table = ON").execute(&pool).await.ok();
+        sqlx::query("ALTER TABLE invoices RENAME TO _inv_draft_migrate")
+            .execute(&pool).await.ok();
+        sqlx::query(
+            "CREATE TABLE invoices (
+                id TEXT PRIMARY KEY,
+                merchant_id TEXT NOT NULL REFERENCES merchants(id),
+                memo_code TEXT NOT NULL UNIQUE,
+                product_id TEXT REFERENCES products(id),
+                product_name TEXT,
+                size TEXT,
+                price_eur REAL NOT NULL,
+                price_usd REAL,
+                currency TEXT,
+                price_zec REAL NOT NULL,
+                zec_rate_at_creation REAL NOT NULL,
+                payment_address TEXT NOT NULL DEFAULT '',
+                zcash_uri TEXT NOT NULL DEFAULT '',
+                refund_address TEXT,
+                status TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('draft', 'pending', 'underpaid', 'detected', 'confirmed', 'expired', 'refunded')),
+                detected_txid TEXT,
+                detected_at TEXT,
+                confirmed_at TEXT,
+                refunded_at TEXT,
+                refund_txid TEXT,
+                expires_at TEXT NOT NULL,
+                purge_after TEXT,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                diversifier_index INTEGER,
+                orchard_receiver_hex TEXT,
+                price_zatoshis INTEGER NOT NULL DEFAULT 0,
+                received_zatoshis INTEGER NOT NULL DEFAULT 0,
+                amount REAL,
+                price_id TEXT,
+                subscription_id TEXT
+            )"
+        ).execute(&pool).await.ok();
+        sqlx::query(
+            "INSERT INTO invoices SELECT
+                id, merchant_id, memo_code, product_id, product_name, size,
+                price_eur, price_usd, currency, price_zec, zec_rate_at_creation,
+                payment_address, zcash_uri, refund_address, status, detected_txid, detected_at,
+                confirmed_at, refunded_at, refund_txid, expires_at, purge_after, created_at,
+                diversifier_index, orchard_receiver_hex, price_zatoshis, received_zatoshis,
+                amount, price_id, subscription_id
+             FROM _inv_draft_migrate"
+        ).execute(&pool).await.ok();
+        sqlx::query("DROP TABLE _inv_draft_migrate").execute(&pool).await.ok();
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_invoices_status ON invoices(status)")
+            .execute(&pool).await.ok();
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_invoices_memo ON invoices(memo_code)")
+            .execute(&pool).await.ok();
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_invoices_orchard_receiver ON invoices(orchard_receiver_hex)")
+            .execute(&pool).await.ok();
+        sqlx::query("PRAGMA legacy_alter_table = OFF").execute(&pool).await.ok();
+        sqlx::query("PRAGMA foreign_keys = ON").execute(&pool).await.ok();
+        tracing::info!("Invoices table migration (draft status) complete");
+    }
+    sqlx::query("DROP TABLE IF EXISTS _inv_draft_migrate").execute(&pool).await.ok();
+
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_subscriptions_merchant ON subscriptions(merchant_id)")
         .execute(&pool).await.ok();
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_subscriptions_status ON subscriptions(status)")
