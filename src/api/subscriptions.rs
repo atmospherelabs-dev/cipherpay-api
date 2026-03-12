@@ -8,7 +8,7 @@ pub async fn create(
     pool: web::Data<SqlitePool>,
     body: web::Json<CreateSubscriptionRequest>,
 ) -> HttpResponse {
-    let merchant = match super::auth::resolve_session(&req, &pool).await {
+    let merchant = match super::auth::resolve_merchant_or_session(&req, &pool).await {
         Some(m) => m,
         None => return HttpResponse::Unauthorized().json(serde_json::json!({"error": "Not authenticated"})),
     };
@@ -23,7 +23,7 @@ pub async fn list(
     req: HttpRequest,
     pool: web::Data<SqlitePool>,
 ) -> HttpResponse {
-    let merchant = match super::auth::resolve_session(&req, &pool).await {
+    let merchant = match super::auth::resolve_merchant_or_session(&req, &pool).await {
         Some(m) => m,
         None => return HttpResponse::Unauthorized().json(serde_json::json!({"error": "Not authenticated"})),
     };
@@ -48,7 +48,7 @@ pub async fn cancel(
     path: web::Path<String>,
     body: web::Json<CancelBody>,
 ) -> HttpResponse {
-    let merchant = match super::auth::resolve_session(&req, &pool).await {
+    let merchant = match super::auth::resolve_merchant_or_session(&req, &pool).await {
         Some(m) => m,
         None => return HttpResponse::Unauthorized().json(serde_json::json!({"error": "Not authenticated"})),
     };
