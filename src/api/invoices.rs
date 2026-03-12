@@ -206,6 +206,80 @@ async fn resolve_merchant(
     None
 }
 
+/// Public endpoint: finalize a draft or re-finalize an expired invoice.
+/// Locks the ZEC exchange rate and starts the 15-minute payment window.
+pub async fn finalize(
+    pool: web::Data<SqlitePool>,
+    config: web::Data<Config>,
+    price_service: web::Data<PriceService>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    let invoice_id = path.into_inner();
+
+    let rates = match price_service.get_rates().await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to fetch ZEC rate for finalization");
+            return HttpResponse::ServiceUnavailable().json(serde_json::json!({
+                "error": "Price feed unavailable. Please try again shortly."
+            }));
+        }
+    };
+
+    let fee_config = if config.fee_enabled() {
+        config.fee_address.as_ref().map(|addr| invoices::FeeConfig {
+            fee_address: addr.clone(),
+            fee_rate: config.fee_rate,
+        })
+    } else {
+        None
+    };
+
+    match invoices::finalize_invoice(
+        pool.get_ref(),
+        &invoice_id,
+        &rates,
+        fee_config.as_ref(),
+    ).await {
+        Ok(inv) => {
+            let received_zec = invoices::zatoshis_to_zec(inv.received_zatoshis);
+            let overpaid = inv.received_zatoshis > inv.price_zatoshis + 1000 && inv.price_zatoshis > 0;
+
+            HttpResponse::Ok().json(serde_json::json!({
+                "id": inv.id,
+                "memo_code": inv.memo_code,
+                "product_name": inv.product_name,
+                "amount": inv.amount,
+                "currency": inv.currency,
+                "price_eur": inv.price_eur,
+                "price_usd": inv.price_usd,
+                "price_zec": inv.price_zec,
+                "zec_rate_at_creation": inv.zec_rate_at_creation,
+                "payment_address": inv.payment_address,
+                "zcash_uri": inv.zcash_uri,
+                "status": inv.status,
+                "expires_at": inv.expires_at,
+                "created_at": inv.created_at,
+                "price_zatoshis": inv.price_zatoshis,
+                "received_zatoshis": inv.received_zatoshis,
+                "received_zec": received_zec,
+                "overpaid": overpaid,
+            }))
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("not found") {
+                HttpResponse::NotFound().json(serde_json::json!({ "error": msg }))
+            } else if msg.contains("draft or expired") || msg.contains("already detected") || msg.contains("period has ended") {
+                HttpResponse::Conflict().json(serde_json::json!({ "error": msg }))
+            } else {
+                tracing::error!(error = %e, "Failed to finalize invoice");
+                HttpResponse::InternalServerError().json(serde_json::json!({ "error": "Failed to finalize invoice" }))
+            }
+        }
+    }
+}
+
 fn validate_invoice_request(req: &CreateInvoiceRequest) -> Result<(), validation::ValidationError> {
     validation::validate_optional_length("product_id", &req.product_id, 100)?;
     validation::validate_optional_length("price_id", &req.price_id, 100)?;

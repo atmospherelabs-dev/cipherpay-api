@@ -113,6 +113,44 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // Subscription lifecycle engine (hourly)
+    let sub_pool = pool.clone();
+    let sub_http = http_client.clone();
+    let sub_config = config.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+        loop {
+            interval.tick().await;
+            // Build merchant UFVK map for draft invoice address derivation
+            let merchants = match crate::merchants::get_all_merchants(&sub_pool, &sub_config.encryption_key).await {
+                Ok(m) => m,
+                Err(e) => {
+                    tracing::error!(error = %e, "Subscription engine: failed to load merchants");
+                    continue;
+                }
+            };
+            let ufvk_map: std::collections::HashMap<String, String> = merchants
+                .into_iter()
+                .map(|m| (m.id, m.ufvk))
+                .collect();
+
+            let fee_config = if sub_config.fee_enabled() {
+                sub_config.fee_address.as_ref().map(|addr| crate::invoices::FeeConfig {
+                    fee_address: addr.clone(),
+                    fee_rate: sub_config.fee_rate,
+                })
+            } else {
+                None
+            };
+
+            if let Err(e) = subscriptions::process_renewals(
+                &sub_pool, &sub_http, &sub_config.encryption_key, &ufvk_map, fee_config.as_ref(),
+            ).await {
+                tracing::error!(error = %e, "Subscription renewal error");
+            }
+        }
+    });
+
     let bind_addr = format!("{}:{}", config.api_host, config.api_port);
 
     let rate_limit = GovernorConfigBuilder::default()

@@ -41,6 +41,7 @@ pub struct Invoice {
     pub diversifier_index: Option<i64>,
     pub price_zatoshis: i64,
     pub received_zatoshis: i64,
+    pub subscription_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, FromRow)]
@@ -217,7 +218,8 @@ pub async fn get_invoice(pool: &SqlitePool, id: &str) -> anyhow::Result<Option<I
          i.refund_address, i.status, i.detected_txid, i.detected_at,
          i.confirmed_at, i.refunded_at, i.refund_txid, i.expires_at, i.purge_after, i.created_at,
          i.orchard_receiver_hex, i.diversifier_index,
-         i.price_zatoshis, i.received_zatoshis
+         i.price_zatoshis, i.received_zatoshis,
+         i.subscription_id
          FROM invoices i
          LEFT JOIN merchants m ON m.id = i.merchant_id
          WHERE i.id = ?"
@@ -241,7 +243,8 @@ pub async fn get_invoice_by_memo(pool: &SqlitePool, memo_code: &str) -> anyhow::
          i.refund_address, i.status, i.detected_txid, i.detected_at,
          i.confirmed_at, i.refunded_at, i.refund_txid, i.expires_at, i.purge_after, i.created_at,
          i.orchard_receiver_hex, i.diversifier_index,
-         i.price_zatoshis, i.received_zatoshis
+         i.price_zatoshis, i.received_zatoshis,
+         i.subscription_id
          FROM invoices i
          LEFT JOIN merchants m ON m.id = i.merchant_id
          WHERE i.memo_code = ?"
@@ -274,7 +277,8 @@ pub async fn get_pending_invoices(pool: &SqlitePool) -> anyhow::Result<Vec<Invoi
          refund_address, status, detected_txid, detected_at,
          confirmed_at, NULL AS refunded_at, NULL AS refund_txid, expires_at, purge_after, created_at,
          orchard_receiver_hex, diversifier_index,
-         price_zatoshis, received_zatoshis
+         price_zatoshis, received_zatoshis,
+         subscription_id
          FROM invoices WHERE status IN ('pending', 'underpaid', 'detected')
          AND expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
     )
@@ -435,5 +439,165 @@ pub async fn update_refund_address(pool: &SqlitePool, invoice_id: &str, address:
 
 pub fn zatoshis_to_zec(z: i64) -> f64 {
     format!("{:.8}", z as f64 / 100_000_000.0).parse::<f64>().unwrap_or(0.0)
+}
+
+/// Create a draft invoice for a subscription renewal. No ZEC conversion yet;
+/// the customer will finalize it (lock ZEC rate) when they open the payment page.
+pub async fn create_draft_invoice(
+    pool: &SqlitePool,
+    merchant_id: &str,
+    merchant_ufvk: &str,
+    subscription_id: &str,
+    product_name: Option<&str>,
+    amount: f64,
+    currency: &str,
+    price_id: Option<&str>,
+    expires_at: &str,
+    fee_config: Option<&FeeConfig>,
+) -> anyhow::Result<Invoice> {
+    let id = Uuid::new_v4().to_string();
+    let memo_code = generate_memo_code();
+    let created_at = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+
+    let div_index = crate::merchants::next_diversifier_index(pool, merchant_id).await?;
+    let derived = crate::addresses::derive_invoice_address(merchant_ufvk, div_index)?;
+    let payment_address = &derived.ua_string;
+
+    let _ = fee_config; // fee will be applied at finalization when ZEC amount is known
+
+    sqlx::query(
+        "INSERT INTO invoices (id, merchant_id, memo_code, product_name,
+         price_eur, price_usd, currency, price_zec, zec_rate_at_creation,
+         amount, price_id, subscription_id,
+         payment_address, zcash_uri,
+         refund_address, status, expires_at, created_at,
+         diversifier_index, orchard_receiver_hex, price_zatoshis)
+         VALUES (?, ?, ?, ?, 0.0, 0.0, ?, 0.0, 0.0, ?, ?, ?, ?, '', NULL, 'draft', ?, ?, ?, ?, 0)"
+    )
+    .bind(&id)
+    .bind(merchant_id)
+    .bind(&memo_code)
+    .bind(product_name)
+    .bind(currency)
+    .bind(amount)
+    .bind(price_id)
+    .bind(subscription_id)
+    .bind(payment_address)
+    .bind(expires_at)
+    .bind(&created_at)
+    .bind(div_index as i64)
+    .bind(&derived.orchard_receiver_hex)
+    .execute(pool)
+    .await?;
+
+    tracing::info!(
+        invoice_id = %id,
+        subscription_id,
+        currency,
+        amount,
+        "Draft invoice created for subscription"
+    );
+
+    get_invoice(pool, &id).await?
+        .ok_or_else(|| anyhow::anyhow!("Draft invoice not found after insert"))
+}
+
+/// Finalize a draft (or re-finalize an expired) invoice: lock ZEC rate, start 15-min timer.
+pub async fn finalize_invoice(
+    pool: &SqlitePool,
+    invoice_id: &str,
+    rates: &crate::invoices::pricing::ZecRates,
+    fee_config: Option<&FeeConfig>,
+) -> anyhow::Result<Invoice> {
+    let invoice = get_invoice(pool, invoice_id).await?
+        .ok_or_else(|| anyhow::anyhow!("Invoice not found"))?;
+
+    if invoice.status != "draft" && invoice.status != "expired" {
+        anyhow::bail!("Invoice must be in draft or expired status to finalize (current: {})", invoice.status);
+    }
+
+    // In-flight payment guard: prevent re-finalization if payment already detected
+    if invoice.received_zatoshis > 0 || invoice.detected_txid.is_some() {
+        anyhow::bail!("Payment already detected for this invoice, awaiting confirmation");
+    }
+
+    // Period guard for subscription invoices
+    if let Some(ref sub_id) = invoice.subscription_id {
+        let sub = crate::subscriptions::get_subscription(pool, sub_id).await?;
+        if let Some(s) = sub {
+            let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+            if now > s.current_period_end {
+                anyhow::bail!("Subscription billing period has ended");
+            }
+        }
+    }
+
+    let currency = invoice.currency.as_deref().unwrap_or("EUR");
+    let amount = invoice.amount.unwrap_or(invoice.price_eur);
+
+    let zec_rate = rates.rate_for_currency(currency)
+        .ok_or_else(|| anyhow::anyhow!("Unsupported currency: {}", currency))?;
+
+    if zec_rate <= 0.0 {
+        anyhow::bail!("No exchange rate available for {}", currency);
+    }
+
+    let price_zec = amount / zec_rate;
+    let price_eur = if currency == "EUR" { amount } else { price_zec * rates.zec_eur };
+    let price_usd = if currency == "USD" { amount } else { price_zec * rates.zec_usd };
+    let price_zatoshis = (price_zec * 100_000_000.0) as i64;
+
+    let expires_at = (Utc::now() + Duration::minutes(15))
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+
+    let memo_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(invoice.memo_code.as_bytes());
+
+    let zcash_uri = if let Some(fc) = fee_config {
+        let fee_amount = price_zec * fc.fee_rate;
+        if fee_amount >= 0.00000001 {
+            let fee_memo = format!("FEE-{}", invoice.id);
+            let fee_memo_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(fee_memo.as_bytes());
+            format!(
+                "zcash:?address={}&amount={:.8}&memo={}&address.1={}&amount.1={:.8}&memo.1={}",
+                invoice.payment_address, price_zec, memo_b64,
+                fc.fee_address, fee_amount, fee_memo_b64
+            )
+        } else {
+            format!("zcash:{}?amount={:.8}&memo={}", invoice.payment_address, price_zec, memo_b64)
+        }
+    } else {
+        format!("zcash:{}?amount={:.8}&memo={}", invoice.payment_address, price_zec, memo_b64)
+    };
+
+    sqlx::query(
+        "UPDATE invoices SET status = 'pending',
+         price_zec = ?, price_eur = ?, price_usd = ?,
+         zec_rate_at_creation = ?, price_zatoshis = ?,
+         zcash_uri = ?, expires_at = ?
+         WHERE id = ?"
+    )
+    .bind(price_zec)
+    .bind(price_eur)
+    .bind(price_usd)
+    .bind(zec_rate)
+    .bind(price_zatoshis)
+    .bind(&zcash_uri)
+    .bind(&expires_at)
+    .bind(invoice_id)
+    .execute(pool)
+    .await?;
+
+    tracing::info!(
+        invoice_id,
+        price_zec,
+        zec_rate,
+        "Invoice finalized (ZEC rate locked)"
+    );
+
+    get_invoice(pool, invoice_id).await?
+        .ok_or_else(|| anyhow::anyhow!("Invoice not found after finalization"))
 }
 
