@@ -9,40 +9,51 @@ pub struct Product {
     pub slug: String,
     pub name: String,
     pub description: Option<String>,
-    pub price_eur: f64,
-    pub currency: String,
-    pub variants: Option<String>,
+    pub default_price_id: Option<String>,
+    pub metadata: Option<String>,
     pub active: i32,
     pub created_at: String,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct CreateProductRequest {
-    pub slug: String,
+    pub slug: Option<String>,
     pub name: String,
     pub description: Option<String>,
-    pub price_eur: f64,
+    pub unit_amount: f64,
     pub currency: Option<String>,
-    pub variants: Option<Vec<String>>,
+    pub metadata: Option<serde_json::Value>,
+    pub price_type: Option<String>,
+    pub billing_interval: Option<String>,
+    pub interval_count: Option<i32>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateProductRequest {
     pub name: Option<String>,
     pub description: Option<String>,
-    pub price_eur: Option<f64>,
-    pub currency: Option<String>,
-    pub variants: Option<Vec<String>>,
+    pub default_price_id: Option<String>,
+    pub metadata: Option<serde_json::Value>,
     pub active: Option<bool>,
 }
 
 impl Product {
-    pub fn variants_list(&self) -> Vec<String> {
-        self.variants
+    pub fn metadata_json(&self) -> Option<serde_json::Value> {
+        self.metadata
             .as_ref()
-            .and_then(|v| serde_json::from_str(v).ok())
-            .unwrap_or_default()
+            .and_then(|m| serde_json::from_str(m).ok())
     }
+}
+
+fn slugify(name: &str) -> String {
+    name.to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
 }
 
 pub async fn create_product(
@@ -50,48 +61,67 @@ pub async fn create_product(
     merchant_id: &str,
     req: &CreateProductRequest,
 ) -> anyhow::Result<Product> {
-    if req.slug.is_empty() || req.name.is_empty() || req.price_eur <= 0.0 {
-        anyhow::bail!("slug, name required and price must be > 0");
+    if req.name.is_empty() || req.unit_amount <= 0.0 {
+        anyhow::bail!("name required and price must be > 0");
     }
 
-    if !req.slug.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
-        anyhow::bail!("slug must only contain letters, numbers, underscores, hyphens");
-    }
+    let slug = match &req.slug {
+        Some(s) if !s.is_empty() => {
+            if !s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+                anyhow::bail!("slug must only contain letters, numbers, underscores, hyphens");
+            }
+            s.clone()
+        }
+        _ => slugify(&req.name),
+    };
 
     let currency = req.currency.as_deref().unwrap_or("EUR");
-    if currency != "EUR" && currency != "USD" {
-        anyhow::bail!("currency must be EUR or USD");
+    if !crate::prices::SUPPORTED_CURRENCIES.contains(&currency) {
+        anyhow::bail!("Unsupported currency: {}", currency);
     }
 
     let id = Uuid::new_v4().to_string();
-    let variants_json = req.variants.as_ref().map(|v| serde_json::to_string(v).unwrap_or_default());
+    let metadata_json = req.metadata.as_ref().map(|m| serde_json::to_string(m).unwrap_or_default());
 
     sqlx::query(
-        "INSERT INTO products (id, merchant_id, slug, name, description, price_eur, currency, variants)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO products (id, merchant_id, slug, name, description, default_price_id, metadata)
+         VALUES (?, ?, ?, ?, ?, ?, ?)"
     )
     .bind(&id)
     .bind(merchant_id)
-    .bind(&req.slug)
+    .bind(&slug)
     .bind(&req.name)
     .bind(&req.description)
-    .bind(req.price_eur)
-    .bind(currency)
-    .bind(&variants_json)
+    .bind::<Option<String>>(None)
+    .bind(&metadata_json)
     .execute(pool)
     .await?;
 
-    tracing::info!(product_id = %id, slug = %req.slug, "Product created");
+    tracing::info!(product_id = %id, slug = %slug, "Product created");
 
     get_product(pool, &id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("Product not found after insert"))
 }
 
+/// Set the product's default_price_id (used after creating the initial Price).
+pub async fn set_default_price(
+    pool: &SqlitePool,
+    product_id: &str,
+    price_id: &str,
+) -> anyhow::Result<()> {
+    sqlx::query("UPDATE products SET default_price_id = ? WHERE id = ?")
+        .bind(price_id)
+        .bind(product_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 pub async fn list_products(pool: &SqlitePool, merchant_id: &str) -> anyhow::Result<Vec<Product>> {
     let rows = sqlx::query_as::<_, Product>(
-        "SELECT id, merchant_id, slug, name, description, price_eur, currency, variants, active, created_at
-         FROM products WHERE merchant_id = ? ORDER BY created_at DESC"
+        "SELECT id, merchant_id, slug, name, description, default_price_id, metadata, active, created_at
+         FROM products WHERE merchant_id = ? AND active = 1 ORDER BY created_at DESC"
     )
     .bind(merchant_id)
     .fetch_all(pool)
@@ -102,27 +132,10 @@ pub async fn list_products(pool: &SqlitePool, merchant_id: &str) -> anyhow::Resu
 
 pub async fn get_product(pool: &SqlitePool, id: &str) -> anyhow::Result<Option<Product>> {
     let row = sqlx::query_as::<_, Product>(
-        "SELECT id, merchant_id, slug, name, description, price_eur, currency, variants, active, created_at
+        "SELECT id, merchant_id, slug, name, description, default_price_id, metadata, active, created_at
          FROM products WHERE id = ?"
     )
     .bind(id)
-    .fetch_optional(pool)
-    .await?;
-
-    Ok(row)
-}
-
-pub async fn get_product_by_slug(
-    pool: &SqlitePool,
-    merchant_id: &str,
-    slug: &str,
-) -> anyhow::Result<Option<Product>> {
-    let row = sqlx::query_as::<_, Product>(
-        "SELECT id, merchant_id, slug, name, description, price_eur, currency, variants, active, created_at
-         FROM products WHERE merchant_id = ? AND slug = ?"
-    )
-    .bind(merchant_id)
-    .bind(slug)
     .fetch_optional(pool)
     .await?;
 
@@ -143,29 +156,29 @@ pub async fn update_product(
 
     let name = req.name.as_deref().unwrap_or(&existing.name);
     let description = req.description.as_ref().or(existing.description.as_ref());
-    let price_eur = req.price_eur.unwrap_or(existing.price_eur);
-    let currency = req.currency.as_deref().unwrap_or(&existing.currency);
-    if currency != "EUR" && currency != "USD" {
-        anyhow::bail!("currency must be EUR or USD");
-    }
+    let default_price_id = req.default_price_id.as_ref().or(existing.default_price_id.as_ref());
     let active = req.active.map(|a| if a { 1 } else { 0 }).unwrap_or(existing.active);
-    let variants_json = req.variants.as_ref()
-        .map(|v| serde_json::to_string(v).unwrap_or_default())
-        .or(existing.variants);
+    let metadata_json = req.metadata.as_ref()
+        .map(|m| serde_json::to_string(m).unwrap_or_default())
+        .or(existing.metadata);
 
-    if price_eur <= 0.0 {
-        anyhow::bail!("Price must be > 0");
+    if let Some(price_id) = default_price_id {
+        let price = crate::prices::get_price(pool, price_id).await?;
+        match price {
+            Some(p) if p.product_id == id && p.active == 1 => {}
+            Some(_) => anyhow::bail!("default_price_id must reference an active price belonging to this product"),
+            None => anyhow::bail!("default_price_id references a non-existent price"),
+        }
     }
 
     sqlx::query(
-        "UPDATE products SET name = ?, description = ?, price_eur = ?, currency = ?, variants = ?, active = ?
+        "UPDATE products SET name = ?, description = ?, default_price_id = ?, metadata = ?, active = ?
          WHERE id = ? AND merchant_id = ?"
     )
     .bind(name)
     .bind(description)
-    .bind(price_eur)
-    .bind(currency)
-    .bind(&variants_json)
+    .bind(default_price_id)
+    .bind(&metadata_json)
     .bind(active)
     .bind(id)
     .bind(merchant_id)
@@ -176,23 +189,51 @@ pub async fn update_product(
     get_product(pool, id).await
 }
 
-pub async fn deactivate_product(
+/// Stripe-style delete: hard-delete if no invoices reference this product,
+/// otherwise archive (set active = 0).
+pub async fn delete_product(
     pool: &SqlitePool,
     id: &str,
     merchant_id: &str,
-) -> anyhow::Result<bool> {
-    let result = sqlx::query(
-        "UPDATE products SET active = 0 WHERE id = ? AND merchant_id = ?"
+) -> anyhow::Result<DeleteOutcome> {
+    match get_product(pool, id).await? {
+        Some(p) if p.merchant_id == merchant_id => {}
+        Some(_) => anyhow::bail!("Product does not belong to this merchant"),
+        None => return Ok(DeleteOutcome::NotFound),
+    };
+
+    let invoice_count: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM invoices WHERE product_id = ?"
     )
     .bind(id)
-    .bind(merchant_id)
-    .execute(pool)
+    .fetch_one(pool)
     .await?;
 
-    if result.rows_affected() > 0 {
-        tracing::info!(product_id = %id, "Product deactivated");
-        Ok(true)
+    if invoice_count.0 == 0 {
+        sqlx::query("DELETE FROM prices WHERE product_id = ?")
+            .bind(id)
+            .execute(pool)
+            .await?;
+        sqlx::query("DELETE FROM products WHERE id = ? AND merchant_id = ?")
+            .bind(id)
+            .bind(merchant_id)
+            .execute(pool)
+            .await?;
+        tracing::info!(product_id = %id, "Product hard-deleted (no invoices)");
+        Ok(DeleteOutcome::Deleted)
     } else {
-        Ok(false)
+        sqlx::query("UPDATE products SET active = 0 WHERE id = ? AND merchant_id = ?")
+            .bind(id)
+            .bind(merchant_id)
+            .execute(pool)
+            .await?;
+        tracing::info!(product_id = %id, invoices = invoice_count.0, "Product archived (has invoices)");
+        Ok(DeleteOutcome::Archived)
     }
+}
+
+pub enum DeleteOutcome {
+    Deleted,
+    Archived,
+    NotFound,
 }

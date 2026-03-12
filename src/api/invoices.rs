@@ -61,8 +61,7 @@ pub async fn create(
         &merchant.id,
         &merchant.ufvk,
         &body,
-        rates.zec_eur,
-        rates.zec_usd,
+        &rates,
         config.invoice_expiry_minutes,
         fee_config.as_ref(),
     )
@@ -112,6 +111,8 @@ pub async fn get(
                 "memo_code": inv.memo_code,
                 "product_name": inv.product_name,
                 "size": inv.size,
+                "amount": inv.amount,
+                "price_id": inv.price_id,
                 "price_eur": inv.price_eur,
                 "price_usd": inv.price_usd,
                 "currency": inv.currency,
@@ -207,6 +208,7 @@ async fn resolve_merchant(
 
 fn validate_invoice_request(req: &CreateInvoiceRequest) -> Result<(), validation::ValidationError> {
     validation::validate_optional_length("product_id", &req.product_id, 100)?;
+    validation::validate_optional_length("price_id", &req.price_id, 100)?;
     validation::validate_optional_length("product_name", &req.product_name, 200)?;
     validation::validate_optional_length("size", &req.size, 100)?;
     validation::validate_optional_length("currency", &req.currency, 10)?;

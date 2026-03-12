@@ -7,8 +7,10 @@ mod db;
 mod email;
 mod invoices;
 mod merchants;
+mod prices;
 mod products;
 mod scanner;
+mod subscriptions;
 mod validation;
 mod webhooks;
 
