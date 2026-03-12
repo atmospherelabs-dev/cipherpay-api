@@ -158,7 +158,7 @@ pub async fn my_invoices(
     let rows = sqlx::query_as::<_, crate::invoices::Invoice>(
         "SELECT id, merchant_id, memo_code, product_name, size,
          price_eur, price_usd, currency, price_zec, zec_rate_at_creation,
-         amount, price_id,
+         amount, price_id, subscription_id,
          payment_address, zcash_uri,
          NULL AS merchant_name,
          refund_address, status, detected_txid, detected_at,
