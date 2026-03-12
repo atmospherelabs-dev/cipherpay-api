@@ -740,6 +740,25 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
     }
     sqlx::query("DROP TABLE IF EXISTS _inv_draft_migrate").execute(&pool).await.ok();
 
+    // Belt-and-suspenders: ensure subscription columns exist even if earlier
+    // ALTER TABLEs failed silently due to pool-connection pragma issues
+    for (table, col) in &[
+        ("invoices", "subscription_id"),
+        ("invoices", "amount"),
+        ("invoices", "price_id"),
+        ("subscriptions", "current_invoice_id"),
+        ("subscriptions", "label"),
+    ] {
+        let exists: bool = sqlx::query_scalar::<_, i32>(
+            &format!("SELECT COUNT(*) FROM pragma_table_info('{}') WHERE name = '{}'", table, col)
+        ).fetch_one(&pool).await.unwrap_or(0) > 0;
+        if !exists {
+            tracing::info!("Adding missing column {}.{}", table, col);
+            sqlx::query(&format!("ALTER TABLE {} ADD COLUMN {} TEXT", table, col))
+                .execute(&pool).await.ok();
+        }
+    }
+
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_subscriptions_merchant ON subscriptions(merchant_id)")
         .execute(&pool).await.ok();
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_subscriptions_status ON subscriptions(status)")
