@@ -320,9 +320,13 @@ pub async fn retry_failed(pool: &SqlitePool, http: &reqwest::Client, encryption_
             continue;
         }
 
-        let body: serde_json::Value = serde_json::from_str(&payload)?;
         let ts = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-        let signature = sign_payload(&secret, &ts, &payload);
+        let mut body: serde_json::Value = serde_json::from_str(&payload)?;
+        if let Some(obj) = body.as_object_mut() {
+            obj.insert("timestamp".to_string(), serde_json::Value::String(ts.clone()));
+        }
+        let updated_payload = body.to_string();
+        let signature = sign_payload(&secret, &ts, &updated_payload);
 
         match http.post(&url)
             .header("X-CipherPay-Signature", &signature)

@@ -9,7 +9,8 @@ use crate::config::Config;
 use crate::merchants;
 use crate::validation;
 
-const SESSION_COOKIE: &str = "cpay_session";
+const SESSION_COOKIE: &str = "__Host-cpay_session";
+const SESSION_COOKIE_LEGACY: &str = "cpay_session";
 const SESSION_HOURS: i64 = 24;
 
 #[derive(Debug, Deserialize)]
@@ -183,9 +184,10 @@ pub async fn my_invoices(
     }
 }
 
-/// Extract the session ID from the cpay_session cookie
+/// Extract the session ID from the session cookie (__Host- prefixed or legacy)
 pub fn extract_session_id(req: &HttpRequest) -> Option<String> {
     req.cookie(SESSION_COOKIE)
+        .or_else(|| req.cookie(SESSION_COOKIE_LEGACY))
         .map(|c| c.value().to_string())
         .filter(|v| !v.is_empty())
 }
@@ -200,13 +202,35 @@ pub async fn resolve_session(
     merchants::get_by_session(pool, &session_id, &config.encryption_key).await.ok()?
 }
 
+/// Resolve a merchant from either API key (Bearer token) or session cookie.
+pub async fn resolve_merchant_or_session(
+    req: &HttpRequest,
+    pool: &SqlitePool,
+) -> Option<merchants::Merchant> {
+    let config = req.app_data::<web::Data<crate::config::Config>>()?;
+
+    if let Some(auth) = req.headers().get("Authorization") {
+        if let Ok(auth_str) = auth.to_str() {
+            let key = auth_str.strip_prefix("Bearer ").unwrap_or(auth_str).trim();
+            if key.starts_with("cpay_sk_") || key.starts_with("cpay_") {
+                return merchants::authenticate(pool, key, &config.encryption_key).await.ok()?;
+            }
+        }
+    }
+
+    resolve_session(req, pool).await
+}
+
 fn build_session_cookie<'a>(value: &str, config: &Config, clear: bool) -> Cookie<'a> {
-    let mut builder = Cookie::build(SESSION_COOKIE, value.to_string())
+    let has_domain = config.cookie_domain.is_some();
+    let cookie_name = if has_domain { SESSION_COOKIE_LEGACY } else { SESSION_COOKIE };
+
+    let mut builder = Cookie::build(cookie_name, value.to_string())
         .path("/")
         .http_only(true)
         .same_site(SameSite::Lax);
 
-    let is_deployed = config.cookie_domain.is_some()
+    let is_deployed = has_domain
         || config.frontend_url.as_deref().map_or(false, |u| u.starts_with("https"));
 
     if !config.is_testnet() || is_deployed {

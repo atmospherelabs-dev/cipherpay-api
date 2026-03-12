@@ -1,7 +1,11 @@
 use actix_web::web;
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 use sqlx::SqlitePool;
 
-/// Validate the admin key from the request header.
+type HmacSha256 = Hmac<Sha256>;
+
+/// Validate the admin key from the request header (constant-time comparison).
 pub fn authenticate_admin(req: &actix_web::HttpRequest) -> bool {
     let config = match req.app_data::<web::Data<crate::config::Config>>() {
         Some(c) => c,
@@ -16,7 +20,20 @@ pub fn authenticate_admin(req: &actix_web::HttpRequest) -> bool {
         .get("X-Admin-Key")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    !provided.is_empty() && provided == expected.as_str()
+    if provided.is_empty() {
+        return false;
+    }
+    let mut mac = HmacSha256::new_from_slice(b"admin-key-verify")
+        .expect("HMAC accepts any key length");
+    mac.update(expected.as_bytes());
+    let expected_tag = mac.finalize().into_bytes();
+
+    let mut mac2 = HmacSha256::new_from_slice(b"admin-key-verify")
+        .expect("HMAC accepts any key length");
+    mac2.update(provided.as_bytes());
+    let provided_tag = mac2.finalize().into_bytes();
+
+    expected_tag == provided_tag
 }
 
 fn unauthorized() -> actix_web::HttpResponse {
