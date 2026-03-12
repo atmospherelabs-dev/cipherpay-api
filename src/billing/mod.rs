@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 use crate::config::Config;
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct FeeEntry {
     pub id: String,

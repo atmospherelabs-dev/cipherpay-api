@@ -3,6 +3,7 @@ use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Merchant {
     pub id: String,
@@ -146,6 +147,17 @@ pub async fn get_all_merchants(pool: &SqlitePool, encryption_key: &str) -> anyho
     .await?;
 
     Ok(rows.into_iter().map(|r| row_to_merchant(r, encryption_key)).collect())
+}
+
+pub async fn get_merchant_by_id(pool: &SqlitePool, id: &str, encryption_key: &str) -> anyhow::Result<Option<Merchant>> {
+    let row = sqlx::query_as::<_, MerchantRow>(
+        &format!("SELECT {MERCHANT_COLS} FROM merchants WHERE id = ?")
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|r| row_to_merchant(r, encryption_key)))
 }
 
 pub async fn authenticate(pool: &SqlitePool, api_key: &str, encryption_key: &str) -> anyhow::Result<Option<Merchant>> {

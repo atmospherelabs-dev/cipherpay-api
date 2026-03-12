@@ -19,6 +19,8 @@ pub struct Invoice {
     pub currency: Option<String>,
     pub price_zec: f64,
     pub zec_rate_at_creation: f64,
+    pub amount: Option<f64>,
+    pub price_id: Option<String>,
     pub payment_address: String,
     pub zcash_uri: String,
     pub merchant_name: Option<String>,
@@ -54,6 +56,7 @@ pub struct InvoiceStatus {
 #[derive(Debug, Deserialize)]
 pub struct CreateInvoiceRequest {
     pub product_id: Option<String>,
+    pub price_id: Option<String>,
     pub product_name: Option<String>,
     pub size: Option<String>,
     #[serde(alias = "price_eur")]
@@ -66,10 +69,13 @@ pub struct CreateInvoiceRequest {
 pub struct CreateInvoiceResponse {
     pub invoice_id: String,
     pub memo_code: String,
+    pub amount: f64,
+    pub currency: String,
     pub price_eur: f64,
     pub price_usd: f64,
     pub price_zec: f64,
     pub zec_rate: f64,
+    pub price_id: Option<String>,
     pub payment_address: String,
     pub zcash_uri: String,
     pub expires_at: String,
@@ -90,24 +96,26 @@ pub async fn create_invoice(
     merchant_id: &str,
     merchant_ufvk: &str,
     req: &CreateInvoiceRequest,
-    zec_eur: f64,
-    zec_usd: f64,
+    rates: &crate::invoices::pricing::ZecRates,
     expiry_minutes: i64,
     fee_config: Option<&FeeConfig>,
 ) -> anyhow::Result<CreateInvoiceResponse> {
     let id = Uuid::new_v4().to_string();
     let memo_code = generate_memo_code();
     let currency = req.currency.as_deref().unwrap_or("EUR");
-    let (price_eur, price_usd, price_zec) = if currency == "USD" {
-        let usd = req.amount;
-        let zec = usd / zec_usd;
-        let eur = zec * zec_eur;
-        (eur, usd, zec)
-    } else {
-        let zec = req.amount / zec_eur;
-        let usd = zec * zec_usd;
-        (req.amount, usd, zec)
-    };
+    let amount = req.amount;
+
+    let zec_rate = rates.rate_for_currency(currency)
+        .ok_or_else(|| anyhow::anyhow!("Unsupported currency: {}", currency))?;
+
+    if zec_rate <= 0.0 {
+        anyhow::bail!("No exchange rate available for {}", currency);
+    }
+
+    let price_zec = amount / zec_rate;
+    let price_eur = if currency == "EUR" { amount } else { price_zec * rates.zec_eur };
+    let price_usd = if currency == "USD" { amount } else { price_zec * rates.zec_usd };
+
     let expires_at = (Utc::now() + Duration::minutes(expiry_minutes))
         .format("%Y-%m-%dT%H:%M:%SZ")
         .to_string();
@@ -142,10 +150,12 @@ pub async fn create_invoice(
 
     sqlx::query(
         "INSERT INTO invoices (id, merchant_id, memo_code, product_id, product_name, size,
-         price_eur, price_usd, currency, price_zec, zec_rate_at_creation, payment_address, zcash_uri,
+         price_eur, price_usd, currency, price_zec, zec_rate_at_creation,
+         amount, price_id,
+         payment_address, zcash_uri,
          refund_address, status, expires_at, created_at,
          diversifier_index, orchard_receiver_hex, price_zatoshis)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)"
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)"
     )
     .bind(&id)
     .bind(merchant_id)
@@ -157,7 +167,9 @@ pub async fn create_invoice(
     .bind(price_usd)
     .bind(currency)
     .bind(price_zec)
-    .bind(zec_eur)
+    .bind(zec_rate)
+    .bind(amount)
+    .bind(&req.price_id)
     .bind(payment_address)
     .bind(&zcash_uri)
     .bind(&req.refund_address)
@@ -172,6 +184,8 @@ pub async fn create_invoice(
     tracing::info!(
         invoice_id = %id,
         memo = %memo_code,
+        currency = %currency,
+        amount = %amount,
         diversifier_index = div_index,
         "Invoice created with unique address"
     );
@@ -179,10 +193,13 @@ pub async fn create_invoice(
     Ok(CreateInvoiceResponse {
         invoice_id: id,
         memo_code,
+        amount,
+        currency: currency.to_string(),
         price_eur,
         price_usd,
         price_zec,
-        zec_rate: zec_eur,
+        zec_rate: zec_rate,
+        price_id: req.price_id.clone(),
         payment_address: payment_address.to_string(),
         zcash_uri,
         expires_at,
@@ -193,6 +210,7 @@ pub async fn get_invoice(pool: &SqlitePool, id: &str) -> anyhow::Result<Option<I
     let row = sqlx::query_as::<_, Invoice>(
         "SELECT i.id, i.merchant_id, i.memo_code, i.product_name, i.size,
          i.price_eur, i.price_usd, i.currency, i.price_zec, i.zec_rate_at_creation,
+         i.amount, i.price_id,
          COALESCE(NULLIF(i.payment_address, ''), m.payment_address) AS payment_address,
          i.zcash_uri,
          NULLIF(m.name, '') AS merchant_name,
@@ -216,6 +234,7 @@ pub async fn get_invoice_by_memo(pool: &SqlitePool, memo_code: &str) -> anyhow::
     let row = sqlx::query_as::<_, Invoice>(
         "SELECT i.id, i.merchant_id, i.memo_code, i.product_name, i.size,
          i.price_eur, i.price_usd, i.currency, i.price_zec, i.zec_rate_at_creation,
+         i.amount, i.price_id,
          COALESCE(NULLIF(i.payment_address, ''), m.payment_address) AS payment_address,
          i.zcash_uri,
          NULLIF(m.name, '') AS merchant_name,
@@ -248,7 +267,9 @@ pub async fn get_invoice_status(pool: &SqlitePool, id: &str) -> anyhow::Result<O
 pub async fn get_pending_invoices(pool: &SqlitePool) -> anyhow::Result<Vec<Invoice>> {
     let rows = sqlx::query_as::<_, Invoice>(
         "SELECT id, merchant_id, memo_code, product_name, size,
-         price_eur, price_usd, currency, price_zec, zec_rate_at_creation, payment_address, zcash_uri,
+         price_eur, price_usd, currency, price_zec, zec_rate_at_creation,
+         amount, price_id,
+         payment_address, zcash_uri,
          NULL AS merchant_name,
          refund_address, status, detected_txid, detected_at,
          confirmed_at, NULL AS refunded_at, NULL AS refund_txid, expires_at, purge_after, created_at,
@@ -261,26 +282,6 @@ pub async fn get_pending_invoices(pool: &SqlitePool) -> anyhow::Result<Vec<Invoi
     .await?;
 
     Ok(rows)
-}
-
-/// Find a pending invoice by its Orchard receiver hex (O(1) indexed lookup).
-pub async fn find_by_orchard_receiver(pool: &SqlitePool, receiver_hex: &str) -> anyhow::Result<Option<Invoice>> {
-    let row = sqlx::query_as::<_, Invoice>(
-        "SELECT id, merchant_id, memo_code, product_name, size,
-         price_eur, price_usd, currency, price_zec, zec_rate_at_creation, payment_address, zcash_uri,
-         NULL AS merchant_name,
-         refund_address, status, detected_txid, detected_at,
-         confirmed_at, NULL AS refunded_at, NULL AS refund_txid, expires_at, purge_after, created_at,
-         orchard_receiver_hex, diversifier_index,
-         price_zatoshis, received_zatoshis
-         FROM invoices WHERE orchard_receiver_hex = ? AND status IN ('pending', 'underpaid', 'detected')
-         AND expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
-    )
-    .bind(receiver_hex)
-    .fetch_optional(pool)
-    .await?;
-
-    Ok(row)
 }
 
 /// Returns true if the status actually changed (used to gate webhook dispatch).

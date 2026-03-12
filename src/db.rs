@@ -50,19 +50,18 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
         sqlx::query(sql).execute(&pool).await.ok();
     }
 
-    // Products table for existing databases
+    // Products table (pricing is handled by the prices table via default_price_id)
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS products (
             id TEXT PRIMARY KEY,
             merchant_id TEXT NOT NULL REFERENCES merchants(id),
-            slug TEXT NOT NULL,
+            slug TEXT NOT NULL DEFAULT '',
             name TEXT NOT NULL,
             description TEXT,
-            price_eur REAL NOT NULL,
-            variants TEXT,
+            default_price_id TEXT,
+            metadata TEXT,
             active INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-            UNIQUE(merchant_id, slug)
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
         )"
     )
     .execute(&pool)
@@ -73,6 +72,12 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
         .execute(&pool)
         .await
         .ok();
+
+    // Drop legacy UNIQUE constraint on slug (slug is now cosmetic, product ID is the identifier)
+    sqlx::query("DROP INDEX IF EXISTS sqlite_autoindex_products_1")
+        .execute(&pool).await.ok();
+    sqlx::query("DROP INDEX IF EXISTS idx_products_slug")
+        .execute(&pool).await.ok();
 
     // Add product_id and refund_address to invoices for existing databases
     sqlx::query("ALTER TABLE invoices ADD COLUMN product_id TEXT REFERENCES products(id)")
@@ -100,7 +105,12 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
         .await
         .ok();
 
-    sqlx::query("ALTER TABLE products ADD COLUMN currency TEXT NOT NULL DEFAULT 'EUR'")
+    sqlx::query("ALTER TABLE products ADD COLUMN default_price_id TEXT")
+        .execute(&pool)
+        .await
+        .ok();
+
+    sqlx::query("ALTER TABLE products ADD COLUMN metadata TEXT")
         .execute(&pool)
         .await
         .ok();
@@ -110,9 +120,10 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
         .await
         .ok();
 
-    // Disable FK checks during table-rename migrations so SQLite doesn't
-    // auto-rewrite FK references in other tables (webhook_deliveries, fee_ledger).
+    // Disable FK checks and prevent SQLite from auto-rewriting FK references
+    // in other tables during ALTER TABLE RENAME (requires legacy_alter_table).
     sqlx::query("PRAGMA foreign_keys = OFF").execute(&pool).await.ok();
+    sqlx::query("PRAGMA legacy_alter_table = ON").execute(&pool).await.ok();
 
     let needs_migrate: bool = sqlx::query_scalar::<_, i32>(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='invoices'
@@ -261,6 +272,101 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
     sqlx::query("DROP TABLE IF EXISTS invoices_old").execute(&pool).await.ok();
     sqlx::query("DROP TABLE IF EXISTS invoices_old2").execute(&pool).await.ok();
 
+    // Drop legacy price_eur/currency columns from products (moved to prices table)
+    let products_has_price_eur: bool = sqlx::query_scalar::<_, i32>(
+        "SELECT COUNT(*) FROM pragma_table_info('products') WHERE name = 'price_eur'"
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap_or(0) > 0;
+
+    if products_has_price_eur {
+        tracing::info!("Migrating products table (dropping legacy price_eur/currency columns)...");
+        sqlx::query("ALTER TABLE products RENAME TO products_old")
+            .execute(&pool).await.ok();
+        sqlx::query(
+            "CREATE TABLE products (
+                id TEXT PRIMARY KEY,
+                merchant_id TEXT NOT NULL REFERENCES merchants(id),
+                slug TEXT NOT NULL DEFAULT '',
+                name TEXT NOT NULL,
+                description TEXT,
+                default_price_id TEXT,
+                metadata TEXT,
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            )"
+        ).execute(&pool).await.ok();
+        sqlx::query(
+            "INSERT INTO products (id, merchant_id, slug, name, description, default_price_id, metadata, active, created_at)
+             SELECT id, merchant_id, slug, name, description, default_price_id, metadata, active, created_at
+             FROM products_old"
+        ).execute(&pool).await.ok();
+        sqlx::query("DROP TABLE products_old").execute(&pool).await.ok();
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_products_merchant ON products(merchant_id)")
+            .execute(&pool).await.ok();
+        tracing::info!("Products table migration complete (price_eur/currency removed)");
+    }
+    sqlx::query("DROP TABLE IF EXISTS products_old").execute(&pool).await.ok();
+
+    // Repair FK references in prices/invoices that may have been auto-rewritten
+    // by SQLite during products RENAME TABLE (pointing to products_old).
+    let prices_schema: Option<String> = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='prices'"
+    ).fetch_optional(&pool).await.ok().flatten();
+    if let Some(ref schema) = prices_schema {
+        if schema.contains("products_old") {
+            tracing::info!("Repairing prices table FK references...");
+            sqlx::query("ALTER TABLE prices RENAME TO _prices_repair")
+                .execute(&pool).await.ok();
+            sqlx::query(
+                "CREATE TABLE prices (
+                    id TEXT PRIMARY KEY,
+                    product_id TEXT NOT NULL REFERENCES products(id),
+                    currency TEXT NOT NULL,
+                    unit_amount REAL NOT NULL,
+                    active INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                    price_type TEXT NOT NULL DEFAULT 'one_time',
+                    billing_interval TEXT,
+                    interval_count INTEGER
+                )"
+            ).execute(&pool).await.ok();
+            sqlx::query("INSERT OR IGNORE INTO prices SELECT * FROM _prices_repair")
+                .execute(&pool).await.ok();
+            sqlx::query("DROP TABLE _prices_repair").execute(&pool).await.ok();
+            sqlx::query("CREATE INDEX IF NOT EXISTS idx_prices_product ON prices(product_id)")
+                .execute(&pool).await.ok();
+            tracing::info!("prices FK repair complete");
+        }
+    }
+    sqlx::query("DROP TABLE IF EXISTS _prices_repair").execute(&pool).await.ok();
+
+    // Repair FK references in invoices if they point to products_old
+    let inv_schema: Option<String> = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='invoices'"
+    ).fetch_optional(&pool).await.ok().flatten();
+    if let Some(ref schema) = inv_schema {
+        if schema.contains("products_old") {
+            tracing::info!("Repairing invoices table FK references (products_old)...");
+            let inv_sql = schema.replace("products_old", "products");
+            sqlx::query("ALTER TABLE invoices RENAME TO _inv_repair")
+                .execute(&pool).await.ok();
+            sqlx::query(&inv_sql).execute(&pool).await.ok();
+            sqlx::query("INSERT OR IGNORE INTO invoices SELECT * FROM _inv_repair")
+                .execute(&pool).await.ok();
+            sqlx::query("DROP TABLE _inv_repair").execute(&pool).await.ok();
+            sqlx::query("CREATE INDEX IF NOT EXISTS idx_invoices_status ON invoices(status)")
+                .execute(&pool).await.ok();
+            sqlx::query("CREATE INDEX IF NOT EXISTS idx_invoices_memo ON invoices(memo_code)")
+                .execute(&pool).await.ok();
+            sqlx::query("CREATE INDEX IF NOT EXISTS idx_invoices_orchard_receiver ON invoices(orchard_receiver_hex)")
+                .execute(&pool).await.ok();
+            tracing::info!("invoices FK repair (products_old) complete");
+        }
+    }
+    sqlx::query("DROP TABLE IF EXISTS _inv_repair").execute(&pool).await.ok();
+
     // Repair FK references in webhook_deliveries/fee_ledger that may have been
     // auto-rewritten by SQLite during RENAME TABLE (pointing to invoices_old).
     let wd_schema: Option<String> = sqlx::query_scalar(
@@ -319,7 +425,8 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
         }
     }
 
-    // Re-enable FK enforcement after all migrations
+    // Re-enable FK enforcement and restore default alter-table behavior
+    sqlx::query("PRAGMA legacy_alter_table = OFF").execute(&pool).await.ok();
     sqlx::query("PRAGMA foreign_keys = ON").execute(&pool).await.ok();
 
     sqlx::query(
@@ -381,7 +488,7 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
             outstanding_zec REAL NOT NULL DEFAULT 0.0,
             settlement_invoice_id TEXT,
             status TEXT NOT NULL DEFAULT 'open'
-                CHECK (status IN ('open', 'invoiced', 'paid', 'past_due', 'suspended')),
+                CHECK (status IN ('open', 'invoiced', 'paid', 'past_due', 'suspended', 'carried_over')),
             grace_until TEXT,
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
         )"
@@ -392,6 +499,100 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
 
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_billing_cycles_merchant ON billing_cycles(merchant_id)")
         .execute(&pool).await.ok();
+
+    // Migrate billing_cycles CHECK to include 'carried_over' for existing databases
+    let bc_needs_migrate: bool = sqlx::query_scalar::<_, i32>(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='billing_cycles'
+         AND sql LIKE '%CHECK%' AND sql NOT LIKE '%carried_over%'"
+    )
+    .fetch_one(&pool).await.unwrap_or(0) > 0;
+
+    if bc_needs_migrate {
+        tracing::info!("Migrating billing_cycles table (adding carried_over status)...");
+        sqlx::query("ALTER TABLE billing_cycles RENAME TO _bc_migrate")
+            .execute(&pool).await.ok();
+        sqlx::query(
+            "CREATE TABLE billing_cycles (
+                id TEXT PRIMARY KEY,
+                merchant_id TEXT NOT NULL REFERENCES merchants(id),
+                period_start TEXT NOT NULL,
+                period_end TEXT NOT NULL,
+                total_fees_zec REAL NOT NULL DEFAULT 0.0,
+                auto_collected_zec REAL NOT NULL DEFAULT 0.0,
+                outstanding_zec REAL NOT NULL DEFAULT 0.0,
+                settlement_invoice_id TEXT,
+                status TEXT NOT NULL DEFAULT 'open'
+                    CHECK (status IN ('open', 'invoiced', 'paid', 'past_due', 'suspended', 'carried_over')),
+                grace_until TEXT,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            )"
+        ).execute(&pool).await.ok();
+        sqlx::query("INSERT INTO billing_cycles SELECT * FROM _bc_migrate")
+            .execute(&pool).await.ok();
+        sqlx::query("DROP TABLE _bc_migrate").execute(&pool).await.ok();
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_billing_cycles_merchant ON billing_cycles(merchant_id)")
+            .execute(&pool).await.ok();
+        tracing::info!("billing_cycles migration complete");
+    }
+
+    // Prices table: separate pricing from products (Stripe pattern)
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS prices (
+            id TEXT PRIMARY KEY,
+            product_id TEXT NOT NULL REFERENCES products(id),
+            currency TEXT NOT NULL,
+            unit_amount REAL NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        )"
+    )
+    .execute(&pool)
+    .await
+    .ok();
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_prices_product ON prices(product_id)")
+        .execute(&pool).await.ok();
+
+    // Seed prices from existing products that don't have any prices yet (legacy: price_eur/currency)
+    sqlx::query(
+        "INSERT OR IGNORE INTO prices (id, product_id, currency, unit_amount)
+         SELECT 'cprice_' || REPLACE(LOWER(HEX(RANDOMBLOB(16))), '-', ''),
+                p.id, COALESCE(p.currency, 'EUR'), COALESCE(p.price_eur, 0)
+         FROM products p
+         WHERE NOT EXISTS (SELECT 1 FROM prices pr WHERE pr.product_id = p.id)
+         AND (p.price_eur IS NOT NULL AND p.price_eur > 0)"
+    )
+    .execute(&pool)
+    .await
+    .ok();
+
+    // Backfill default_price_id from first active price (for products migrated from legacy schema)
+    sqlx::query(
+        "UPDATE products SET default_price_id = (
+            SELECT id FROM prices WHERE product_id = products.id AND active = 1 ORDER BY created_at ASC LIMIT 1
+        ) WHERE default_price_id IS NULL AND EXISTS (SELECT 1 FROM prices pr WHERE pr.product_id = products.id)"
+    )
+    .execute(&pool)
+    .await
+    .ok();
+
+    // Invoice schema additions for multi-currency pricing
+    sqlx::query("ALTER TABLE invoices ADD COLUMN amount REAL")
+        .execute(&pool).await.ok();
+    sqlx::query("ALTER TABLE invoices ADD COLUMN price_id TEXT")
+        .execute(&pool).await.ok();
+
+    // Backfill amount from existing data
+    sqlx::query(
+        "UPDATE invoices SET amount = CASE
+            WHEN currency = 'USD' THEN COALESCE(price_usd, price_eur)
+            ELSE price_eur
+         END
+         WHERE amount IS NULL"
+    )
+    .execute(&pool)
+    .await
+    .ok();
 
     // Scanner state persistence (crash-safe block height tracking)
     sqlx::query(
@@ -422,6 +623,44 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
     .ok();
 
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_x402_merchant ON x402_verifications(merchant_id, created_at)")
+        .execute(&pool).await.ok();
+
+    // Price type columns (one_time vs recurring)
+    for sql in &[
+        "ALTER TABLE prices ADD COLUMN price_type TEXT NOT NULL DEFAULT 'one_time'",
+        "ALTER TABLE prices ADD COLUMN billing_interval TEXT",
+        "ALTER TABLE prices ADD COLUMN interval_count INTEGER",
+    ] {
+        sqlx::query(sql).execute(&pool).await.ok();
+    }
+
+    // Subscriptions: recurring invoice schedules (no customer data -- privacy first)
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS subscriptions (
+            id TEXT PRIMARY KEY,
+            merchant_id TEXT NOT NULL REFERENCES merchants(id),
+            price_id TEXT NOT NULL REFERENCES prices(id),
+            label TEXT,
+            status TEXT NOT NULL DEFAULT 'active'
+                CHECK (status IN ('active', 'past_due', 'canceled', 'paused')),
+            current_period_start TEXT NOT NULL,
+            current_period_end TEXT NOT NULL,
+            cancel_at_period_end INTEGER NOT NULL DEFAULT 0,
+            canceled_at TEXT,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        )"
+    )
+    .execute(&pool)
+    .await
+    .ok();
+
+    // Migration: add label column for existing databases
+    sqlx::query("ALTER TABLE subscriptions ADD COLUMN label TEXT")
+        .execute(&pool).await.ok();
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_subscriptions_merchant ON subscriptions(merchant_id)")
+        .execute(&pool).await.ok();
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_subscriptions_status ON subscriptions(status)")
         .execute(&pool).await.ok();
 
     tracing::info!("Database ready (SQLite)");

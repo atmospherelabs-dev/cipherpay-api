@@ -1,9 +1,11 @@
 pub mod auth;
 pub mod invoices;
 pub mod merchants;
+pub mod prices;
 pub mod products;
 pub mod rates;
 pub mod status;
+pub mod subscriptions;
 pub mod x402;
 
 use actix_governor::{Governor, GovernorConfigBuilder};
@@ -54,6 +56,16 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/products/{id}", web::patch().to(products::update))
             .route("/products/{id}", web::delete().to(products::deactivate))
             .route("/products/{id}/public", web::get().to(products::get_public))
+            // Price endpoints
+            .route("/prices", web::post().to(prices::create))
+            .route("/prices/{id}", web::patch().to(prices::update))
+            .route("/prices/{id}", web::delete().to(prices::deactivate))
+            .route("/prices/{id}/public", web::get().to(prices::get_public))
+            .route("/products/{id}/prices", web::get().to(prices::list))
+            // Subscription endpoints
+            .route("/subscriptions", web::post().to(subscriptions::create))
+            .route("/subscriptions", web::get().to(subscriptions::list))
+            .route("/subscriptions/{id}/cancel", web::post().to(subscriptions::cancel))
             // Buyer checkout (public)
             .route("/checkout", web::post().to(checkout))
             // Invoice endpoints (API key auth)
@@ -74,7 +86,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
 }
 
 /// Public checkout endpoint for buyer-driven invoice creation.
-/// Buyer selects a product, provides variant + shipping, invoice is created with server-side pricing.
+/// Accepts either `product_id` (uses default price) or `price_id` (specific price).
 async fn checkout(
     pool: web::Data<SqlitePool>,
     config: web::Data<crate::config::Config>,
@@ -85,39 +97,82 @@ async fn checkout(
         return actix_web::HttpResponse::BadRequest().json(e.to_json());
     }
 
-    let product = match crate::products::get_product(pool.get_ref(), &body.product_id).await {
-        Ok(Some(p)) if p.active == 1 => p,
-        Ok(Some(_)) => {
-            return actix_web::HttpResponse::BadRequest().json(serde_json::json!({
-                "error": "Product is no longer available"
-            }));
-        }
-        _ => {
-            return actix_web::HttpResponse::NotFound().json(serde_json::json!({
-                "error": "Product not found"
-            }));
-        }
-    };
-
-    if let Some(ref variant) = body.variant {
-        let valid_variants = product.variants_list();
-        if !valid_variants.is_empty() && !valid_variants.contains(variant) {
-            return actix_web::HttpResponse::BadRequest().json(serde_json::json!({
-                "error": "Invalid variant",
-                "valid_variants": valid_variants,
-            }));
-        }
-    }
-
-    let merchant = match crate::merchants::get_all_merchants(pool.get_ref(), &config.encryption_key).await {
-        Ok(merchants) => match merchants.into_iter().find(|m| m.id == product.merchant_id) {
-            Some(m) => m,
-            None => {
-                return actix_web::HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": "Merchant not found"
+    // Resolve product + pricing: either via price_id or product_id
+    let (product, checkout_amount, checkout_currency, resolved_price_id) = if let Some(ref price_id) = body.price_id {
+        let price = match crate::prices::get_price(pool.get_ref(), price_id).await {
+            Ok(Some(p)) if p.active == 1 => p,
+            Ok(Some(_)) => {
+                return actix_web::HttpResponse::BadRequest().json(serde_json::json!({
+                    "error": "Price is no longer active"
                 }));
             }
-        },
+            _ => {
+                return actix_web::HttpResponse::NotFound().json(serde_json::json!({
+                    "error": "Price not found"
+                }));
+            }
+        };
+        let product = match crate::products::get_product(pool.get_ref(), &price.product_id).await {
+            Ok(Some(p)) if p.active == 1 => p,
+            _ => {
+                return actix_web::HttpResponse::NotFound().json(serde_json::json!({
+                    "error": "Product not found or inactive"
+                }));
+            }
+        };
+        (product, price.unit_amount, price.currency.clone(), Some(price.id))
+    } else if let Some(ref product_id) = body.product_id {
+        let product = match crate::products::get_product(pool.get_ref(), product_id).await {
+            Ok(Some(p)) if p.active == 1 => p,
+            Ok(Some(_)) => {
+                return actix_web::HttpResponse::BadRequest().json(serde_json::json!({
+                    "error": "Product is no longer available"
+                }));
+            }
+            _ => {
+                return actix_web::HttpResponse::NotFound().json(serde_json::json!({
+                    "error": "Product not found"
+                }));
+            }
+        };
+        let default_price_id = match product.default_price_id.as_ref() {
+            Some(id) => id,
+            None => {
+                return actix_web::HttpResponse::BadRequest().json(serde_json::json!({
+                    "error": "Product has no default price"
+                }));
+            }
+        };
+        let price = match crate::prices::get_price(pool.get_ref(), default_price_id).await {
+            Ok(Some(p)) if p.active == 1 => p,
+            Ok(Some(_)) => {
+                return actix_web::HttpResponse::BadRequest().json(serde_json::json!({
+                    "error": "Product default price is no longer active"
+                }));
+            }
+            _ => {
+                return actix_web::HttpResponse::BadRequest().json(serde_json::json!({
+                    "error": "Product default price not found"
+                }));
+            }
+        };
+        (product, price.unit_amount, price.currency.clone(), Some(price.id))
+    } else {
+        return actix_web::HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "product_id or price_id is required"
+        }));
+    };
+
+    // variant field is accepted for backward compatibility but no longer validated
+    let _ = &body.variant;
+
+    let merchant = match crate::merchants::get_merchant_by_id(pool.get_ref(), &product.merchant_id, &config.encryption_key).await {
+        Ok(Some(m)) => m,
+        Ok(None) => {
+            return actix_web::HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Merchant not found"
+            }));
+        }
         Err(_) => {
             return actix_web::HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": "Internal error"
@@ -148,10 +203,11 @@ async fn checkout(
 
     let invoice_req = crate::invoices::CreateInvoiceRequest {
         product_id: Some(product.id.clone()),
+        price_id: resolved_price_id,
         product_name: Some(product.name.clone()),
         size: body.variant.clone(),
-        amount: product.price_eur,
-        currency: Some(product.currency.clone()),
+        amount: checkout_amount,
+        currency: Some(checkout_currency),
         refund_address: body.refund_address.clone(),
     };
 
@@ -169,8 +225,7 @@ async fn checkout(
         &merchant.id,
         &merchant.ufvk,
         &invoice_req,
-        rates.zec_eur,
-        rates.zec_usd,
+        &rates,
         config.invoice_expiry_minutes,
         fee_config.as_ref(),
     )
@@ -188,13 +243,24 @@ async fn checkout(
 
 #[derive(Debug, serde::Deserialize)]
 struct CheckoutRequest {
-    product_id: String,
+    product_id: Option<String>,
+    price_id: Option<String>,
     variant: Option<String>,
     refund_address: Option<String>,
 }
 
 fn validate_checkout(req: &CheckoutRequest) -> Result<(), crate::validation::ValidationError> {
-    crate::validation::validate_length("product_id", &req.product_id, 100)?;
+    if req.product_id.is_none() && req.price_id.is_none() {
+        return Err(crate::validation::ValidationError::invalid(
+            "product_id", "either product_id or price_id is required"
+        ));
+    }
+    if let Some(ref pid) = req.product_id {
+        crate::validation::validate_length("product_id", pid, 100)?;
+    }
+    if let Some(ref pid) = req.price_id {
+        crate::validation::validate_length("price_id", pid, 100)?;
+    }
     crate::validation::validate_optional_length("variant", &req.variant, 100)?;
     if let Some(ref addr) = req.refund_address {
         if !addr.is_empty() {
@@ -239,7 +305,9 @@ async fn list_invoices(
 
     let rows = sqlx::query(
         "SELECT id, merchant_id, memo_code, product_name, size,
-         price_eur, price_usd, currency, price_zec, zec_rate_at_creation, payment_address, zcash_uri,
+         price_eur, price_usd, currency, price_zec, zec_rate_at_creation,
+         amount, price_id,
+         payment_address, zcash_uri,
          status, detected_txid,
          detected_at, expires_at, confirmed_at, refunded_at,
          refund_address, created_at, price_zatoshis, received_zatoshis
@@ -268,6 +336,8 @@ async fn list_invoices(
                         "currency": r.get::<Option<String>, _>("currency"),
                         "price_zec": r.get::<f64, _>("price_zec"),
                         "zec_rate": r.get::<f64, _>("zec_rate_at_creation"),
+                        "amount": r.get::<Option<f64>, _>("amount"),
+                        "price_id": r.get::<Option<String>, _>("price_id"),
                         "payment_address": r.get::<String, _>("payment_address"),
                         "zcash_uri": r.get::<String, _>("zcash_uri"),
                         "status": r.get::<String, _>("status"),
@@ -311,6 +381,8 @@ async fn lookup_by_memo(
                 "memo_code": inv.memo_code,
                 "product_name": inv.product_name,
                 "size": inv.size,
+                "amount": inv.amount,
+                "price_id": inv.price_id,
                 "price_eur": inv.price_eur,
                 "price_usd": inv.price_usd,
                 "currency": inv.currency,
@@ -687,13 +759,19 @@ async fn billing_settle(
         }));
     }
 
-    let (zec_eur, zec_usd) = match price_service.get_rates().await {
-        Ok(rates) => (rates.zec_eur, rates.zec_usd),
-        Err(_) => (0.0, 0.0),
+    let rates = match price_service.get_rates().await {
+        Ok(r) => r,
+        Err(_) => crate::invoices::pricing::ZecRates {
+            zec_eur: 0.0, zec_usd: 0.0, zec_brl: 0.0,
+            zec_gbp: 0.0, zec_cad: 0.0, zec_jpy: 0.0,
+            zec_mxn: 0.0, zec_ars: 0.0, zec_ngn: 0.0,
+            zec_chf: 0.0, zec_inr: 0.0,
+            updated_at: chrono::Utc::now(),
+        },
     };
 
     match crate::billing::create_settlement_invoice(
-        pool.get_ref(), &merchant.id, summary.outstanding_zec, &fee_address, zec_eur, zec_usd,
+        pool.get_ref(), &merchant.id, summary.outstanding_zec, &fee_address, rates.zec_eur, rates.zec_usd,
     ).await {
         Ok(invoice_id) => {
             if let Some(cycle) = &summary.current_cycle {
