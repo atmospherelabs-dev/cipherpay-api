@@ -624,41 +624,14 @@ async fn refund_invoice(
 }
 
 /// Buyer can save a refund address on their invoice (write-once).
-/// Requires API key or session auth to prevent unauthorized hijacking.
+/// No auth required: invoice IDs are unguessable UUIDs and the address
+/// can only be set once (write-once guard in update_refund_address).
 async fn update_refund_address(
-    req: actix_web::HttpRequest,
     pool: web::Data<SqlitePool>,
     path: web::Path<String>,
     body: web::Json<serde_json::Value>,
 ) -> actix_web::HttpResponse {
     let invoice_id = path.into_inner();
-
-    let merchant = match auth::resolve_merchant_or_session(&req, &pool).await {
-        Some(m) => m,
-        None => {
-            return actix_web::HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Authentication required"
-            }));
-        }
-    };
-
-    let invoice_merchant_id: Option<String> = sqlx::query_scalar(
-        "SELECT merchant_id FROM invoices WHERE id = ?"
-    )
-    .bind(&invoice_id)
-    .fetch_optional(pool.get_ref())
-    .await
-    .ok()
-    .flatten();
-
-    match &invoice_merchant_id {
-        Some(mid) if mid == &merchant.id => {},
-        _ => {
-            return actix_web::HttpResponse::NotFound().json(serde_json::json!({
-                "error": "Invoice not found"
-            }));
-        }
-    }
 
     let address = match body.get("refund_address").and_then(|v| v.as_str()) {
         Some(a) if !a.is_empty() => a,
