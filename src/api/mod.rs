@@ -556,8 +556,9 @@ async fn cancel_invoice(
                 }));
             }
             if let Err(e) = crate::invoices::mark_expired(pool.get_ref(), &invoice_id).await {
+                tracing::error!(error = %e, invoice_id = %invoice_id, "Failed to cancel invoice");
                 return actix_web::HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": format!("{}", e)
+                    "error": "Failed to cancel invoice"
                 }));
             }
             actix_web::HttpResponse::Ok().json(serde_json::json!({ "status": "cancelled" }))
@@ -597,8 +598,9 @@ async fn refund_invoice(
     match crate::invoices::get_invoice(pool.get_ref(), &invoice_id).await {
         Ok(Some(inv)) if inv.merchant_id == merchant.id && inv.status == "confirmed" => {
             if let Err(e) = crate::invoices::mark_refunded(pool.get_ref(), &invoice_id, refund_txid).await {
+                tracing::error!(error = %e, invoice_id = %invoice_id, "Failed to mark invoice refunded");
                 return actix_web::HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": format!("{}", e)
+                    "error": "Failed to process refund"
                 }));
             }
             let response = serde_json::json!({
@@ -622,12 +624,41 @@ async fn refund_invoice(
 }
 
 /// Buyer can save a refund address on their invoice (write-once).
+/// Requires API key or session auth to prevent unauthorized hijacking.
 async fn update_refund_address(
+    req: actix_web::HttpRequest,
     pool: web::Data<SqlitePool>,
     path: web::Path<String>,
     body: web::Json<serde_json::Value>,
 ) -> actix_web::HttpResponse {
     let invoice_id = path.into_inner();
+
+    let merchant = match auth::resolve_merchant_or_session(&req, &pool).await {
+        Some(m) => m,
+        None => {
+            return actix_web::HttpResponse::Unauthorized().json(serde_json::json!({
+                "error": "Authentication required"
+            }));
+        }
+    };
+
+    let invoice_merchant_id: Option<String> = sqlx::query_scalar(
+        "SELECT merchant_id FROM invoices WHERE id = ?"
+    )
+    .bind(&invoice_id)
+    .fetch_optional(pool.get_ref())
+    .await
+    .ok()
+    .flatten();
+
+    match &invoice_merchant_id {
+        Some(mid) if mid == &merchant.id => {},
+        _ => {
+            return actix_web::HttpResponse::NotFound().json(serde_json::json!({
+                "error": "Invoice not found"
+            }));
+        }
+    }
 
     let address = match body.get("refund_address").and_then(|v| v.as_str()) {
         Some(a) if !a.is_empty() => a,

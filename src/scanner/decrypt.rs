@@ -83,7 +83,8 @@ pub fn try_decrypt_with_keys(raw_hex: &str, keys: &CachedKeys) -> Result<Vec<Dec
 
                 if !memo_text.trim().is_empty() {
                     tracing::info!(
-                        memo = %memo_text,
+                        has_memo = true,
+                        memo_len = memo_text.len(),
                         amount_zec,
                         "Decrypted Orchard output"
                     );
@@ -183,7 +184,8 @@ pub fn try_decrypt_all_outputs(raw_hex: &str, ufvk_str: &str) -> Result<Vec<Decr
 
                 if !memo_text.trim().is_empty() {
                     tracing::info!(
-                        memo = %memo_text,
+                        has_memo = true,
+                        memo_len = memo_text.len(),
                         amount_zec,
                         "Decrypted Orchard output"
                     );
