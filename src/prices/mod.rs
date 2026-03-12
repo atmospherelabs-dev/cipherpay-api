@@ -182,6 +182,12 @@ pub async fn update_price(
             if !SUPPORTED_CURRENCIES.contains(&c.as_str()) {
                 anyhow::bail!("Unsupported currency: {}", c);
             }
+            if c != price.currency {
+                let existing = get_price_by_product_currency(pool, &price.product_id, &c).await?;
+                if existing.is_some() {
+                    anyhow::bail!("An active price for {} already exists on this product. Deactivate it first.", c);
+                }
+            }
             c
         }
         None => price.currency.clone(),
