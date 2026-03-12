@@ -368,12 +368,15 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
     sqlx::query("DROP TABLE IF EXISTS _inv_repair").execute(&pool).await.ok();
 
     // Repair FK references in webhook_deliveries/fee_ledger that may have been
-    // auto-rewritten by SQLite during RENAME TABLE (pointing to invoices_old).
+    // auto-rewritten by SQLite during RENAME TABLE. Check for all possible
+    // dangling references: invoices_old, _inv_repair (from FK repair migration).
+    // SQLite pool pragmas are per-connection, so legacy_alter_table may not have
+    // been active on the connection that ran the rename.
     let wd_schema: Option<String> = sqlx::query_scalar(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='webhook_deliveries'"
     ).fetch_optional(&pool).await.ok().flatten();
     if let Some(ref schema) = wd_schema {
-        if schema.contains("invoices_old") {
+        if schema.contains("invoices_old") || schema.contains("_inv_repair") {
             tracing::info!("Repairing webhook_deliveries FK references...");
             sqlx::query("ALTER TABLE webhook_deliveries RENAME TO _wd_repair")
                 .execute(&pool).await.ok();
@@ -397,12 +400,13 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
             tracing::info!("webhook_deliveries FK repair complete");
         }
     }
+    sqlx::query("DROP TABLE IF EXISTS _wd_repair").execute(&pool).await.ok();
 
     let fl_schema: Option<String> = sqlx::query_scalar(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='fee_ledger'"
     ).fetch_optional(&pool).await.ok().flatten();
     if let Some(ref schema) = fl_schema {
-        if schema.contains("invoices_old") {
+        if schema.contains("invoices_old") || schema.contains("_inv_repair") {
             tracing::info!("Repairing fee_ledger FK references...");
             sqlx::query("ALTER TABLE fee_ledger RENAME TO _fl_repair")
                 .execute(&pool).await.ok();
@@ -424,6 +428,7 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
             tracing::info!("fee_ledger FK repair complete");
         }
     }
+    sqlx::query("DROP TABLE IF EXISTS _fl_repair").execute(&pool).await.ok();
 
     // Re-enable FK enforcement and restore default alter-table behavior
     sqlx::query("PRAGMA legacy_alter_table = OFF").execute(&pool).await.ok();
