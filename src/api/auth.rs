@@ -206,7 +206,10 @@ fn build_session_cookie<'a>(value: &str, config: &Config, clear: bool) -> Cookie
         .http_only(true)
         .same_site(SameSite::Lax);
 
-    if !config.is_testnet() {
+    let is_deployed = config.cookie_domain.is_some()
+        || config.frontend_url.as_deref().map_or(false, |u| u.starts_with("https"));
+
+    if !config.is_testnet() || is_deployed {
         builder = builder.secure(true);
         if let Some(ref domain) = config.cookie_domain {
             builder = builder.domain(domain.clone());
