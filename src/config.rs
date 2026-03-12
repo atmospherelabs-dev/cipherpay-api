@@ -28,6 +28,7 @@ pub struct Config {
     pub fee_rate: f64,
     pub billing_cycle_days_new: i64,
     pub billing_cycle_days_standard: i64,
+    pub admin_key: Option<String>,
 }
 
 impl Config {
@@ -83,6 +84,7 @@ impl Config {
             billing_cycle_days_standard: env::var("BILLING_CYCLE_DAYS_STANDARD")
                 .unwrap_or_else(|_| "30".into())
                 .parse()?,
+            admin_key: env::var("ADMIN_KEY").ok().filter(|s| !s.is_empty()),
         })
     }
 

@@ -1,3 +1,4 @@
+pub mod admin;
 pub mod auth;
 pub mod invoices;
 pub mod merchants;
@@ -82,7 +83,13 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/invoices/{id}/qr", web::get().to(qr_code))
             .route("/rates", web::get().to(rates::get))
             // x402 facilitator
-            .route("/x402/verify", web::post().to(x402::verify)),
+            .route("/x402/verify", web::post().to(x402::verify))
+            // Admin endpoints (protected by ADMIN_KEY)
+            .route("/admin/auth", web::post().to(admin::auth_check))
+            .route("/admin/stats", web::get().to(admin::stats))
+            .route("/admin/merchants", web::get().to(admin::merchants))
+            .route("/admin/billing", web::get().to(admin::billing))
+            .route("/admin/system", web::get().to(admin::system)),
     );
 }
 
