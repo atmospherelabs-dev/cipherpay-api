@@ -221,10 +221,19 @@ pub async fn get_public(
     pool: web::Data<SqlitePool>,
     path: web::Path<String>,
 ) -> HttpResponse {
-    let product_id = path.into_inner();
+    let id_or_slug = path.into_inner();
 
-    match products::get_product(pool.get_ref(), &product_id).await {
-        Ok(Some(product)) if product.active == 1 => {
+    // Try by ID first, then fall back to slug lookup
+    let product = match products::get_product(pool.get_ref(), &id_or_slug).await {
+        Ok(Some(p)) if p.active == 1 => Some(p),
+        _ => match products::get_product_by_slug(pool.get_ref(), &id_or_slug).await {
+            Ok(Some(p)) if p.active == 1 => Some(p),
+            _ => None,
+        },
+    };
+
+    match product {
+        Some(product) => {
             let prices = crate::prices::list_prices_for_product(pool.get_ref(), &product.id)
                 .await
                 .unwrap_or_default()
@@ -242,7 +251,7 @@ pub async fn get_public(
                 "prices": prices,
             }))
         }
-        _ => HttpResponse::NotFound().json(serde_json::json!({
+        None => HttpResponse::NotFound().json(serde_json::json!({
             "error": "Product not found"
         })),
     }

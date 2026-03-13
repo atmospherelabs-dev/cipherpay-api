@@ -142,6 +142,18 @@ pub async fn get_product(pool: &SqlitePool, id: &str) -> anyhow::Result<Option<P
     Ok(row)
 }
 
+pub async fn get_product_by_slug(pool: &SqlitePool, slug: &str) -> anyhow::Result<Option<Product>> {
+    let row = sqlx::query_as::<_, Product>(
+        "SELECT id, merchant_id, slug, name, description, default_price_id, metadata, active, created_at
+         FROM products WHERE slug = ?"
+    )
+    .bind(slug)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row)
+}
+
 pub async fn update_product(
     pool: &SqlitePool,
     id: &str,
