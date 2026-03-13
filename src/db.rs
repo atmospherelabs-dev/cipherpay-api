@@ -764,6 +764,12 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_subscriptions_status ON subscriptions(status)")
         .execute(&pool).await.ok();
 
+    // Recovery email encryption: add blind-index column
+    sqlx::query("ALTER TABLE merchants ADD COLUMN recovery_email_hash TEXT")
+        .execute(&pool).await.ok();
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_merchants_email_hash ON merchants(recovery_email_hash)")
+        .execute(&pool).await.ok();
+
     tracing::info!("Database ready (SQLite)");
     Ok(pool)
 }
@@ -821,6 +827,50 @@ pub async fn run_data_purge(pool: &SqlitePool, purge_days: i64) -> anyhow::Resul
             "Data purge completed"
         );
     }
+    Ok(())
+}
+
+/// Encrypt any plaintext recovery emails and backfill blind-index hashes.
+/// Called once at startup when ENCRYPTION_KEY is set.
+/// Plaintext emails are identified by containing '@'.
+pub async fn migrate_encrypt_recovery_emails(pool: &SqlitePool, encryption_key: &str) -> anyhow::Result<()> {
+    // Backfill hashes for rows that have a recovery_email but no hash
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT id, recovery_email FROM merchants WHERE recovery_email IS NOT NULL AND recovery_email != '' AND (recovery_email_hash IS NULL OR recovery_email_hash = '')"
+    )
+    .fetch_all(pool)
+    .await?;
+
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    tracing::info!(count = rows.len(), "Migrating recovery emails (encrypt + blind index)");
+    for (id, email_raw) in &rows {
+        let plaintext = if email_raw.contains('@') {
+            email_raw.clone()
+        } else if !encryption_key.is_empty() {
+            crate::crypto::decrypt(email_raw, encryption_key).unwrap_or_else(|_| email_raw.clone())
+        } else {
+            email_raw.clone()
+        };
+
+        let hash = crate::crypto::blind_index(&plaintext);
+
+        let stored = if !encryption_key.is_empty() && plaintext.contains('@') {
+            crate::crypto::encrypt(&plaintext, encryption_key)?
+        } else {
+            email_raw.clone()
+        };
+
+        sqlx::query("UPDATE merchants SET recovery_email = ?, recovery_email_hash = ? WHERE id = ?")
+            .bind(&stored)
+            .bind(&hash)
+            .bind(id)
+            .execute(pool)
+            .await?;
+    }
+    tracing::info!("Recovery email encryption migration complete");
     Ok(())
 }
 

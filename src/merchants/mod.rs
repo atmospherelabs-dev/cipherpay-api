@@ -90,9 +90,22 @@ pub async fn create_merchant(
         crate::crypto::encrypt(&webhook_secret, encryption_key)?
     };
 
+    let (stored_email, email_hash) = match &req.email {
+        Some(email) if !email.is_empty() => {
+            let encrypted = if encryption_key.is_empty() {
+                email.clone()
+            } else {
+                crate::crypto::encrypt(email, encryption_key)?
+            };
+            let hash = crate::crypto::blind_index(email);
+            (Some(encrypted), Some(hash))
+        }
+        _ => (None, None),
+    };
+
     sqlx::query(
-        "INSERT INTO merchants (id, name, api_key_hash, dashboard_token_hash, ufvk, payment_address, webhook_url, webhook_secret, recovery_email, diversifier_index)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)"
+        "INSERT INTO merchants (id, name, api_key_hash, dashboard_token_hash, ufvk, payment_address, webhook_url, webhook_secret, recovery_email, recovery_email_hash, diversifier_index)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)"
     )
     .bind(&id)
     .bind(&name)
@@ -102,7 +115,8 @@ pub async fn create_merchant(
     .bind(&payment_address)
     .bind(&req.webhook_url)
     .bind(&stored_webhook_secret)
-    .bind(&req.email)
+    .bind(&stored_email)
+    .bind(&email_hash)
     .execute(pool)
     .await?;
 
@@ -131,10 +145,15 @@ fn row_to_merchant(r: MerchantRow, encryption_key: &str) -> Merchant {
             tracing::error!(error = %e, "Failed to decrypt webhook secret, using raw value");
             r.7.clone()
         });
+    let recovery_email = r.8.as_deref()
+        .map(|e| crate::crypto::decrypt_email(e, encryption_key).unwrap_or_else(|err| {
+            tracing::error!(error = %err, "Failed to decrypt recovery email");
+            e.to_string()
+        }));
     Merchant {
         id: r.0, name: r.1, api_key_hash: r.2, dashboard_token_hash: r.3,
         ufvk, payment_address: r.5, webhook_url: r.6,
-        webhook_secret, recovery_email: r.8, created_at: r.9,
+        webhook_secret, recovery_email, created_at: r.9,
         diversifier_index: r.10,
     }
 }
@@ -263,10 +282,11 @@ pub async fn next_diversifier_index(pool: &SqlitePool, merchant_id: &str) -> any
 }
 
 pub async fn find_by_email(pool: &SqlitePool, email: &str, encryption_key: &str) -> anyhow::Result<Option<Merchant>> {
+    let email_hash = crate::crypto::blind_index(email);
     let row = sqlx::query_as::<_, MerchantRow>(
-        &format!("SELECT {MERCHANT_COLS} FROM merchants WHERE recovery_email = ?")
+        &format!("SELECT {MERCHANT_COLS} FROM merchants WHERE recovery_email_hash = ?")
     )
-    .bind(email)
+    .bind(&email_hash)
     .fetch_optional(pool)
     .await?;
 
