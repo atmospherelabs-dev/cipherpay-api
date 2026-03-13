@@ -93,7 +93,7 @@ impl Config {
     }
 
     pub fn smtp_configured(&self) -> bool {
-        self.smtp_host.is_some() && self.smtp_from.is_some()
+        self.smtp_from.is_some() && self.smtp_pass.is_some()
     }
 
     pub fn fee_enabled(&self) -> bool {

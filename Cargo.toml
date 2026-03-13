@@ -58,8 +58,7 @@ dotenvy = "0.15"
 # Concurrency
 futures = "0.3"
 
-# Email
-lettre = { version = "0.11", features = ["tokio1-native-tls", "builder", "smtp-transport"] }
+# Email (via Resend HTTP API — no SMTP needed, avoids cloud provider port blocks)
 
 # URL parsing
 url = "2"

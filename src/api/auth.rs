@@ -223,17 +223,25 @@ pub async fn resolve_merchant_or_session(
 
 fn build_session_cookie<'a>(value: &str, config: &Config, clear: bool) -> Cookie<'a> {
     let has_domain = config.cookie_domain.is_some();
-    let cookie_name = if has_domain { SESSION_COOKIE_LEGACY } else { SESSION_COOKIE };
+    let is_deployed = has_domain
+        || config.frontend_url.as_deref().map_or(false, |u| u.starts_with("https"));
+    let use_secure = !config.is_testnet() || is_deployed;
+
+    // __Host- cookies require the Secure flag; fall back to legacy name on local HTTP
+    let cookie_name = if has_domain {
+        SESSION_COOKIE_LEGACY
+    } else if use_secure {
+        SESSION_COOKIE
+    } else {
+        SESSION_COOKIE_LEGACY
+    };
 
     let mut builder = Cookie::build(cookie_name, value.to_string())
         .path("/")
         .http_only(true)
         .same_site(SameSite::Lax);
 
-    let is_deployed = has_domain
-        || config.frontend_url.as_deref().map_or(false, |u| u.starts_with("https"));
-
-    if !config.is_testnet() || is_deployed {
+    if use_secure {
         builder = builder.secure(true);
         if let Some(ref domain) = config.cookie_domain {
             builder = builder.domain(domain.clone());
