@@ -363,7 +363,16 @@ pub async fn confirm_recovery_token(pool: &SqlitePool, token: &str) -> anyhow::R
 
     let (recovery_id, merchant_id) = match row {
         Some(r) => r,
-        None => return Ok(None),
+        None => {
+            let total: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM recovery_tokens")
+                .fetch_one(pool).await?;
+            tracing::warn!(
+                token_hash_prefix = &token_hash[..8],
+                total_tokens_in_db = total.0,
+                "Recovery token not found or expired"
+            );
+            return Ok(None);
+        }
     };
 
     let new_token = regenerate_dashboard_token(pool, &merchant_id).await?;
