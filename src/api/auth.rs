@@ -478,6 +478,7 @@ pub async fn recover_confirm(
             }))
         }
         Ok(None) => {
+            tracing::warn!("Recovery confirm failed: token not found or expired");
             HttpResponse::BadRequest().json(serde_json::json!({
                 "error": "Invalid or expired recovery token"
             }))
