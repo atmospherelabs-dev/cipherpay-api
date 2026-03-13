@@ -29,7 +29,6 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/health", web::get().to(health))
             .service(
                 web::scope("/merchants")
-                    .wrap(Governor::new(&auth_rate_limit))
                     .route("", web::post().to(merchants::create))
                     .route("/me", web::get().to(auth::me))
                     .route("/me", web::patch().to(auth::update_me))
