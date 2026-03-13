@@ -1,13 +1,10 @@
 use crate::config::Config;
-use lettre::message::header::ContentType;
-use lettre::transport::smtp::authentication::Credentials;
-use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 
 pub async fn send_recovery_email(config: &Config, to: &str, token: &str) -> anyhow::Result<()> {
-    let smtp_host = config.smtp_host.as_deref()
-        .ok_or_else(|| anyhow::anyhow!("SMTP not configured"))?;
     let from = config.smtp_from.as_deref()
         .ok_or_else(|| anyhow::anyhow!("SMTP_FROM not configured"))?;
+    let api_key = config.smtp_pass.as_deref()
+        .ok_or_else(|| anyhow::anyhow!("SMTP_PASS (Resend API key) not configured"))?;
 
     let frontend_url = config.frontend_url.as_deref().unwrap_or("http://localhost:3000");
     let recovery_link = format!("{}/dashboard/recover/confirm?token={}", frontend_url, token);
@@ -28,22 +25,26 @@ pub async fn send_recovery_email(config: &Config, to: &str, token: &str) -> anyh
         recovery_link
     );
 
-    let email = Message::builder()
-        .from(from.parse()?)
-        .to(to.parse()?)
-        .subject("CipherPay: Account Recovery")
-        .header(ContentType::TEXT_PLAIN)
-        .body(body)?;
+    let client = reqwest::Client::new();
+    let resp = client
+        .post("https://api.resend.com/emails")
+        .header("Authorization", format!("Bearer {}", api_key))
+        .json(&serde_json::json!({
+            "from": from,
+            "to": [to],
+            "subject": "CipherPay: Account Recovery",
+            "text": body,
+        }))
+        .send()
+        .await?;
 
-    let mut transport_builder = AsyncSmtpTransport::<Tokio1Executor>::relay(smtp_host)?;
-
-    if let (Some(user), Some(pass)) = (&config.smtp_user, &config.smtp_pass) {
-        transport_builder = transport_builder.credentials(Credentials::new(user.clone(), pass.clone()));
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let err_body = resp.text().await.unwrap_or_default();
+        tracing::error!(status = %status, body = %err_body, "Resend API error");
+        anyhow::bail!("Email send failed ({})", status);
     }
 
-    let mailer = transport_builder.build();
-    mailer.send(email).await?;
-
-    tracing::info!(to, "Recovery email sent");
+    tracing::info!("Recovery email sent");
     Ok(())
 }
