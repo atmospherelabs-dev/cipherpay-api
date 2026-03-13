@@ -330,10 +330,9 @@ pub async fn process_billing_cycles(
     .await?;
 
     for cycle in &expired_cycles {
-        // Don't enforce for tiny balances — carry over to next cycle instead
         const MIN_SETTLEMENT_ZEC: f64 = 0.05;
 
-        if cycle.outstanding_zec <= 0.0001 {
+        if cycle.outstanding_zec <= 0.0 {
             sqlx::query("UPDATE billing_cycles SET status = 'paid' WHERE id = ?")
                 .bind(&cycle.id)
                 .execute(pool)

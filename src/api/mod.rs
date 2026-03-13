@@ -696,6 +696,7 @@ async fn billing_summary(
             "total_fees_zec": summary.total_fees_zec,
             "auto_collected_zec": summary.auto_collected_zec,
             "outstanding_zec": summary.outstanding_zec,
+            "min_settlement_zec": 0.05,
         })),
         Err(e) => {
             tracing::error!(error = %e, "Failed to get billing summary");
@@ -768,6 +769,15 @@ async fn billing_settle(
         return actix_web::HttpResponse::Ok().json(serde_json::json!({
             "message": "No outstanding balance",
             "outstanding_zec": 0.0,
+        }));
+    }
+
+    const MIN_SETTLEMENT_ZEC: f64 = 0.05;
+    if summary.outstanding_zec < MIN_SETTLEMENT_ZEC {
+        return actix_web::HttpResponse::BadRequest().json(serde_json::json!({
+            "error": format!("Outstanding balance ({:.6} ZEC) is below the minimum settlement amount ({:.2} ZEC). Fees will carry over until the threshold is reached.", summary.outstanding_zec, MIN_SETTLEMENT_ZEC),
+            "outstanding_zec": summary.outstanding_zec,
+            "min_settlement_zec": MIN_SETTLEMENT_ZEC,
         }));
     }
 
