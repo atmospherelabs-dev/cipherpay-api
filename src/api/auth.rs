@@ -304,13 +304,33 @@ pub async fn update_me(
     }
 
     if let Some(ref email) = body.recovery_email {
-        let val = if email.is_empty() { None } else { Some(email.as_str()) };
-        sqlx::query("UPDATE merchants SET recovery_email = ? WHERE id = ?")
-            .bind(val)
-            .bind(&merchant.id)
-            .execute(pool.get_ref())
-            .await
-            .ok();
+        if email.is_empty() {
+            sqlx::query("UPDATE merchants SET recovery_email = NULL, recovery_email_hash = NULL WHERE id = ?")
+                .bind(&merchant.id)
+                .execute(pool.get_ref())
+                .await
+                .ok();
+        } else {
+            let encrypted = if config.encryption_key.is_empty() {
+                email.clone()
+            } else {
+                match crate::crypto::encrypt(email, &config.encryption_key) {
+                    Ok(enc) => enc,
+                    Err(e) => {
+                        tracing::error!(error = %e, "Failed to encrypt recovery email");
+                        return HttpResponse::InternalServerError().json(serde_json::json!({"error": "Internal error"}));
+                    }
+                }
+            };
+            let hash = crate::crypto::blind_index(email);
+            sqlx::query("UPDATE merchants SET recovery_email = ?, recovery_email_hash = ? WHERE id = ?")
+                .bind(&encrypted)
+                .bind(&hash)
+                .bind(&merchant.id)
+                .execute(pool.get_ref())
+                .await
+                .ok();
+        }
         tracing::info!(merchant_id = %merchant.id, "Recovery email updated");
     }
 

@@ -81,6 +81,26 @@ pub fn decrypt_webhook_secret(data: &str, key_hex: &str) -> Result<String> {
     decrypt(data, key_hex)
 }
 
+/// Deterministic hash for blind-index lookups (e.g. recovery email).
+/// Uses SHA-256 of the lowercased, trimmed value so we can do
+/// WHERE hash_col = ? without needing to decrypt every row.
+pub fn blind_index(value: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let normalized = value.trim().to_lowercase();
+    let mut hasher = Sha256::new();
+    hasher.update(normalized.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+/// Decrypt a recovery email, handling migration from plaintext.
+/// Plaintext emails contain '@'; encrypted ones are hex strings.
+pub fn decrypt_email(data: &str, key_hex: &str) -> Result<String> {
+    if key_hex.is_empty() || data.contains('@') {
+        return Ok(data.to_string());
+    }
+    decrypt(data, key_hex)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
