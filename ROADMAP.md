@@ -85,7 +85,16 @@ Privacy-preserving Zcash payment gateway. Non-custodial, shielded-only.
 - [ ] Kubernetes manifests for auto-scaling
 - [ ] Audit logging (who accessed what, when -- without logging PII)
 
-## Phase 5 -- Monetization (Open Core + SaaS)
+## Phase 5 -- AI Agent Infrastructure
+
+- [x] **x402 facilitator** — verify shielded Zcash payments for HTTP 402 paywalls
+- [x] **@cipherpay/x402 SDK** — Express middleware for resource servers (`npm install @cipherpay/x402`)
+- [x] **@cipherpay/mcp** — MCP server for Claude/Cursor (invoices, rates, status, x402 verify)
+- [ ] **Agent wallet CLI** (`zipher-cli`) — extract Zipher's Rust wallet engine into a standalone binary
+- [ ] **@cipherpay/wallet-mcp** — MCP server wrapping `zipher-cli` so AI agents can send ZEC
+- [ ] **Multi-recipient send** — enable batch payments from a single agent transaction
+
+## Phase 6 -- Monetization (Open Core + SaaS)
 
 - [ ] **Self-hosted** (free, open source, BTCPay Server model)
   - Full feature parity, run your own CipherPay + Zebra node
