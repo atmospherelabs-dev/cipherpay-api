@@ -184,6 +184,85 @@ pub async fn my_invoices(
     }
 }
 
+/// GET /api/merchants/me/webhooks -- list webhook deliveries for the authenticated merchant
+pub async fn my_webhooks(
+    req: HttpRequest,
+    pool: web::Data<SqlitePool>,
+    query: web::Query<MyWebhookQuery>,
+) -> HttpResponse {
+    let merchant = match resolve_session(&req, &pool).await {
+        Some(m) => m,
+        None => {
+            return HttpResponse::Unauthorized().json(serde_json::json!({
+                "error": "Not authenticated"
+            }));
+        }
+    };
+
+    let limit = query.limit.unwrap_or(50).min(200) as i64;
+    let offset = query.offset.unwrap_or(0) as i64;
+
+    let (count_sql, list_sql) = if let Some(ref status) = query.status {
+        (
+            "SELECT COUNT(*) FROM webhook_deliveries WHERE merchant_id = ? AND status = ?".to_string(),
+            "SELECT id, invoice_id, event_type, status, response_status, response_error, attempts, created_at, last_attempt_at
+             FROM webhook_deliveries WHERE merchant_id = ? AND status = ? ORDER BY created_at DESC LIMIT ? OFFSET ?".to_string(),
+        )
+    } else {
+        (
+            "SELECT COUNT(*) FROM webhook_deliveries WHERE merchant_id = ?".to_string(),
+            "SELECT id, invoice_id, event_type, status, response_status, response_error, attempts, created_at, last_attempt_at
+             FROM webhook_deliveries WHERE merchant_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?".to_string(),
+        )
+    };
+
+    let total: i64 = if let Some(ref status) = query.status {
+        sqlx::query_scalar::<_, i64>(&count_sql)
+            .bind(&merchant.id).bind(status)
+            .fetch_one(pool.get_ref()).await.unwrap_or(0)
+    } else {
+        sqlx::query_scalar::<_, i64>(&count_sql)
+            .bind(&merchant.id)
+            .fetch_one(pool.get_ref()).await.unwrap_or(0)
+    };
+
+    let rows: Vec<(String, String, Option<String>, String, Option<i32>, Option<String>, i32, String, Option<String>)> = if let Some(ref status) = query.status {
+        sqlx::query_as(&list_sql)
+            .bind(&merchant.id).bind(status).bind(limit).bind(offset)
+            .fetch_all(pool.get_ref()).await.unwrap_or_default()
+    } else {
+        sqlx::query_as(&list_sql)
+            .bind(&merchant.id).bind(limit).bind(offset)
+            .fetch_all(pool.get_ref()).await.unwrap_or_default()
+    };
+
+    let deliveries: Vec<serde_json::Value> = rows.iter().map(|r| {
+        serde_json::json!({
+            "id": r.0,
+            "invoice_id": r.1,
+            "event_type": r.2,
+            "status": r.3,
+            "response_status": r.4,
+            "response_error": r.5,
+            "attempts": r.6,
+            "created_at": r.7,
+            "last_attempt_at": r.8,
+        })
+    }).collect();
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "deliveries": deliveries,
+        "total": total,
+    }))
+}
+
+#[derive(serde::Deserialize)]
+pub struct MyWebhookQuery {
+    pub status: Option<String>,
+    pub limit: Option<u32>,
+    pub offset: Option<u32>,
+}
+
 /// Extract the session ID from the session cookie (__Host- prefixed or legacy)
 pub fn extract_session_id(req: &HttpRequest) -> Option<String> {
     req.cookie(SESSION_COOKIE)

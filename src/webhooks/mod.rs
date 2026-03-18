@@ -32,8 +32,8 @@ pub async fn dispatch(
     txid: &str,
     encryption_key: &str,
 ) -> anyhow::Result<()> {
-    let merchant_row = sqlx::query_as::<_, (Option<String>, String)>(
-        "SELECT m.webhook_url, m.webhook_secret FROM invoices i
+    let merchant_row = sqlx::query_as::<_, (String, Option<String>, String)>(
+        "SELECT m.id, m.webhook_url, m.webhook_secret FROM invoices i
          JOIN merchants m ON i.merchant_id = m.id
          WHERE i.id = ?"
     )
@@ -41,8 +41,8 @@ pub async fn dispatch(
     .fetch_optional(pool)
     .await?;
 
-    let (webhook_url, raw_secret) = match merchant_row {
-        Some((Some(url), secret)) if !url.is_empty() => (url, secret),
+    let (merchant_id, webhook_url, raw_secret) = match merchant_row {
+        Some((mid, Some(url), secret)) if !url.is_empty() => (mid, url, secret),
         _ => return Ok(()),
     };
     let webhook_secret = crate::crypto::decrypt_webhook_secret(&raw_secret, encryption_key)?;
@@ -70,8 +70,8 @@ pub async fn dispatch(
         .to_string();
 
     sqlx::query(
-        "INSERT INTO webhook_deliveries (id, invoice_id, url, payload, status, attempts, last_attempt_at, next_retry_at)
-         VALUES (?, ?, ?, ?, 'pending', 1, ?, ?)"
+        "INSERT INTO webhook_deliveries (id, invoice_id, url, payload, status, attempts, last_attempt_at, next_retry_at, event_type, merchant_id)
+         VALUES (?, ?, ?, ?, 'pending', 1, ?, ?, ?, ?)"
     )
     .bind(&delivery_id)
     .bind(invoice_id)
@@ -79,6 +79,8 @@ pub async fn dispatch(
     .bind(&payload_str)
     .bind(&timestamp)
     .bind(&next_retry)
+    .bind(event)
+    .bind(&merchant_id)
     .execute(pool)
     .await?;
 
@@ -91,16 +93,32 @@ pub async fn dispatch(
         .await
     {
         Ok(resp) if resp.status().is_success() => {
-            sqlx::query("UPDATE webhook_deliveries SET status = 'delivered' WHERE id = ?")
+            let status_code = resp.status().as_u16() as i32;
+            sqlx::query("UPDATE webhook_deliveries SET status = 'delivered', response_status = ? WHERE id = ?")
+                .bind(status_code)
                 .bind(&delivery_id)
                 .execute(pool)
                 .await?;
             tracing::info!(invoice_id, event, "Webhook delivered");
         }
         Ok(resp) => {
+            let status_code = resp.status().as_u16() as i32;
+            let error_text = format!("HTTP {}", resp.status());
+            sqlx::query("UPDATE webhook_deliveries SET response_status = ?, response_error = ? WHERE id = ?")
+                .bind(status_code)
+                .bind(&error_text)
+                .bind(&delivery_id)
+                .execute(pool)
+                .await?;
             tracing::warn!(invoice_id, event, status = %resp.status(), "Webhook rejected, will retry");
         }
         Err(e) => {
+            let error_text = e.to_string();
+            sqlx::query("UPDATE webhook_deliveries SET response_status = 0, response_error = ? WHERE id = ?")
+                .bind(&error_text)
+                .bind(&delivery_id)
+                .execute(pool)
+                .await?;
             tracing::warn!(invoice_id, event, error = %e, "Webhook failed, will retry");
         }
     }
@@ -119,8 +137,8 @@ pub async fn dispatch_payment(
     overpaid: bool,
     encryption_key: &str,
 ) -> anyhow::Result<()> {
-    let merchant_row = sqlx::query_as::<_, (Option<String>, String)>(
-        "SELECT m.webhook_url, m.webhook_secret FROM invoices i
+    let merchant_row = sqlx::query_as::<_, (String, Option<String>, String)>(
+        "SELECT m.id, m.webhook_url, m.webhook_secret FROM invoices i
          JOIN merchants m ON i.merchant_id = m.id
          WHERE i.id = ?"
     )
@@ -128,8 +146,8 @@ pub async fn dispatch_payment(
     .fetch_optional(pool)
     .await?;
 
-    let (webhook_url, raw_secret) = match merchant_row {
-        Some((Some(url), secret)) if !url.is_empty() => (url, secret),
+    let (merchant_id, webhook_url, raw_secret) = match merchant_row {
+        Some((mid, Some(url), secret)) if !url.is_empty() => (mid, url, secret),
         _ => return Ok(()),
     };
     let webhook_secret = crate::crypto::decrypt_webhook_secret(&raw_secret, encryption_key)?;
@@ -160,8 +178,8 @@ pub async fn dispatch_payment(
         .to_string();
 
     sqlx::query(
-        "INSERT INTO webhook_deliveries (id, invoice_id, url, payload, status, attempts, last_attempt_at, next_retry_at)
-         VALUES (?, ?, ?, ?, 'pending', 1, ?, ?)"
+        "INSERT INTO webhook_deliveries (id, invoice_id, url, payload, status, attempts, last_attempt_at, next_retry_at, event_type, merchant_id)
+         VALUES (?, ?, ?, ?, 'pending', 1, ?, ?, ?, ?)"
     )
     .bind(&delivery_id)
     .bind(invoice_id)
@@ -169,6 +187,8 @@ pub async fn dispatch_payment(
     .bind(&payload_str)
     .bind(&timestamp)
     .bind(&next_retry)
+    .bind(event)
+    .bind(&merchant_id)
     .execute(pool)
     .await?;
 
@@ -181,16 +201,32 @@ pub async fn dispatch_payment(
         .await
     {
         Ok(resp) if resp.status().is_success() => {
-            sqlx::query("UPDATE webhook_deliveries SET status = 'delivered' WHERE id = ?")
+            let status_code = resp.status().as_u16() as i32;
+            sqlx::query("UPDATE webhook_deliveries SET status = 'delivered', response_status = ? WHERE id = ?")
+                .bind(status_code)
                 .bind(&delivery_id)
                 .execute(pool)
                 .await?;
             tracing::info!(invoice_id, event, "Payment webhook delivered");
         }
         Ok(resp) => {
+            let status_code = resp.status().as_u16() as i32;
+            let error_text = format!("HTTP {}", resp.status());
+            sqlx::query("UPDATE webhook_deliveries SET response_status = ?, response_error = ? WHERE id = ?")
+                .bind(status_code)
+                .bind(&error_text)
+                .bind(&delivery_id)
+                .execute(pool)
+                .await?;
             tracing::warn!(invoice_id, event, status = %resp.status(), "Payment webhook rejected, will retry");
         }
         Err(e) => {
+            let error_text = e.to_string();
+            sqlx::query("UPDATE webhook_deliveries SET response_status = 0, response_error = ? WHERE id = ?")
+                .bind(&error_text)
+                .bind(&delivery_id)
+                .execute(pool)
+                .await?;
             tracing::warn!(invoice_id, event, error = %e, "Payment webhook failed, will retry");
         }
     }
@@ -243,16 +279,14 @@ pub async fn dispatch_event(
         .format("%Y-%m-%dT%H:%M:%SZ")
         .to_string();
 
-    // Use a synthetic invoice_id for the delivery record (webhook_deliveries requires invoice_id FK).
-    // For subscription events we'll use the invoice_id from the payload if available.
     let invoice_id_for_fk = payload.get("invoice_id")
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
     if !invoice_id_for_fk.is_empty() {
         sqlx::query(
-            "INSERT INTO webhook_deliveries (id, invoice_id, url, payload, status, attempts, last_attempt_at, next_retry_at)
-             VALUES (?, ?, ?, ?, 'pending', 1, ?, ?)"
+            "INSERT INTO webhook_deliveries (id, invoice_id, url, payload, status, attempts, last_attempt_at, next_retry_at, event_type, merchant_id)
+             VALUES (?, ?, ?, ?, 'pending', 1, ?, ?, ?, ?)"
         )
         .bind(&delivery_id)
         .bind(invoice_id_for_fk)
@@ -260,6 +294,8 @@ pub async fn dispatch_event(
         .bind(&payload_str)
         .bind(&timestamp)
         .bind(&next_retry)
+        .bind(event)
+        .bind(merchant_id)
         .execute(pool)
         .await?;
     }
@@ -273,8 +309,10 @@ pub async fn dispatch_event(
         .await
     {
         Ok(resp) if resp.status().is_success() => {
+            let status_code = resp.status().as_u16() as i32;
             if !invoice_id_for_fk.is_empty() {
-                sqlx::query("UPDATE webhook_deliveries SET status = 'delivered' WHERE id = ?")
+                sqlx::query("UPDATE webhook_deliveries SET status = 'delivered', response_status = ? WHERE id = ?")
+                    .bind(status_code)
                     .bind(&delivery_id)
                     .execute(pool)
                     .await?;
@@ -282,9 +320,27 @@ pub async fn dispatch_event(
             tracing::info!(merchant_id, event, "Lifecycle webhook delivered");
         }
         Ok(resp) => {
+            let status_code = resp.status().as_u16() as i32;
+            let error_text = format!("HTTP {}", resp.status());
+            if !invoice_id_for_fk.is_empty() {
+                sqlx::query("UPDATE webhook_deliveries SET response_status = ?, response_error = ? WHERE id = ?")
+                    .bind(status_code)
+                    .bind(&error_text)
+                    .bind(&delivery_id)
+                    .execute(pool)
+                    .await?;
+            }
             tracing::warn!(merchant_id, event, status = %resp.status(), "Lifecycle webhook rejected, will retry");
         }
         Err(e) => {
+            let error_text = e.to_string();
+            if !invoice_id_for_fk.is_empty() {
+                sqlx::query("UPDATE webhook_deliveries SET response_status = 0, response_error = ? WHERE id = ?")
+                    .bind(&error_text)
+                    .bind(&delivery_id)
+                    .execute(pool)
+                    .await?;
+            }
             tracing::warn!(merchant_id, event, error = %e, "Lifecycle webhook failed, will retry");
         }
     }
@@ -328,7 +384,7 @@ pub async fn retry_failed(pool: &SqlitePool, http: &reqwest::Client, encryption_
         let updated_payload = body.to_string();
         let signature = sign_payload(&secret, &ts, &updated_payload);
 
-        match http.post(&url)
+        let (resp_status, resp_error, success) = match http.post(&url)
             .header("X-CipherPay-Signature", &signature)
             .header("X-CipherPay-Timestamp", &ts)
             .json(&body)
@@ -337,39 +393,53 @@ pub async fn retry_failed(pool: &SqlitePool, http: &reqwest::Client, encryption_
             .await
         {
             Ok(resp) if resp.status().is_success() => {
-                sqlx::query("UPDATE webhook_deliveries SET status = 'delivered' WHERE id = ?")
-                    .bind(&id)
-                    .execute(pool)
-                    .await?;
-                tracing::info!(delivery_id = %id, "Webhook retry delivered");
+                (resp.status().as_u16() as i32, None, true)
             }
-            _ => {
-                let new_attempts = attempts + 1;
-                if new_attempts >= 5 {
-                    sqlx::query(
-                        "UPDATE webhook_deliveries SET status = 'failed', attempts = ?, last_attempt_at = ? WHERE id = ?"
-                    )
-                    .bind(new_attempts)
-                    .bind(&ts)
-                    .bind(&id)
-                    .execute(pool)
-                    .await?;
-                    tracing::warn!(delivery_id = %id, "Webhook permanently failed after 5 attempts");
-                } else {
-                    let next = (Utc::now() + chrono::Duration::seconds(retry_delay_secs(new_attempts)))
-                        .format("%Y-%m-%dT%H:%M:%SZ")
-                        .to_string();
-                    sqlx::query(
-                        "UPDATE webhook_deliveries SET attempts = ?, last_attempt_at = ?, next_retry_at = ? WHERE id = ?"
-                    )
-                    .bind(new_attempts)
-                    .bind(&ts)
-                    .bind(&next)
-                    .bind(&id)
-                    .execute(pool)
-                    .await?;
-                    tracing::info!(delivery_id = %id, attempt = new_attempts, next_retry = %next, "Webhook retry scheduled");
-                }
+            Ok(resp) => {
+                (resp.status().as_u16() as i32, Some(format!("HTTP {}", resp.status())), false)
+            }
+            Err(e) => {
+                (0, Some(e.to_string()), false)
+            }
+        };
+
+        if success {
+            sqlx::query("UPDATE webhook_deliveries SET status = 'delivered', response_status = ?, response_error = NULL WHERE id = ?")
+                .bind(resp_status)
+                .bind(&id)
+                .execute(pool)
+                .await?;
+            tracing::info!(delivery_id = %id, "Webhook retry delivered");
+        } else {
+            let new_attempts = attempts + 1;
+            if new_attempts >= 5 {
+                sqlx::query(
+                    "UPDATE webhook_deliveries SET status = 'failed', attempts = ?, last_attempt_at = ?, response_status = ?, response_error = ? WHERE id = ?"
+                )
+                .bind(new_attempts)
+                .bind(&ts)
+                .bind(resp_status)
+                .bind(&resp_error)
+                .bind(&id)
+                .execute(pool)
+                .await?;
+                tracing::warn!(delivery_id = %id, "Webhook permanently failed after 5 attempts");
+            } else {
+                let next = (Utc::now() + chrono::Duration::seconds(retry_delay_secs(new_attempts)))
+                    .format("%Y-%m-%dT%H:%M:%SZ")
+                    .to_string();
+                sqlx::query(
+                    "UPDATE webhook_deliveries SET attempts = ?, last_attempt_at = ?, next_retry_at = ?, response_status = ?, response_error = ? WHERE id = ?"
+                )
+                .bind(new_attempts)
+                .bind(&ts)
+                .bind(&next)
+                .bind(resp_status)
+                .bind(&resp_error)
+                .bind(&id)
+                .execute(pool)
+                .await?;
+                tracing::info!(delivery_id = %id, attempt = new_attempts, next_retry = %next, "Webhook retry scheduled");
             }
         }
     }
