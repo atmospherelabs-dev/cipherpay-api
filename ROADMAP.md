@@ -94,7 +94,16 @@ Privacy-preserving Zcash payment gateway. Non-custodial, shielded-only.
 - [ ] **@cipherpay/wallet-mcp** — MCP server wrapping `zipher-cli` so AI agents can send ZEC
 - [ ] **Multi-recipient send** — enable batch payments from a single agent transaction
 
-## Phase 6 -- Monetization (Open Core + SaaS)
+## Phase 6 -- Referral Program (requires Phase 5: operational wallet)
+
+- [ ] **Merchant referral program** — referrers earn 0.5% of referred merchants' volume for 12 months
+  - Referred merchants get 0.5% fee (instead of 1%) for first 3 months
+  - Commissions paid via 3-way ZIP 321 split (auto-collected) or operational wallet payout (fallback)
+  - Anti-gaming: 7-day account age + 3 invoices to refer, 0.5 ZEC minimum volume to activate
+  - Referral dashboard tab with code generation, stats, and earnings
+  - Depends on `zipher-cli` for CipherPay operational wallet (automated payouts)
+
+## Phase 7 -- Monetization (Open Core + SaaS)
 
 - [ ] **Self-hosted** (free, open source, BTCPay Server model)
   - Full feature parity, run your own CipherPay + Zebra node

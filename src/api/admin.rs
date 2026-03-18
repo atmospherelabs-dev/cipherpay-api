@@ -314,6 +314,84 @@ pub async fn billing(
     }))
 }
 
+/// GET /api/admin/webhooks -- list webhook deliveries with optional filters
+pub async fn webhooks(
+    req: actix_web::HttpRequest,
+    pool: web::Data<SqlitePool>,
+    query: web::Query<WebhookQuery>,
+) -> actix_web::HttpResponse {
+    if !authenticate_admin(&req) {
+        return unauthorized();
+    }
+
+    let limit = query.limit.unwrap_or(50).min(200) as i64;
+    let offset = query.offset.unwrap_or(0) as i64;
+
+    let mut where_clauses: Vec<String> = Vec::new();
+    let mut bind_values: Vec<String> = Vec::new();
+
+    if let Some(ref status) = query.status {
+        where_clauses.push("wd.status = ?".to_string());
+        bind_values.push(status.clone());
+    }
+    if let Some(ref merchant_id) = query.merchant_id {
+        where_clauses.push("wd.merchant_id = ?".to_string());
+        bind_values.push(merchant_id.clone());
+    }
+
+    let where_sql = if where_clauses.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", where_clauses.join(" AND "))
+    };
+
+    let count_sql = format!("SELECT COUNT(*) FROM webhook_deliveries wd {}", where_sql);
+    let list_sql = format!(
+        "SELECT wd.id, wd.invoice_id, wd.event_type, wd.merchant_id, wd.url, wd.status, wd.response_status, wd.response_error, wd.attempts, wd.created_at, wd.last_attempt_at
+         FROM webhook_deliveries wd {} ORDER BY wd.created_at DESC LIMIT ? OFFSET ?",
+        where_sql
+    );
+
+    let mut count_q = sqlx::query_scalar::<_, i64>(&count_sql);
+    for v in &bind_values { count_q = count_q.bind(v); }
+    let total: i64 = count_q.fetch_one(pool.get_ref()).await.unwrap_or(0);
+
+    let mut list_q = sqlx::query_as::<_, (String, String, Option<String>, Option<String>, String, String, Option<i32>, Option<String>, i32, String, Option<String>)>(&list_sql);
+    for v in &bind_values { list_q = list_q.bind(v); }
+    list_q = list_q.bind(limit).bind(offset);
+
+    let rows = list_q.fetch_all(pool.get_ref()).await.unwrap_or_default();
+
+    let deliveries: Vec<serde_json::Value> = rows.iter().map(|r| {
+        serde_json::json!({
+            "id": r.0,
+            "invoice_id": r.1,
+            "event_type": r.2,
+            "merchant_id": r.3,
+            "url": r.4,
+            "status": r.5,
+            "response_status": r.6,
+            "response_error": r.7,
+            "attempts": r.8,
+            "created_at": r.9,
+            "last_attempt_at": r.10,
+        })
+    }).collect();
+
+    actix_web::HttpResponse::Ok().json(serde_json::json!({
+        "deliveries": deliveries,
+        "total": total,
+    }))
+}
+
+#[derive(serde::Deserialize)]
+pub struct WebhookQuery {
+    pub status: Option<String>,
+    pub merchant_id: Option<String>,
+    pub limit: Option<u32>,
+    pub offset: Option<u32>,
+}
+
 /// GET /api/admin/system -- system health info
 pub async fn system(
     req: actix_web::HttpRequest,

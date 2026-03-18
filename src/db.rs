@@ -764,6 +764,16 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_subscriptions_status ON subscriptions(status)")
         .execute(&pool).await.ok();
 
+    // Webhook delivery enrichment: queryable event_type, merchant_id, response tracking
+    for sql in &[
+        "ALTER TABLE webhook_deliveries ADD COLUMN event_type TEXT",
+        "ALTER TABLE webhook_deliveries ADD COLUMN merchant_id TEXT",
+        "ALTER TABLE webhook_deliveries ADD COLUMN response_status INTEGER",
+        "ALTER TABLE webhook_deliveries ADD COLUMN response_error TEXT",
+    ] {
+        sqlx::query(sql).execute(&pool).await.ok();
+    }
+
     // Recovery email encryption: add blind-index column
     sqlx::query("ALTER TABLE merchants ADD COLUMN recovery_email_hash TEXT")
         .execute(&pool).await.ok();

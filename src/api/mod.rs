@@ -40,6 +40,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                     .route("/me/billing/history", web::get().to(billing_history))
                     .route("/me/billing/settle", web::post().to(billing_settle))
                     .route("/me/delete", web::post().to(delete_account))
+                    .route("/me/webhooks", web::get().to(auth::my_webhooks))
                     .route("/me/x402/history", web::get().to(x402::history))
             )
             .service(
@@ -88,6 +89,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/admin/stats", web::get().to(admin::stats))
             .route("/admin/merchants", web::get().to(admin::merchants))
             .route("/admin/billing", web::get().to(admin::billing))
+            .route("/admin/webhooks", web::get().to(admin::webhooks))
             .route("/admin/system", web::get().to(admin::system)),
     );
 }
