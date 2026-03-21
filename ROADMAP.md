@@ -36,6 +36,7 @@ Privacy-preserving Zcash payment gateway. Non-custodial, shielded-only.
 - [ ] Invoice lookup auth (merchant can only see own invoices)
 - [ ] Merchant registration guard (admin key or invite-only in production)
 - [ ] Input validation hardening (UFVK format check, address validation)
+- [ ] **Switch from UFVK to UIVK storage** — accept UFVK at registration, derive UIVK, store only the UIVK (discard FVK). Reduces data exposure per principle of least privilege. Blocked on wallet UIVK export support (Zodl/Zashi). See: [zcash_keys UIVK docs](https://docs.rs/zcash_keys/latest/zcash_keys/keys/struct.UnifiedIncomingViewingKey.html)
 
 ## Phase 2 -- Performance & Real-Time
 
@@ -134,7 +135,7 @@ These are changes needed in the CipherScan explorer/indexer to support CipherPay
 
 ## Design Principles
 
-1. **Non-custodial**: CipherPay never holds funds. Merchants provide viewing keys.
+1. **Non-custodial**: CipherPay never holds funds. Merchants provide viewing keys (UIVK migration planned — store only incoming viewing keys).
 2. **Privacy-first**: Shielded transactions only. No transparent address support.
 3. **Data minimization**: Delete what you don't need. Encrypt what you must keep.
 4. **Self-hostable**: Any merchant can run their own instance.

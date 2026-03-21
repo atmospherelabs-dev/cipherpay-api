@@ -576,7 +576,7 @@ async fn get_merchant_stats(pool: &SqlitePool, merchant_id: &str) -> serde_json:
         "SELECT
             COUNT(*) as total,
             COUNT(CASE WHEN status = 'confirmed' THEN 1 END) as confirmed,
-            COALESCE(SUM(CASE WHEN status = 'confirmed' THEN price_zec ELSE 0 END), 0.0) as total_zec
+            COALESCE(SUM(CASE WHEN status = 'confirmed' THEN price_zec ELSE 0.0 END), 0.0) as total_zec
          FROM invoices WHERE merchant_id = ?"
     )
     .bind(merchant_id)
