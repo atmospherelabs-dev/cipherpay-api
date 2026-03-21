@@ -322,7 +322,7 @@ pub async fn create_recovery_token(pool: &SqlitePool, merchant_id: &str) -> anyh
 
 pub async fn has_outstanding_balance(pool: &SqlitePool, merchant_id: &str) -> anyhow::Result<bool> {
     let row: Option<(f64,)> = sqlx::query_as(
-        "SELECT COALESCE(SUM(outstanding_zec), 0) FROM billing_cycles
+        "SELECT COALESCE(SUM(outstanding_zec), 0.0) FROM billing_cycles
          WHERE merchant_id = ? AND outstanding_zec > 0.0001"
     )
     .bind(merchant_id)
