@@ -914,15 +914,15 @@ pub async fn migrate_encrypt_webhook_secrets(pool: &SqlitePool, encryption_key: 
     Ok(())
 }
 
-/// Encrypt any plaintext UFVKs in the database. Called once at startup when
-/// ENCRYPTION_KEY is set. Plaintext UFVKs are identified by their "uview"/"utest" prefix.
+/// Encrypt any plaintext viewing keys in the database. Called once at startup when
+/// ENCRYPTION_KEY is set. Plaintext keys are identified by their "uview"/"utest"/"uivk"/"uivktest" prefix.
 pub async fn migrate_encrypt_ufvks(pool: &SqlitePool, encryption_key: &str) -> anyhow::Result<()> {
     if encryption_key.is_empty() {
         return Ok(());
     }
 
     let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT id, ufvk FROM merchants WHERE ufvk LIKE 'uview%' OR ufvk LIKE 'utest%'"
+        "SELECT id, ufvk FROM merchants WHERE ufvk LIKE 'uview%' OR ufvk LIKE 'utest%' OR ufvk LIKE 'uivk%'"
     )
     .fetch_all(pool)
     .await?;
@@ -931,15 +931,77 @@ pub async fn migrate_encrypt_ufvks(pool: &SqlitePool, encryption_key: &str) -> a
         return Ok(());
     }
 
-    tracing::info!(count = rows.len(), "Encrypting plaintext UFVKs at rest");
-    for (id, ufvk) in &rows {
-        let encrypted = crate::crypto::encrypt(ufvk, encryption_key)?;
+    tracing::info!(count = rows.len(), "Encrypting plaintext viewing keys at rest");
+    for (id, key) in &rows {
+        let encrypted = crate::crypto::encrypt(key, encryption_key)?;
         sqlx::query("UPDATE merchants SET ufvk = ? WHERE id = ?")
             .bind(&encrypted)
             .bind(id)
             .execute(pool)
             .await?;
     }
-    tracing::info!("UFVK encryption migration complete");
+    tracing::info!("Viewing key encryption migration complete");
+    Ok(())
+}
+
+/// Convert stored UFVKs to UIVKs. Called once at startup.
+/// Decrypts each merchant's viewing key, and if it's still a UFVK (uview/uviewtest),
+/// derives the UIVK and re-encrypts it. Idempotent: keys already stored as UIVK are skipped.
+pub async fn migrate_ufvk_to_uivk(pool: &SqlitePool, encryption_key: &str) -> anyhow::Result<()> {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT id, ufvk FROM merchants"
+    )
+    .fetch_all(pool)
+    .await?;
+
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    let mut converted = 0u32;
+    let mut skipped = 0u32;
+
+    for (id, stored_key) in &rows {
+        let plaintext = crate::crypto::decrypt_or_plaintext(stored_key, encryption_key)?;
+
+        if plaintext.starts_with("uivk") {
+            skipped += 1;
+            tracing::debug!(merchant_id = %id, "Already UIVK, skipping migration");
+            continue;
+        }
+
+        if !plaintext.starts_with("uview") && !plaintext.starts_with("utest") {
+            tracing::warn!(merchant_id = %id, "Unrecognized viewing key format, skipping");
+            continue;
+        }
+
+        match crate::scanner::decrypt::derive_uivk_from_ufvk(&plaintext) {
+            Ok(uivk) => {
+                let new_stored = if encryption_key.is_empty() {
+                    uivk
+                } else {
+                    crate::crypto::encrypt(&uivk, encryption_key)?
+                };
+
+                sqlx::query("UPDATE merchants SET ufvk = ? WHERE id = ?")
+                    .bind(&new_stored)
+                    .bind(id)
+                    .execute(pool)
+                    .await?;
+
+                converted += 1;
+                tracing::info!(merchant_id = %id, "Migrated UFVK → UIVK");
+            }
+            Err(e) => {
+                tracing::error!(merchant_id = %id, error = %e, "Failed to derive UIVK from UFVK, skipping");
+            }
+        }
+    }
+
+    if converted > 0 {
+        tracing::info!(converted, skipped, "UFVK → UIVK migration complete");
+    } else {
+        tracing::debug!(skipped = rows.len(), "No UFVK → UIVK migrations needed");
+    }
     Ok(())
 }

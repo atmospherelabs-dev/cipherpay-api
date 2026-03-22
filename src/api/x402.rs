@@ -79,7 +79,7 @@ pub async fn verify(
         }
     };
 
-    let outputs = match decrypt::try_decrypt_all_outputs(&raw_hex, &merchant.ufvk) {
+    let outputs = match decrypt::try_decrypt_all_outputs_ivk(&raw_hex, &merchant.ufvk) {
         Ok(o) => o,
         Err(e) => {
             tracing::warn!(txid = %body.txid, error = %e, "x402: decryption error");
