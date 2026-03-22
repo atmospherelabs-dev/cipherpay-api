@@ -36,7 +36,7 @@ Privacy-preserving Zcash payment gateway. Non-custodial, shielded-only.
 - [ ] Invoice lookup auth (merchant can only see own invoices)
 - [ ] Merchant registration guard (admin key or invite-only in production)
 - [ ] Input validation hardening (UFVK format check, address validation)
-- [ ] **Switch from UFVK to UIVK storage** — accept UFVK at registration, derive UIVK, store only the UIVK (discard FVK). Reduces data exposure per principle of least privilege. Blocked on wallet UIVK export support (Zodl/Zashi). See: [zcash_keys UIVK docs](https://docs.rs/zcash_keys/latest/zcash_keys/keys/struct.UnifiedIncomingViewingKey.html)
+- [x] **Switch from UFVK to UIVK storage** — accept UFVK or UIVK at registration, derive and store only the UIVK (discard FVK). Existing merchants migrated on startup. Reduces data exposure per principle of least privilege.
 - [ ] **Account deletion cooldown** — schedule deletion for 48h instead of immediate hard-delete. Protects against compromised sessions. Merchant can cancel within the window. After 48h, purge all data (viewing keys, invoices, products, sessions).
 
 ## Phase 2 -- Performance & Real-Time
