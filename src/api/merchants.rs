@@ -33,7 +33,7 @@ fn validate_registration(
         validation::validate_length("name", name, 100)?;
     }
     validation::validate_length("ufvk", &req.ufvk, 2000)?;
-    validation::validate_ufvk_network("ufvk", &req.ufvk, is_testnet)?;
+    validation::validate_viewing_key_network("ufvk", &req.ufvk, is_testnet)?;
     if let Some(ref url) = req.webhook_url {
         if !url.is_empty() {
             validation::validate_webhook_url("webhook_url", url, is_testnet)?;

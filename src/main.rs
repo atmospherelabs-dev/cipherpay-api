@@ -32,6 +32,7 @@ async fn main() -> anyhow::Result<()> {
     let config = config::Config::from_env()?;
     let pool = db::create_pool(&config.database_url).await?;
     db::migrate_encrypt_ufvks(&pool, &config.encryption_key).await?;
+    db::migrate_ufvk_to_uivk(&pool, &config.encryption_key).await?;
     db::migrate_encrypt_webhook_secrets(&pool, &config.encryption_key).await?;
     db::migrate_encrypt_recovery_emails(&pool, &config.encryption_key).await?;
     let mut default_headers = reqwest::header::HeaderMap::new();

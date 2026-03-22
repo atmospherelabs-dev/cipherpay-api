@@ -12,6 +12,7 @@ pub struct Merchant {
     pub api_key_hash: String,
     #[serde(skip_serializing)]
     pub dashboard_token_hash: String,
+    /// Stored as UIVK (incoming viewing key only). DB column name is legacy "ufvk".
     #[serde(skip_serializing)]
     pub ufvk: String,
     pub payment_address: String,
@@ -65,8 +66,19 @@ pub async fn create_merchant(
     req: &CreateMerchantRequest,
     encryption_key: &str,
 ) -> anyhow::Result<CreateMerchantResponse> {
-    let derived = crate::addresses::derive_invoice_address(&req.ufvk, 0)
-        .map_err(|e| anyhow::anyhow!("Invalid UFVK — could not derive address: {}", e))?;
+    let is_uivk_input = req.ufvk.starts_with("uivk");
+    let viewing_key = if is_uivk_input {
+        tracing::info!("UIVK received directly for new merchant registration");
+        req.ufvk.clone()
+    } else {
+        let uivk = crate::scanner::decrypt::derive_uivk_from_ufvk(&req.ufvk)
+            .map_err(|e| anyhow::anyhow!("Invalid viewing key — could not derive UIVK: {}", e))?;
+        tracing::info!("UFVK received, derived UIVK for storage");
+        uivk
+    };
+
+    let derived = crate::addresses::derive_invoice_address(&viewing_key, 0)
+        .map_err(|e| anyhow::anyhow!("Invalid viewing key — could not derive address: {}", e))?;
     let payment_address = derived.ua_string;
 
     let id = Uuid::new_v4().to_string();
@@ -78,10 +90,11 @@ pub async fn create_merchant(
 
     let name = req.name.as_deref().unwrap_or("").to_string();
 
+    // Store only the UIVK (never the full UFVK)
     let stored_ufvk = if encryption_key.is_empty() {
-        req.ufvk.clone()
+        viewing_key.clone()
     } else {
-        crate::crypto::encrypt(&req.ufvk, encryption_key)?
+        crate::crypto::encrypt(&viewing_key, encryption_key)?
     };
 
     let stored_webhook_secret = if encryption_key.is_empty() {
@@ -120,7 +133,7 @@ pub async fn create_merchant(
     .execute(pool)
     .await?;
 
-    tracing::info!(merchant_id = %id, "Merchant created with derived address");
+    tracing::info!(merchant_id = %id, key_type = if is_uivk_input { "UIVK" } else { "UFVK→UIVK" }, "Merchant created with derived address");
 
     Ok(CreateMerchantResponse {
         merchant_id: id,

@@ -65,7 +65,9 @@ pub fn decrypt_or_plaintext(data: &str, key_hex: &str) -> Result<String> {
         return Ok(data.to_string());
     }
 
-    if data.starts_with("uview") || data.starts_with("utest") {
+    if data.starts_with("uview") || data.starts_with("utest")
+        || data.starts_with("uivk") || data.starts_with("uivktest")
+    {
         return Ok(data.to_string());
     }
 
