@@ -275,6 +275,10 @@ async fn scan_mempool(
     Ok(())
 }
 
+/// Max blocks to process per iteration. Keeps each call short so the
+/// confirmation check at the top runs every ~block_interval seconds.
+const MAX_BLOCKS_PER_SCAN: u64 = 100;
+
 async fn scan_blocks(
     config: &Config,
     pool: &SqlitePool,
@@ -284,27 +288,28 @@ async fn scan_blocks(
     key_cache: &mut Option<KeyCache>,
 ) -> anyhow::Result<()> {
     let pending = invoices::get_pending_invoices(pool).await?;
-    if pending.is_empty() {
-        return Ok(());
-    }
 
-    let detected: Vec<_> = pending.iter().filter(|i| i.status == "detected").cloned().collect();
-    for invoice in &detected {
-        if let Some(txid) = &invoice.detected_txid {
-            match blocks::check_tx_confirmed(http, &config.cipherscan_api_url, txid).await {
-                Ok(true) => {
-                    let changed = invoices::mark_confirmed(pool, &invoice.id).await?;
-                    if changed {
-                        spawn_webhook(pool, http, &invoice.id, "confirmed", txid, &config.encryption_key);
-                        on_invoice_confirmed(pool, config, invoice).await;
+    // Confirm detected invoices (uses direct txid lookup, no block scanning)
+    if !pending.is_empty() {
+        let detected: Vec<_> = pending.iter().filter(|i| i.status == "detected").cloned().collect();
+        for invoice in &detected {
+            if let Some(txid) = &invoice.detected_txid {
+                match blocks::check_tx_confirmed(http, &config.cipherscan_api_url, txid).await {
+                    Ok(true) => {
+                        let changed = invoices::mark_confirmed(pool, &invoice.id).await?;
+                        if changed {
+                            spawn_webhook(pool, http, &invoice.id, "confirmed", txid, &config.encryption_key);
+                            on_invoice_confirmed(pool, config, invoice).await;
+                        }
                     }
+                    Ok(false) => {}
+                    Err(e) => tracing::debug!(txid, error = %e, "Confirmation check failed"),
                 }
-                Ok(false) => {}
-                Err(e) => tracing::debug!(txid, error = %e, "Confirmation check failed"),
             }
         }
     }
 
+    // Always track chain height so the scanner never falls behind during idle periods
     let current_height = blocks::get_chain_height(http, &config.cipherscan_api_url).await?;
     let start_height = {
         let last = last_height.read().await;
@@ -314,10 +319,23 @@ async fn scan_blocks(
         }
     };
 
-    if start_height <= current_height && start_height < current_height {
+    // Cap batch size to keep iterations short
+    let batch_end = std::cmp::min(current_height, start_height + MAX_BLOCKS_PER_SCAN - 1);
+
+    if !pending.is_empty() && start_height <= batch_end {
+        if batch_end < current_height {
+            tracing::info!(
+                start = start_height,
+                batch_end,
+                chain_tip = current_height,
+                behind = current_height - batch_end,
+                "Block scanner catching up"
+            );
+        }
+
         let merchants = crate::merchants::get_all_merchants(pool, &config.encryption_key).await?;
         let cached_keys = refresh_key_cache(key_cache, &merchants);
-        let block_txids = blocks::fetch_block_txids(http, &config.cipherscan_api_url, start_height, current_height).await?;
+        let block_txids = blocks::fetch_block_txids(http, &config.cipherscan_api_url, start_height, batch_end).await?;
 
         for txid in &block_txids {
             if seen.read().await.contains_key(txid) {
@@ -384,8 +402,9 @@ async fn scan_blocks(
         }
     }
 
-    *last_height.write().await = Some(current_height);
-    if let Err(e) = crate::db::set_scanner_state(pool, "last_height", &current_height.to_string()).await {
+    // Always persist height progress — even when idle, keeps the scanner near chain tip
+    *last_height.write().await = Some(batch_end);
+    if let Err(e) = crate::db::set_scanner_state(pool, "last_height", &batch_end.to_string()).await {
         tracing::warn!(error = %e, "Failed to persist last_height");
     }
     Ok(())
