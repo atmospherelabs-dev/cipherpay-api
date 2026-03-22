@@ -103,34 +103,40 @@ pub fn validate_webhook_url(
     Ok(())
 }
 
-pub fn validate_ufvk_network(
+/// Validates that a viewing key (UFVK or UIVK) matches the server's network.
+pub fn validate_viewing_key_network(
     field: &str,
-    ufvk: &str,
+    key: &str,
     is_testnet: bool,
 ) -> Result<(), ValidationError> {
+    let is_testnet_key = key.starts_with("uviewtest") || key.starts_with("uivktest");
+    let is_mainnet_key = (key.starts_with("uview") && !key.starts_with("uviewtest"))
+        || (key.starts_with("uivk") && !key.starts_with("uivktest"));
+
     if is_testnet {
-        if !ufvk.starts_with("uviewtest") {
+        if !is_testnet_key {
             return Err(ValidationError::invalid(
                 field,
-                "this server is running on testnet — please use a testnet viewing key (uviewtest...)",
+                "this server is running on testnet — please use a testnet viewing key (uviewtest... or uivktest...)",
             ));
         }
     } else {
-        if ufvk.starts_with("uviewtest") {
+        if is_testnet_key {
             return Err(ValidationError::invalid(
                 field,
-                "this server is running on mainnet — please use a mainnet viewing key (uview1...)",
+                "this server is running on mainnet — please use a mainnet viewing key (uview1... or uivk1...)",
             ));
         }
-        if !ufvk.starts_with("uview") {
+        if !is_mainnet_key {
             return Err(ValidationError::invalid(
                 field,
-                "must be a valid Zcash Unified Full Viewing Key (uview... prefix)",
+                "must be a valid Zcash viewing key (uview... or uivk... prefix)",
             ));
         }
     }
     Ok(())
 }
+
 
 pub fn validate_zcash_address(field: &str, addr: &str) -> Result<(), ValidationError> {
     validate_length(field, addr, 500)?;
@@ -251,18 +257,22 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_ufvk_network() {
-        // Testnet server should accept testnet keys, reject mainnet keys
-        assert!(validate_ufvk_network("ufvk", "uviewtest1abc", true).is_ok());
-        assert!(validate_ufvk_network("ufvk", "uview1abc", true).is_err());
+    fn test_validate_viewing_key_network() {
+        // Testnet: accept testnet UFVK and UIVK
+        assert!(validate_viewing_key_network("key", "uviewtest1abc", true).is_ok());
+        assert!(validate_viewing_key_network("key", "uivktest1abc", true).is_ok());
+        assert!(validate_viewing_key_network("key", "uview1abc", true).is_err());
+        assert!(validate_viewing_key_network("key", "uivk1abc", true).is_err());
 
-        // Mainnet server should accept mainnet keys, reject testnet keys
-        assert!(validate_ufvk_network("ufvk", "uview1abc", false).is_ok());
-        assert!(validate_ufvk_network("ufvk", "uviewtest1abc", false).is_err());
+        // Mainnet: accept mainnet UFVK and UIVK
+        assert!(validate_viewing_key_network("key", "uview1abc", false).is_ok());
+        assert!(validate_viewing_key_network("key", "uivk1abc", false).is_ok());
+        assert!(validate_viewing_key_network("key", "uviewtest1abc", false).is_err());
+        assert!(validate_viewing_key_network("key", "uivktest1abc", false).is_err());
 
         // Invalid prefix rejected on both
-        assert!(validate_ufvk_network("ufvk", "garbage", true).is_err());
-        assert!(validate_ufvk_network("ufvk", "garbage", false).is_err());
+        assert!(validate_viewing_key_network("key", "garbage", true).is_err());
+        assert!(validate_viewing_key_network("key", "garbage", false).is_err());
     }
 
     #[test]
