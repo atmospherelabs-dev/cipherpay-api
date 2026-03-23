@@ -12,6 +12,7 @@ pub struct Invoice {
     pub id: String,
     pub merchant_id: String,
     pub memo_code: String,
+    pub product_id: Option<String>,
     pub product_name: Option<String>,
     pub size: Option<String>,
     pub price_eur: f64,
@@ -149,38 +150,97 @@ pub async fn create_invoice(
 
     let price_zatoshis = (price_zec * 100_000_000.0) as i64;
 
-    sqlx::query(
-        "INSERT INTO invoices (id, merchant_id, memo_code, product_id, product_name, size,
-         price_eur, price_usd, currency, price_zec, zec_rate_at_creation,
-         amount, price_id,
-         payment_address, zcash_uri,
-         refund_address, status, expires_at, created_at,
-         diversifier_index, orchard_receiver_hex, price_zatoshis)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)"
-    )
-    .bind(&id)
-    .bind(merchant_id)
-    .bind(&memo_code)
-    .bind(&req.product_id)
-    .bind(&req.product_name)
-    .bind(&req.size)
-    .bind(price_eur)
-    .bind(price_usd)
-    .bind(currency)
-    .bind(price_zec)
-    .bind(zec_rate)
-    .bind(amount)
-    .bind(&req.price_id)
-    .bind(payment_address)
-    .bind(&zcash_uri)
-    .bind(&req.refund_address)
-    .bind(&expires_at)
-    .bind(&created_at)
-    .bind(div_index as i64)
-    .bind(&derived.orchard_receiver_hex)
-    .bind(price_zatoshis)
-    .execute(pool)
-    .await?;
+    if let Some(price_id) = req.price_id.as_deref() {
+        // Atomic capacity guard: prevent sold-out race windows for capped tiers.
+        // This is a single guarded insert: if no row is inserted, the tier is sold out.
+        let result = sqlx::query(
+            "INSERT INTO invoices (
+                id, merchant_id, memo_code, product_id, product_name, size,
+                price_eur, price_usd, currency, price_zec, zec_rate_at_creation,
+                amount, price_id,
+                payment_address, zcash_uri,
+                refund_address, status, expires_at, created_at,
+                diversifier_index, orchard_receiver_hex, price_zatoshis
+             )
+             SELECT
+                ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?,
+                ?, ?,
+                ?, ?,
+                ?, 'pending', ?, ?, ?, ?, ?
+             WHERE (
+                SELECT COUNT(*) FROM invoices i
+                WHERE i.price_id = ?
+                  AND i.status NOT IN ('expired', 'draft')
+             ) < (
+                SELECT COALESCE(p.max_quantity, 9223372036854775807)
+                FROM prices p
+                WHERE p.id = ?
+             )"
+        )
+        .bind(&id)
+        .bind(merchant_id)
+        .bind(&memo_code)
+        .bind(&req.product_id)
+        .bind(&req.product_name)
+        .bind(&req.size)
+        .bind(price_eur)
+        .bind(price_usd)
+        .bind(currency)
+        .bind(price_zec)
+        .bind(zec_rate)
+        .bind(amount)
+        .bind(price_id)
+        .bind(payment_address)
+        .bind(&zcash_uri)
+        .bind(&req.refund_address)
+        .bind(&expires_at)
+        .bind(&created_at)
+        .bind(div_index as i64)
+        .bind(&derived.orchard_receiver_hex)
+        .bind(price_zatoshis)
+        .bind(price_id)
+        .bind(price_id)
+        .execute(pool)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            anyhow::bail!("Sold out");
+        }
+    } else {
+        sqlx::query(
+            "INSERT INTO invoices (id, merchant_id, memo_code, product_id, product_name, size,
+             price_eur, price_usd, currency, price_zec, zec_rate_at_creation,
+             amount, price_id,
+             payment_address, zcash_uri,
+             refund_address, status, expires_at, created_at,
+             diversifier_index, orchard_receiver_hex, price_zatoshis)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)"
+        )
+        .bind(&id)
+        .bind(merchant_id)
+        .bind(&memo_code)
+        .bind(&req.product_id)
+        .bind(&req.product_name)
+        .bind(&req.size)
+        .bind(price_eur)
+        .bind(price_usd)
+        .bind(currency)
+        .bind(price_zec)
+        .bind(zec_rate)
+        .bind(amount)
+        .bind(&req.price_id)
+        .bind(payment_address)
+        .bind(&zcash_uri)
+        .bind(&req.refund_address)
+        .bind(&expires_at)
+        .bind(&created_at)
+        .bind(div_index as i64)
+        .bind(&derived.orchard_receiver_hex)
+        .bind(price_zatoshis)
+        .execute(pool)
+        .await?;
+    }
 
     tracing::info!(
         invoice_id = %id,
@@ -209,7 +269,7 @@ pub async fn create_invoice(
 
 pub async fn get_invoice(pool: &SqlitePool, id: &str) -> anyhow::Result<Option<Invoice>> {
     let row = sqlx::query_as::<_, Invoice>(
-        "SELECT i.id, i.merchant_id, i.memo_code, i.product_name, i.size,
+        "SELECT i.id, i.merchant_id, i.memo_code, i.product_id, i.product_name, i.size,
          i.price_eur, i.price_usd, i.currency, i.price_zec, i.zec_rate_at_creation,
          i.amount, i.price_id,
          COALESCE(NULLIF(i.payment_address, ''), m.payment_address) AS payment_address,
@@ -234,7 +294,7 @@ pub async fn get_invoice(pool: &SqlitePool, id: &str) -> anyhow::Result<Option<I
 /// Look up an invoice by its memo code (e.g. CP-C6CDB775)
 pub async fn get_invoice_by_memo(pool: &SqlitePool, memo_code: &str) -> anyhow::Result<Option<Invoice>> {
     let row = sqlx::query_as::<_, Invoice>(
-        "SELECT i.id, i.merchant_id, i.memo_code, i.product_name, i.size,
+        "SELECT i.id, i.merchant_id, i.memo_code, i.product_id, i.product_name, i.size,
          i.price_eur, i.price_usd, i.currency, i.price_zec, i.zec_rate_at_creation,
          i.amount, i.price_id,
          COALESCE(NULLIF(i.payment_address, ''), m.payment_address) AS payment_address,
@@ -269,7 +329,7 @@ pub async fn get_invoice_status(pool: &SqlitePool, id: &str) -> anyhow::Result<O
 
 pub async fn get_pending_invoices(pool: &SqlitePool) -> anyhow::Result<Vec<Invoice>> {
     let rows = sqlx::query_as::<_, Invoice>(
-        "SELECT id, merchant_id, memo_code, product_name, size,
+        "SELECT id, merchant_id, memo_code, product_id, product_name, size,
          price_eur, price_usd, currency, price_zec, zec_rate_at_creation,
          amount, price_id,
          payment_address, zcash_uri,

@@ -120,8 +120,11 @@ pub async fn set_default_price(
 
 pub async fn list_products(pool: &SqlitePool, merchant_id: &str) -> anyhow::Result<Vec<Product>> {
     let rows = sqlx::query_as::<_, Product>(
-        "SELECT id, merchant_id, slug, name, description, default_price_id, metadata, active, created_at
-         FROM products WHERE merchant_id = ? AND active = 1 ORDER BY created_at DESC"
+        "SELECT p.id, p.merchant_id, p.slug, p.name, p.description, p.default_price_id, p.metadata, p.active, p.created_at
+         FROM products p
+         LEFT JOIN events e ON e.product_id = p.id
+         WHERE p.merchant_id = ? AND p.active = 1 AND e.id IS NULL
+         ORDER BY p.created_at DESC"
     )
     .bind(merchant_id)
     .fetch_all(pool)
@@ -152,6 +155,10 @@ pub async fn get_product_by_slug(pool: &SqlitePool, slug: &str) -> anyhow::Resul
     .await?;
 
     Ok(row)
+}
+
+pub async fn is_event_backed(pool: &SqlitePool, product_id: &str) -> anyhow::Result<bool> {
+    crate::events::is_product_backed_by_event(pool, product_id).await
 }
 
 pub async fn update_product(

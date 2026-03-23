@@ -558,6 +558,14 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_prices_product ON prices(product_id)")
         .execute(&pool).await.ok();
 
+    // Optional ticketing metadata on prices (safe additive columns)
+    for sql in &[
+        "ALTER TABLE prices ADD COLUMN label TEXT",
+        "ALTER TABLE prices ADD COLUMN max_quantity INTEGER",
+    ] {
+        sqlx::query(sql).execute(&pool).await.ok();
+    }
+
     // Seed prices from existing products that don't have any prices yet (legacy: price_eur/currency)
     sqlx::query(
         "INSERT OR IGNORE INTO prices (id, product_id, currency, unit_amount)
@@ -635,6 +643,61 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
         "ALTER TABLE prices ADD COLUMN price_type TEXT NOT NULL DEFAULT 'one_time'",
         "ALTER TABLE prices ADD COLUMN billing_interval TEXT",
         "ALTER TABLE prices ADD COLUMN interval_count INTEGER",
+    ] {
+        sqlx::query(sql).execute(&pool).await.ok();
+    }
+
+    // Events are linked to products (composition model): billing stays product/price-based.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS events (
+            id TEXT PRIMARY KEY,
+            merchant_id TEXT NOT NULL REFERENCES merchants(id),
+            product_id TEXT NOT NULL UNIQUE REFERENCES products(id),
+            title TEXT NOT NULL,
+            description TEXT,
+            event_date TEXT,
+            event_location TEXT,
+            status TEXT NOT NULL DEFAULT 'active'
+                CHECK (status IN ('draft', 'active', 'cancelled', 'past')),
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        )"
+    )
+    .execute(&pool)
+    .await
+    .ok();
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_events_merchant_created ON events(merchant_id, created_at)")
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_events_status ON events(status)")
+        .execute(&pool)
+        .await
+        .ok();
+
+    // Ticket records are anchored to billing entities (invoice/product/price).
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS tickets (
+            id TEXT PRIMARY KEY,
+            invoice_id TEXT NOT NULL UNIQUE REFERENCES invoices(id),
+            product_id TEXT NOT NULL REFERENCES products(id),
+            price_id TEXT REFERENCES prices(id),
+            merchant_id TEXT NOT NULL REFERENCES merchants(id),
+            code TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL DEFAULT 'valid'
+                CHECK (status IN ('valid', 'used', 'void')),
+            used_at TEXT,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        )"
+    )
+    .execute(&pool)
+    .await
+    .ok();
+
+    for sql in &[
+        "CREATE INDEX IF NOT EXISTS idx_tickets_invoice ON tickets(invoice_id)",
+        "CREATE INDEX IF NOT EXISTS idx_tickets_product_status ON tickets(product_id, status)",
+        "CREATE INDEX IF NOT EXISTS idx_tickets_merchant_created ON tickets(merchant_id, created_at)",
     ] {
         sqlx::query(sql).execute(&pool).await.ok();
     }
@@ -828,12 +891,22 @@ pub async fn run_data_purge(pool: &SqlitePool, purge_days: i64) -> anyhow::Resul
          AND created_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?)"
     ).bind(&cutoff).execute(pool).await?;
 
-    let total = sessions.rows_affected() + tokens.rows_affected() + webhooks.rows_affected();
+    let tickets = sqlx::query(
+        "DELETE FROM tickets
+         WHERE status = 'void'
+         AND created_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?)"
+    ).bind(&cutoff).execute(pool).await?;
+
+    let total = sessions.rows_affected()
+        + tokens.rows_affected()
+        + webhooks.rows_affected()
+        + tickets.rows_affected();
     if total > 0 {
         tracing::info!(
             sessions = sessions.rows_affected(),
             tokens = tokens.rows_affected(),
             webhooks = webhooks.rows_affected(),
+            tickets = tickets.rows_affected(),
             "Data purge completed"
         );
     }

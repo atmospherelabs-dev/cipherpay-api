@@ -157,7 +157,7 @@ pub async fn my_invoices(
     };
 
     let rows = sqlx::query_as::<_, crate::invoices::Invoice>(
-        "SELECT id, merchant_id, memo_code, product_name, size,
+        "SELECT id, merchant_id, memo_code, product_id, product_name, size,
          price_eur, price_usd, currency, price_zec, zec_rate_at_creation,
          amount, price_id, subscription_id,
          payment_address, zcash_uri,
@@ -202,7 +202,7 @@ pub async fn my_webhooks(
     let limit = query.limit.unwrap_or(50).min(200) as i64;
     let offset = query.offset.unwrap_or(0) as i64;
 
-    let (count_sql, list_sql) = if let Some(ref status) = query.status {
+    let (count_sql, list_sql) = if let Some(ref _status) = query.status {
         (
             "SELECT COUNT(*) FROM webhook_deliveries WHERE merchant_id = ? AND status = ?".to_string(),
             "SELECT id, invoice_id, event_type, status, response_status, response_error, attempts, created_at, last_attempt_at

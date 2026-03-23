@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod auth;
+pub mod events;
 pub mod invoices;
 pub mod merchants;
 pub mod prices;
@@ -7,6 +8,7 @@ pub mod products;
 pub mod rates;
 pub mod status;
 pub mod subscriptions;
+pub mod tickets;
 pub mod x402;
 
 use actix_governor::{Governor, GovernorConfigBuilder};
@@ -57,6 +59,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/products/{id}", web::patch().to(products::update))
             .route("/products/{id}", web::delete().to(products::deactivate))
             .route("/products/{id}/public", web::get().to(products::get_public))
+            // Events endpoints (dashboard auth)
+            .route("/events", web::get().to(events::list))
+            .route("/events", web::post().to(events::create))
+            .route("/events/{id}/archive", web::post().to(events::archive))
             // Price endpoints
             .route("/prices", web::post().to(prices::create))
             .route("/prices/{id}", web::patch().to(prices::update))
@@ -81,6 +87,11 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/invoices/{id}/refund", web::post().to(refund_invoice))
             .route("/invoices/{id}/refund-address", web::patch().to(update_refund_address))
             .route("/invoices/{id}/qr", web::get().to(qr_code))
+            // Ticket endpoints
+            .route("/tickets/invoice/{invoice_id}", web::get().to(tickets::by_invoice))
+            .route("/tickets/scan", web::post().to(tickets::scan))
+            .route("/tickets", web::get().to(tickets::list))
+            .route("/tickets/{id}/void", web::post().to(tickets::void))
             .route("/rates", web::get().to(rates::get))
             // x402 facilitator
             .route("/x402/verify", web::post().to(x402::verify))
@@ -107,7 +118,7 @@ async fn checkout(
     }
 
     // Resolve product + pricing: either via price_id or product_id
-    let (product, checkout_amount, checkout_currency, resolved_price_id) = if let Some(ref price_id) = body.price_id {
+    let (product, checkout_amount, checkout_currency, resolved_price_id, resolved_price_label) = if let Some(ref price_id) = body.price_id {
         let price = match crate::prices::get_price(pool.get_ref(), price_id).await {
             Ok(Some(p)) if p.active == 1 => p,
             Ok(Some(_)) => {
@@ -129,7 +140,7 @@ async fn checkout(
                 }));
             }
         };
-        (product, price.unit_amount, price.currency.clone(), Some(price.id))
+        (product, price.unit_amount, price.currency.clone(), Some(price.id), price.label)
     } else if let Some(ref product_id) = body.product_id {
         let product = match crate::products::get_product(pool.get_ref(), product_id).await {
             Ok(Some(p)) if p.active == 1 => p,
@@ -165,7 +176,7 @@ async fn checkout(
                 }));
             }
         };
-        (product, price.unit_amount, price.currency.clone(), Some(price.id))
+        (product, price.unit_amount, price.currency.clone(), Some(price.id), price.label)
     } else {
         return actix_web::HttpResponse::BadRequest().json(serde_json::json!({
             "error": "product_id or price_id is required"
@@ -240,7 +251,18 @@ async fn checkout(
     )
     .await
     {
-        Ok(resp) => actix_web::HttpResponse::Created().json(resp),
+        Ok(resp) => {
+            let mut payload = serde_json::to_value(resp).unwrap_or_else(|_| serde_json::json!({}));
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert("price_label".to_string(), serde_json::to_value(resolved_price_label).unwrap_or(serde_json::Value::Null));
+                if let Ok(Some(ctx)) = crate::events::get_event_context_by_product(pool.get_ref(), &product.id).await {
+                    obj.insert("event_title".to_string(), serde_json::Value::String(ctx.event_title));
+                    obj.insert("event_date".to_string(), serde_json::to_value(ctx.event_date).unwrap_or(serde_json::Value::Null));
+                    obj.insert("event_location".to_string(), serde_json::to_value(ctx.event_location).unwrap_or(serde_json::Value::Null));
+                }
+            }
+            actix_web::HttpResponse::Created().json(payload)
+        }
         Err(e) => {
             tracing::error!(error = %e, "Checkout invoice creation failed");
             actix_web::HttpResponse::InternalServerError().json(serde_json::json!({
@@ -313,7 +335,7 @@ async fn list_invoices(
     };
 
     let rows = sqlx::query(
-        "SELECT id, merchant_id, memo_code, product_name, size,
+        "SELECT id, merchant_id, memo_code, product_id, product_name, size,
          price_eur, price_usd, currency, price_zec, zec_rate_at_creation,
          amount, price_id,
          payment_address, zcash_uri,
@@ -338,6 +360,7 @@ async fn list_invoices(
                         "id": r.get::<String, _>("id"),
                         "merchant_id": r.get::<String, _>("merchant_id"),
                         "memo_code": r.get::<String, _>("memo_code"),
+                        "product_id": r.get::<Option<String>, _>("product_id"),
                         "product_name": r.get::<Option<String>, _>("product_name"),
                         "size": r.get::<Option<String>, _>("size"),
                         "price_eur": r.get::<f64, _>("price_eur"),

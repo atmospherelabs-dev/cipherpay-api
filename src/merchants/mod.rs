@@ -346,18 +346,39 @@ pub async fn has_outstanding_balance(pool: &SqlitePool, merchant_id: &str) -> an
 }
 
 pub async fn delete_merchant(pool: &SqlitePool, merchant_id: &str) -> anyhow::Result<()> {
+    // Disable FK enforcement during cascade delete — we manage the order explicitly,
+    // and stale FK schemas from past table-repair migrations can cause spurious errors.
+    let mut conn = pool.acquire().await?;
+    sqlx::query("PRAGMA foreign_keys = OFF").execute(&mut *conn).await?;
+
     sqlx::query("DELETE FROM sessions WHERE merchant_id = ?")
-        .bind(merchant_id).execute(pool).await?;
+        .bind(merchant_id).execute(&mut *conn).await?;
     sqlx::query("DELETE FROM recovery_tokens WHERE merchant_id = ?")
-        .bind(merchant_id).execute(pool).await?;
+        .bind(merchant_id).execute(&mut *conn).await?;
     sqlx::query("DELETE FROM fee_ledger WHERE merchant_id = ?")
-        .bind(merchant_id).execute(pool).await?;
+        .bind(merchant_id).execute(&mut *conn).await?;
+    sqlx::query(
+        "DELETE FROM webhook_deliveries WHERE invoice_id IN (SELECT id FROM invoices WHERE merchant_id = ?)"
+    ).bind(merchant_id).execute(&mut *conn).await?;
+    sqlx::query("DELETE FROM tickets WHERE merchant_id = ?")
+        .bind(merchant_id).execute(&mut *conn).await?;
     sqlx::query("DELETE FROM billing_cycles WHERE merchant_id = ?")
-        .bind(merchant_id).execute(pool).await?;
-    sqlx::query("UPDATE products SET active = 0 WHERE merchant_id = ?")
-        .bind(merchant_id).execute(pool).await?;
+        .bind(merchant_id).execute(&mut *conn).await?;
+    sqlx::query("DELETE FROM subscriptions WHERE merchant_id = ?")
+        .bind(merchant_id).execute(&mut *conn).await?;
+    sqlx::query("DELETE FROM invoices WHERE merchant_id = ?")
+        .bind(merchant_id).execute(&mut *conn).await?;
+    sqlx::query("DELETE FROM events WHERE merchant_id = ?")
+        .bind(merchant_id).execute(&mut *conn).await?;
+    sqlx::query(
+        "DELETE FROM prices WHERE product_id IN (SELECT id FROM products WHERE merchant_id = ?)"
+    ).bind(merchant_id).execute(&mut *conn).await?;
+    sqlx::query("DELETE FROM products WHERE merchant_id = ?")
+        .bind(merchant_id).execute(&mut *conn).await?;
     sqlx::query("DELETE FROM merchants WHERE id = ?")
-        .bind(merchant_id).execute(pool).await?;
+        .bind(merchant_id).execute(&mut *conn).await?;
+
+    sqlx::query("PRAGMA foreign_keys = ON").execute(&mut *conn).await?;
 
     tracing::info!(merchant_id, "Merchant account deleted");
     Ok(())

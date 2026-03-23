@@ -17,6 +17,21 @@ pub async fn create(
         }
     };
 
+    match crate::events::is_product_backed_by_event(pool.get_ref(), &body.product_id).await {
+        Ok(true) => {
+            return HttpResponse::Conflict().json(serde_json::json!({
+                "error": "This product is managed by an Event. Use /api/events endpoints."
+            }));
+        }
+        Ok(false) => {}
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to check event-backed product");
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Internal error"
+            }));
+        }
+    }
+
     if body.unit_amount <= 0.0 {
         return HttpResponse::BadRequest().json(serde_json::json!({
             "error": "unit_amount must be > 0"
@@ -94,6 +109,35 @@ pub async fn update(
 
     let price_id = path.into_inner();
 
+    let existing = match prices::get_price(pool.get_ref(), &price_id).await {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            return HttpResponse::NotFound().json(serde_json::json!({
+                "error": "Price not found"
+            }))
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to fetch price for update");
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Internal error"
+            }));
+        }
+    };
+    match crate::events::is_product_backed_by_event(pool.get_ref(), &existing.product_id).await {
+        Ok(true) => {
+            return HttpResponse::Conflict().json(serde_json::json!({
+                "error": "This product is managed by an Event. Use /api/events endpoints."
+            }));
+        }
+        Ok(false) => {}
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to check event-backed product");
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Internal error"
+            }));
+        }
+    }
+
     match prices::update_price(pool.get_ref(), &price_id, &merchant.id, &body).await {
         Ok(Some(price)) => HttpResponse::Ok().json(price),
         Ok(None) => HttpResponse::NotFound().json(serde_json::json!({
@@ -123,6 +167,35 @@ pub async fn deactivate(
     };
 
     let price_id = path.into_inner();
+
+    let existing = match prices::get_price(pool.get_ref(), &price_id).await {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            return HttpResponse::NotFound().json(serde_json::json!({
+                "error": "Price not found"
+            }))
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to fetch price for delete");
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Internal error"
+            }));
+        }
+    };
+    match crate::events::is_product_backed_by_event(pool.get_ref(), &existing.product_id).await {
+        Ok(true) => {
+            return HttpResponse::Conflict().json(serde_json::json!({
+                "error": "This product is managed by an Event. Use /api/events endpoints."
+            }));
+        }
+        Ok(false) => {}
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to check event-backed product");
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Internal error"
+            }));
+        }
+    }
 
     match prices::deactivate_price(pool.get_ref(), &price_id, &merchant.id).await {
         Ok(true) => HttpResponse::Ok().json(serde_json::json!({ "status": "deactivated" })),
@@ -159,6 +232,7 @@ pub async fn get_public(
                 "product_id": price.product_id,
                 "currency": price.currency,
                 "unit_amount": price.unit_amount,
+                "label": price.label,
             }))
         }
         _ => HttpResponse::NotFound().json(serde_json::json!({

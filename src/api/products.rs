@@ -32,6 +32,8 @@ pub async fn create(
                     product_id: product.id.clone(),
                     currency: currency.clone(),
                     unit_amount: body.unit_amount,
+                    label: None,
+                    max_quantity: None,
                     price_type: body.price_type.clone(),
                     billing_interval: body.billing_interval.clone(),
                     interval_count: body.interval_count,
@@ -145,6 +147,21 @@ pub async fn update(
 
     let product_id = path.into_inner();
 
+    match products::is_event_backed(pool.get_ref(), &product_id).await {
+        Ok(true) => {
+            return HttpResponse::Conflict().json(serde_json::json!({
+                "error": "This product is managed by an Event. Use /api/events endpoints."
+            }));
+        }
+        Ok(false) => {}
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to check event-backed product");
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Internal error"
+            }));
+        }
+    }
+
     if let Err(e) = validate_product_update(&body) {
         return HttpResponse::BadRequest().json(e.to_json());
     }
@@ -194,6 +211,21 @@ pub async fn deactivate(
     };
 
     let product_id = path.into_inner();
+
+    match products::is_event_backed(pool.get_ref(), &product_id).await {
+        Ok(true) => {
+            return HttpResponse::Conflict().json(serde_json::json!({
+                "error": "This product is managed by an Event. Use /api/events endpoints."
+            }));
+        }
+        Ok(false) => {}
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to check event-backed product");
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Internal error"
+            }));
+        }
+    }
 
     match products::delete_product(pool.get_ref(), &product_id, &merchant.id).await {
         Ok(products::DeleteOutcome::Deleted) => {

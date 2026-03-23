@@ -5,12 +5,14 @@ mod config;
 mod crypto;
 mod db;
 mod email;
+mod events;
 mod invoices;
 mod merchants;
 mod prices;
 mod products;
 mod scanner;
 mod subscriptions;
+mod tickets;
 mod validation;
 mod webhooks;
 
@@ -87,6 +89,19 @@ async fn main() -> anyhow::Result<()> {
             interval.tick().await;
             if let Err(e) = db::run_data_purge(&purge_pool, purge_days).await {
                 tracing::error!(error = %e, "Data purge error");
+            }
+        }
+    });
+
+    let events_pool = pool.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+        loop {
+            interval.tick().await;
+            match events::mark_past_events(&events_pool).await {
+                Ok(count) if count > 0 => tracing::info!(count, "Marked active events as past"),
+                Ok(_) => {}
+                Err(e) => tracing::error!(error = %e, "Event status sweep error"),
             }
         }
     });
