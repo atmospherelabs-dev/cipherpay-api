@@ -8,6 +8,8 @@ pub struct Price {
     pub product_id: String,
     pub currency: String,
     pub unit_amount: f64,
+    pub label: Option<String>,
+    pub max_quantity: Option<i64>,
     #[serde(default = "default_price_type")]
     pub price_type: String,
     pub billing_interval: Option<String>,
@@ -26,6 +28,8 @@ pub struct CreatePriceRequest {
     pub product_id: String,
     pub currency: String,
     pub unit_amount: f64,
+    pub label: Option<String>,
+    pub max_quantity: Option<i64>,
     pub price_type: Option<String>,
     pub billing_interval: Option<String>,
     pub interval_count: Option<i32>,
@@ -35,6 +39,8 @@ pub struct CreatePriceRequest {
 pub struct UpdatePriceRequest {
     pub unit_amount: Option<f64>,
     pub currency: Option<String>,
+    pub label: Option<String>,
+    pub max_quantity: Option<i64>,
     pub price_type: Option<String>,
     pub billing_interval: Option<String>,
     pub interval_count: Option<i32>,
@@ -62,6 +68,11 @@ pub async fn create_price(
     if req.unit_amount > MAX_UNIT_AMOUNT {
         anyhow::bail!("unit_amount exceeds maximum of {}", MAX_UNIT_AMOUNT);
     }
+    if let Some(max_q) = req.max_quantity {
+        if max_q <= 0 {
+            anyhow::bail!("max_quantity must be > 0");
+        }
+    }
 
     let product = crate::products::get_product(pool, &req.product_id).await?;
     match product {
@@ -70,9 +81,10 @@ pub async fn create_price(
         None => anyhow::bail!("Product not found"),
     }
 
+    let is_event_backed = crate::events::is_product_backed_by_event(pool, &req.product_id).await?;
     let existing = get_price_by_product_currency(pool, &req.product_id, &currency).await?;
     if let Some(p) = existing {
-        if p.active == 1 {
+        if p.active == 1 && !is_event_backed {
             anyhow::bail!("An active price for {} already exists on this product. Deactivate it first or update it.", currency);
         }
     }
@@ -98,12 +110,15 @@ pub async fn create_price(
 
     let id = generate_price_id();
     sqlx::query(
-        "INSERT INTO prices (id, product_id, currency, unit_amount, price_type, billing_interval, interval_count) VALUES (?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO prices (id, product_id, currency, unit_amount, label, max_quantity, price_type, billing_interval, interval_count)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     .bind(&id)
     .bind(&req.product_id)
     .bind(&currency)
     .bind(req.unit_amount)
+    .bind(&req.label)
+    .bind(req.max_quantity)
     .bind(price_type)
     .bind(&billing_interval)
     .bind(interval_count)
@@ -117,7 +132,7 @@ pub async fn create_price(
         .ok_or_else(|| anyhow::anyhow!("Price not found after insert"))
 }
 
-const PRICE_COLS: &str = "id, product_id, currency, unit_amount, price_type, billing_interval, interval_count, active, created_at";
+const PRICE_COLS: &str = "id, product_id, currency, unit_amount, label, max_quantity, price_type, billing_interval, interval_count, active, created_at";
 
 pub async fn list_prices_for_product(pool: &SqlitePool, product_id: &str) -> anyhow::Result<Vec<Price>> {
     let q = format!("SELECT {} FROM prices WHERE product_id = ? ORDER BY currency ASC", PRICE_COLS);
@@ -175,6 +190,11 @@ pub async fn update_price(
     if unit_amount > MAX_UNIT_AMOUNT {
         anyhow::bail!("unit_amount exceeds maximum of {}", MAX_UNIT_AMOUNT);
     }
+    if let Some(max_q) = req.max_quantity {
+        if max_q <= 0 {
+            anyhow::bail!("max_quantity must be > 0");
+        }
+    }
 
     let currency = match &req.currency {
         Some(c) => {
@@ -184,7 +204,8 @@ pub async fn update_price(
             }
             if c != price.currency {
                 let existing = get_price_by_product_currency(pool, &price.product_id, &c).await?;
-                if existing.is_some() {
+                let is_event_backed = crate::events::is_product_backed_by_event(pool, &price.product_id).await?;
+                if existing.is_some() && !is_event_backed {
                     anyhow::bail!("An active price for {} already exists on this product. Deactivate it first.", c);
                 }
             }
@@ -192,6 +213,9 @@ pub async fn update_price(
         }
         None => price.currency.clone(),
     };
+
+    let label = req.label.as_ref().or(price.label.as_ref());
+    let max_quantity = req.max_quantity.or(price.max_quantity);
 
     let price_type = req.price_type.as_deref().unwrap_or(&price.price_type);
     if !VALID_PRICE_TYPES.contains(&price_type) {
@@ -214,10 +238,14 @@ pub async fn update_price(
     };
 
     sqlx::query(
-        "UPDATE prices SET unit_amount = ?, currency = ?, price_type = ?, billing_interval = ?, interval_count = ? WHERE id = ?"
+        "UPDATE prices
+         SET unit_amount = ?, currency = ?, label = ?, max_quantity = ?, price_type = ?, billing_interval = ?, interval_count = ?
+         WHERE id = ?"
     )
     .bind(unit_amount)
     .bind(&currency)
+    .bind(label)
+    .bind(max_quantity)
     .bind(price_type)
     .bind(&billing_interval)
     .bind(interval_count)

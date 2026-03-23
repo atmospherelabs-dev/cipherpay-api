@@ -299,7 +299,7 @@ async fn scan_blocks(
                         let changed = invoices::mark_confirmed(pool, &invoice.id).await?;
                         if changed {
                             spawn_webhook(pool, http, &invoice.id, "confirmed", txid, &config.encryption_key);
-                            on_invoice_confirmed(pool, config, invoice).await;
+                            on_invoice_confirmed(pool, http, config, invoice).await;
                         }
                     }
                     Ok(false) => {}
@@ -387,7 +387,7 @@ async fn scan_blocks(
                             let overpaid = new_received > invoice.price_zatoshis + 1000;
                             spawn_payment_webhook(pool, http, invoice_id, "confirmed", txid,
                                 invoice.price_zatoshis, new_received, overpaid, &config.encryption_key);
-                            on_invoice_confirmed(pool, config, invoice).await;
+                            on_invoice_confirmed(pool, http, config, invoice).await;
                         }
                         try_detect_fee(pool, config, &raw_hex, invoice_id).await;
                     }
@@ -412,7 +412,65 @@ async fn scan_blocks(
 
 /// When an invoice is confirmed, create a fee ledger entry, ensure a billing cycle exists,
 /// and advance the subscription period if this is a subscription invoice.
-async fn on_invoice_confirmed(pool: &SqlitePool, config: &Config, invoice: &invoices::Invoice) {
+async fn on_invoice_confirmed(
+    pool: &SqlitePool,
+    http: &reqwest::Client,
+    config: &Config,
+    invoice: &invoices::Invoice,
+) {
+    if let Some(ref product_id) = invoice.product_id {
+        match crate::events::is_product_backed_by_event(pool, product_id).await {
+            Ok(true) => {
+                match crate::tickets::create_ticket(
+                    pool,
+                    &invoice.id,
+                    product_id,
+                    invoice.price_id.as_deref(),
+                    &invoice.merchant_id,
+                ).await {
+                    Ok(Some(ticket)) => {
+                        let event_ctx = crate::events::get_event_context_by_product(pool, product_id)
+                            .await
+                            .ok()
+                            .flatten();
+                        let payload = serde_json::json!({
+                            "invoice_id": invoice.id,
+                            "ticket_id": ticket.id,
+                            "ticket_code": ticket.code,
+                            "product_id": product_id,
+                            "price_id": invoice.price_id,
+                            "event_title": event_ctx.as_ref().map(|e| e.event_title.clone()),
+                            "event_date": event_ctx.as_ref().and_then(|e| e.event_date.clone()),
+                            "event_location": event_ctx.as_ref().and_then(|e| e.event_location.clone()),
+                        });
+                        let pool = pool.clone();
+                        let http = http.clone();
+                        let merchant_id = invoice.merchant_id.clone();
+                        let enc_key = config.encryption_key.clone();
+                        let inv_id = invoice.id.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = webhooks::dispatch_event(
+                                &pool, &http, &merchant_id, "ticket.created", payload, &enc_key,
+                            ).await {
+                                tracing::error!(invoice_id = %inv_id, error = %e, "Failed to dispatch ticket.created webhook");
+                            }
+                        });
+                    }
+                    Ok(None) => {
+                        tracing::warn!(invoice_id = %invoice.id, product_id, "Ticket creation returned None (idempotent duplicate or code collision)");
+                    }
+                    Err(e) => {
+                        tracing::error!(invoice_id = %invoice.id, error = %e, "Failed to create ticket for confirmed invoice");
+                    }
+                }
+            }
+            Ok(false) => {}
+            Err(e) => {
+                tracing::error!(invoice_id = %invoice.id, error = %e, "Failed to check event-backed product");
+            }
+        }
+    }
+
     // Advance subscription period immediately on payment
     if let Some(ref sub_id) = invoice.subscription_id {
         match crate::subscriptions::advance_subscription_period(pool, sub_id).await {
