@@ -174,7 +174,36 @@ pub async fn my_invoices(
     .await;
 
     match rows {
-        Ok(invoices) => HttpResponse::Ok().json(invoices),
+        Ok(invoices) => {
+            let event_product_ids: std::collections::HashSet<String> =
+                sqlx::query_scalar::<_, String>(
+                    "SELECT product_id FROM events WHERE merchant_id = ?",
+                )
+                .bind(&merchant.id)
+                .fetch_all(pool.get_ref())
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+
+            let enriched: Vec<serde_json::Value> = invoices
+                .iter()
+                .map(|inv| {
+                    let mut val = serde_json::to_value(inv).unwrap_or(serde_json::json!({}));
+                    if let serde_json::Value::Object(ref mut map) = val {
+                        let is_event = inv
+                            .product_id
+                            .as_ref()
+                            .map(|pid| event_product_ids.contains(pid))
+                            .unwrap_or(false);
+                        map.insert("is_event".into(), serde_json::json!(is_event));
+                    }
+                    val
+                })
+                .collect();
+
+            HttpResponse::Ok().json(enriched)
+        }
         Err(e) => {
             tracing::error!(error = %e, "Failed to list merchant invoices");
             HttpResponse::InternalServerError().json(serde_json::json!({
