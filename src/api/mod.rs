@@ -205,6 +205,45 @@ async fn checkout(
         }
     }
 
+    // Real-time event expiry check: block ticket sales for past events
+    // (supplements the hourly sweep so there's no window for late sales)
+    let event_row: Option<(String, Option<String>)> = sqlx::query_as(
+        "SELECT status, event_date FROM events WHERE product_id = ? LIMIT 1"
+    )
+    .bind(&product.id)
+    .fetch_optional(pool.get_ref())
+    .await
+    .unwrap_or(None);
+
+    if let Some((event_status, event_date)) = event_row {
+        if event_status == "cancelled" || event_status == "past" {
+            return actix_web::HttpResponse::Gone().json(serde_json::json!({
+                "error": "Event is no longer available"
+            }));
+        }
+        if let Some(ref date_str) = event_date {
+            if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(date_str, "%Y-%m-%dT%H:%M:%S")
+                .or_else(|_| chrono::NaiveDateTime::parse_from_str(date_str, "%Y-%m-%dT%H:%M"))
+            {
+                let event_utc = dt.and_utc();
+                if event_utc < chrono::Utc::now() {
+                    // Mark as past in real-time (fire-and-forget)
+                    let pool_bg = pool.clone();
+                    let pid = product.id.clone();
+                    tokio::spawn(async move {
+                        let _ = sqlx::query("UPDATE events SET status = 'past' WHERE product_id = ? AND status = 'active'")
+                            .bind(&pid).execute(pool_bg.get_ref()).await;
+                        let _ = sqlx::query("UPDATE products SET active = 0 WHERE id = ? AND active = 1")
+                            .bind(&pid).execute(pool_bg.get_ref()).await;
+                    });
+                    return actix_web::HttpResponse::Gone().json(serde_json::json!({
+                        "error": "Event has ended"
+                    }));
+                }
+            }
+        }
+    }
+
     // variant field is accepted for backward compatibility but no longer validated
     let _ = &body.variant;
 
