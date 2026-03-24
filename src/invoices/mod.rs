@@ -93,6 +93,11 @@ pub struct FeeConfig {
     pub fee_rate: f64,
 }
 
+/// Minimum fee output to include in ZIP 321 URIs (10,000 zatoshis = 0.0001 ZEC).
+/// Below this, the output costs more to spend than it's worth. Fees on small
+/// payments still accrue in the billing cycle and settle via the normal threshold.
+const MIN_FEE_ZEC: f64 = 0.0001;
+
 pub async fn create_invoice(
     pool: &SqlitePool,
     merchant_id: &str,
@@ -132,7 +137,7 @@ pub async fn create_invoice(
 
     let zcash_uri = if let Some(fc) = fee_config {
         let fee_amount = price_zec * fc.fee_rate;
-        if fee_amount >= 0.00000001 {
+        if fee_amount >= MIN_FEE_ZEC {
             let fee_memo = format!("FEE-{}", id);
             let fee_memo_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
                 .encode(fee_memo.as_bytes());
@@ -616,7 +621,7 @@ pub async fn finalize_invoice(
 
     let zcash_uri = if let Some(fc) = fee_config {
         let fee_amount = price_zec * fc.fee_rate;
-        if fee_amount >= 0.00000001 {
+        if fee_amount >= MIN_FEE_ZEC {
             let fee_memo = format!("FEE-{}", invoice.id);
             let fee_memo_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
                 .encode(fee_memo.as_bytes());
