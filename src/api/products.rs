@@ -273,7 +273,16 @@ pub async fn get_public(
                 .filter(|p| p.active == 1)
                 .collect::<Vec<_>>();
 
-            HttpResponse::Ok().json(serde_json::json!({
+            let event = sqlx::query_as::<_, (Option<String>, Option<String>)>(
+                "SELECT event_date, event_location FROM events WHERE product_id = ? AND status != 'cancelled' LIMIT 1"
+            )
+            .bind(&product.id)
+            .fetch_optional(pool.get_ref())
+            .await
+            .ok()
+            .flatten();
+
+            let mut resp = serde_json::json!({
                 "id": product.id,
                 "name": product.name,
                 "description": product.description,
@@ -281,7 +290,12 @@ pub async fn get_public(
                 "metadata": product.metadata_json(),
                 "slug": product.slug,
                 "prices": prices,
-            }))
+            });
+            if let Some((date, location)) = event {
+                resp["event_date"] = serde_json::json!(date);
+                resp["event_location"] = serde_json::json!(location);
+            }
+            HttpResponse::Ok().json(resp)
         }
         None => HttpResponse::NotFound().json(serde_json::json!({
             "error": "Product not found"
