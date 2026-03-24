@@ -82,6 +82,14 @@ pub struct EventDetailResponse {
     pub tiers: Vec<EventTierStat>,
 }
 
+/// Parse event_date strings in either "YYYY-MM-DDTHH:MM:SS" or "YYYY-MM-DDTHH:MM" format.
+/// Returns the parsed NaiveDateTime if valid.
+pub fn parse_event_datetime(s: &str) -> Option<chrono::NaiveDateTime> {
+    chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S")
+        .or_else(|_| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M"))
+        .ok()
+}
+
 fn slugify(name: &str) -> String {
     name.to_lowercase()
         .chars()
@@ -215,6 +223,9 @@ pub async fn create_event_with_product_and_prices(
     if let Some(ref date) = req.event_date {
         if date.len() > 30 {
             anyhow::bail!("event_date must be 30 characters or fewer");
+        }
+        if parse_event_datetime(date).is_none() {
+            anyhow::bail!("event_date must be a valid date (YYYY-MM-DDTHH:MM)");
         }
     }
     if req.prices.is_empty() {
@@ -386,6 +397,9 @@ pub async fn update_event(
     if let Some(ref date) = req.event_date {
         if date.len() > 30 {
             anyhow::bail!("event_date must be 30 characters or fewer");
+        }
+        if parse_event_datetime(date).is_none() {
+            anyhow::bail!("event_date must be a valid date (YYYY-MM-DDTHH:MM)");
         }
     }
 
