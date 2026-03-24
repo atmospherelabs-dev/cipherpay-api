@@ -7,7 +7,7 @@ pub struct ScanRequest {
     pub code: String,
 }
 
-/// Public endpoint: returns only the ticket code and status for the checkout receipt.
+/// Public endpoint: returns the ticket code, status, and event metadata for the checkout receipt.
 /// No auth required — invoice IDs are unguessable UUIDs (same model as refund_address).
 pub async fn by_invoice(
     pool: web::Data<SqlitePool>,
@@ -15,10 +15,40 @@ pub async fn by_invoice(
 ) -> HttpResponse {
     let invoice_id = path.into_inner();
     match crate::tickets::get_ticket_by_invoice(pool.get_ref(), &invoice_id).await {
-        Ok(Some(ticket)) => HttpResponse::Ok().json(serde_json::json!({
-            "code": ticket.code,
-            "status": ticket.status
-        })),
+        Ok(Some(ticket)) => {
+            let event = sqlx::query_as::<_, (Option<String>, Option<String>)>(
+                "SELECT event_date, event_location FROM events WHERE product_id = ? AND status != 'cancelled' LIMIT 1"
+            )
+            .bind(&ticket.product_id)
+            .fetch_optional(pool.get_ref())
+            .await
+            .ok()
+            .flatten();
+
+            let price_label: Option<String> = if let Some(ref pid) = ticket.price_id {
+                sqlx::query_scalar("SELECT label FROM prices WHERE id = ?")
+                    .bind(pid)
+                    .fetch_optional(pool.get_ref())
+                    .await
+                    .ok()
+                    .flatten()
+            } else {
+                None
+            };
+
+            let mut resp = serde_json::json!({
+                "code": ticket.code,
+                "status": ticket.status
+            });
+            if let Some((date, location)) = event {
+                resp["event_date"] = serde_json::json!(date);
+                resp["event_location"] = serde_json::json!(location);
+            }
+            if let Some(label) = price_label {
+                resp["price_label"] = serde_json::json!(label);
+            }
+            HttpResponse::Ok().json(resp)
+        }
         Ok(None) => HttpResponse::NotFound().json(serde_json::json!({
             "error": "Ticket not found"
         })),
