@@ -62,6 +62,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             // Events endpoints (dashboard auth)
             .route("/events", web::get().to(events::list))
             .route("/events", web::post().to(events::create))
+            .route("/events/{id}", web::get().to(events::get))
+            .route("/events/{id}", web::patch().to(events::update))
             .route("/events/{id}/archive", web::post().to(events::archive))
             // Price endpoints
             .route("/prices", web::post().to(prices::create))
@@ -341,7 +343,8 @@ async fn list_invoices(
          payment_address, zcash_uri,
          status, detected_txid,
          detected_at, expires_at, confirmed_at, refunded_at,
-         refund_address, created_at, price_zatoshis, received_zatoshis
+         refund_address, created_at, price_zatoshis, received_zatoshis,
+         (EXISTS (SELECT 1 FROM events WHERE product_id = invoices.product_id)) AS is_event
          FROM invoices WHERE merchant_id = ? ORDER BY created_at DESC LIMIT 50",
     )
     .bind(&merchant.id)
@@ -384,6 +387,7 @@ async fn list_invoices(
                         "price_zatoshis": pz,
                         "received_zatoshis": rz,
                         "overpaid": rz > pz + 1000 && pz > 0,
+                        "is_event": r.get::<bool, _>("is_event"),
                     })
                 })
                 .collect();

@@ -53,6 +53,33 @@ pub struct EventSummary {
     pub created_at: String,
     pub sold_count: i64,
     pub used_count: i64,
+    pub total_capacity: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateEventRequest {
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub event_date: Option<String>,
+    pub event_location: Option<String>,
+}
+
+#[derive(Debug, Serialize, FromRow)]
+pub struct EventTierStat {
+    pub price_id: String,
+    pub label: Option<String>,
+    pub currency: String,
+    pub unit_amount: f64,
+    pub max_quantity: Option<i64>,
+    pub sold_count: i64,
+    pub used_count: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EventDetailResponse {
+    #[serde(flatten)]
+    pub summary: EventSummary,
+    pub tiers: Vec<EventTierStat>,
 }
 
 fn slugify(name: &str) -> String {
@@ -147,7 +174,12 @@ pub async fn list_events_for_merchant(pool: &SqlitePool, merchant_id: &str) -> a
         "SELECT
             e.id, e.product_id, e.title, e.description, e.event_date, e.event_location, e.status, e.created_at,
             (SELECT COUNT(*) FROM tickets t WHERE t.product_id = e.product_id AND t.status != 'void') AS sold_count,
-            (SELECT COUNT(*) FROM tickets t WHERE t.product_id = e.product_id AND t.status = 'used') AS used_count
+            (SELECT COUNT(*) FROM tickets t WHERE t.product_id = e.product_id AND t.status = 'used') AS used_count,
+            (SELECT CASE
+               WHEN EXISTS (SELECT 1 FROM prices WHERE product_id = e.product_id AND active = 1 AND max_quantity IS NULL)
+               THEN NULL
+               ELSE (SELECT SUM(max_quantity) FROM prices WHERE product_id = e.product_id AND active = 1)
+             END) AS total_capacity
          FROM events e
          WHERE e.merchant_id = ?
          ORDER BY e.created_at DESC"
@@ -308,6 +340,142 @@ pub async fn archive_event(
 
     tx.commit().await?;
     Ok(true)
+}
+
+pub async fn update_event(
+    pool: &SqlitePool,
+    merchant_id: &str,
+    event_id: &str,
+    req: &UpdateEventRequest,
+) -> anyhow::Result<Option<Event>> {
+    let existing: Option<(String, String, String)> = sqlx::query_as(
+        "SELECT id, product_id, status FROM events WHERE id = ? AND merchant_id = ?"
+    )
+    .bind(event_id)
+    .bind(merchant_id)
+    .fetch_optional(pool)
+    .await?;
+
+    let (_, product_id, status) = match existing {
+        Some(v) => v,
+        None => return Ok(None),
+    };
+
+    if status == "cancelled" {
+        anyhow::bail!("cannot edit a cancelled event");
+    }
+
+    if let Some(ref t) = req.title {
+        if t.trim().is_empty() {
+            anyhow::bail!("title is required");
+        }
+        if t.len() > 200 {
+            anyhow::bail!("title must be 200 characters or fewer");
+        }
+    }
+    if let Some(ref d) = req.description {
+        if d.len() > 2000 {
+            anyhow::bail!("description must be 2000 characters or fewer");
+        }
+    }
+    if let Some(ref loc) = req.event_location {
+        if loc.len() > 300 {
+            anyhow::bail!("event_location must be 300 characters or fewer");
+        }
+    }
+    if let Some(ref date) = req.event_date {
+        if date.len() > 30 {
+            anyhow::bail!("event_date must be 30 characters or fewer");
+        }
+    }
+
+    let mut tx = pool.begin().await?;
+
+    sqlx::query(
+        "UPDATE events SET
+            title = COALESCE(?, title),
+            description = COALESCE(?, description),
+            event_date = COALESCE(?, event_date),
+            event_location = COALESCE(?, event_location)
+         WHERE id = ? AND merchant_id = ?"
+    )
+    .bind(&req.title)
+    .bind(&req.description)
+    .bind(&req.event_date)
+    .bind(&req.event_location)
+    .bind(event_id)
+    .bind(merchant_id)
+    .execute(&mut *tx)
+    .await?;
+
+    if req.title.is_some() || req.description.is_some() {
+        sqlx::query(
+            "UPDATE products SET
+                name = COALESCE(?, name),
+                description = COALESCE(?, description)
+             WHERE id = ? AND merchant_id = ?"
+        )
+        .bind(&req.title)
+        .bind(&req.description)
+        .bind(&product_id)
+        .bind(merchant_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+
+    get_event(pool, event_id).await
+}
+
+pub async fn get_event_tier_stats(pool: &SqlitePool, product_id: &str) -> anyhow::Result<Vec<EventTierStat>> {
+    let rows = sqlx::query_as::<_, EventTierStat>(
+        "SELECT
+            pr.id AS price_id, pr.label, pr.currency, pr.unit_amount, pr.max_quantity,
+            (SELECT COUNT(*) FROM tickets t WHERE t.price_id = pr.id AND t.status != 'void') AS sold_count,
+            (SELECT COUNT(*) FROM tickets t WHERE t.price_id = pr.id AND t.status = 'used') AS used_count
+         FROM prices pr
+         WHERE pr.product_id = ? AND pr.active = 1
+         ORDER BY pr.unit_amount ASC"
+    )
+    .bind(product_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows)
+}
+
+pub async fn get_event_detail(
+    pool: &SqlitePool,
+    merchant_id: &str,
+    event_id: &str,
+) -> anyhow::Result<Option<EventDetailResponse>> {
+    let summary: Option<EventSummary> = sqlx::query_as::<_, EventSummary>(
+        "SELECT
+            e.id, e.product_id, e.title, e.description, e.event_date, e.event_location, e.status, e.created_at,
+            (SELECT COUNT(*) FROM tickets t WHERE t.product_id = e.product_id AND t.status != 'void') AS sold_count,
+            (SELECT COUNT(*) FROM tickets t WHERE t.product_id = e.product_id AND t.status = 'used') AS used_count,
+            (SELECT CASE
+               WHEN EXISTS (SELECT 1 FROM prices WHERE product_id = e.product_id AND active = 1 AND max_quantity IS NULL)
+               THEN NULL
+               ELSE (SELECT SUM(max_quantity) FROM prices WHERE product_id = e.product_id AND active = 1)
+             END) AS total_capacity
+         FROM events e
+         WHERE e.id = ? AND e.merchant_id = ?"
+    )
+    .bind(event_id)
+    .bind(merchant_id)
+    .fetch_optional(pool)
+    .await?;
+
+    let summary = match summary {
+        Some(s) => s,
+        None => return Ok(None),
+    };
+
+    let tiers = get_event_tier_stats(pool, &summary.product_id).await?;
+
+    Ok(Some(EventDetailResponse { summary, tiers }))
 }
 
 pub async fn mark_past_events(pool: &SqlitePool) -> anyhow::Result<u64> {
