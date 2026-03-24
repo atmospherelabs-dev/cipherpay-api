@@ -120,7 +120,7 @@ async fn checkout(
     }
 
     // Resolve product + pricing: either via price_id or product_id
-    let (product, checkout_amount, checkout_currency, resolved_price_id, resolved_price_label) = if let Some(ref price_id) = body.price_id {
+    let (product, checkout_amount, checkout_currency, resolved_price_id, resolved_price_label, resolved_max_qty) = if let Some(ref price_id) = body.price_id {
         let price = match crate::prices::get_price(pool.get_ref(), price_id).await {
             Ok(Some(p)) if p.active == 1 => p,
             Ok(Some(_)) => {
@@ -142,7 +142,8 @@ async fn checkout(
                 }));
             }
         };
-        (product, price.unit_amount, price.currency.clone(), Some(price.id), price.label)
+        let mq = price.max_quantity;
+        (product, price.unit_amount, price.currency.clone(), Some(price.id), price.label, mq)
     } else if let Some(ref product_id) = body.product_id {
         let product = match crate::products::get_product(pool.get_ref(), product_id).await {
             Ok(Some(p)) if p.active == 1 => p,
@@ -178,12 +179,31 @@ async fn checkout(
                 }));
             }
         };
-        (product, price.unit_amount, price.currency.clone(), Some(price.id), price.label)
+        let mq = price.max_quantity;
+        (product, price.unit_amount, price.currency.clone(), Some(price.id), price.label, mq)
     } else {
         return actix_web::HttpResponse::BadRequest().json(serde_json::json!({
             "error": "product_id or price_id is required"
         }));
     };
+
+    // Enforce max_quantity: reject checkout if this tier is sold out
+    if let (Some(max_qty), Some(ref pid)) = (resolved_max_qty, &resolved_price_id) {
+        let sold: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM tickets WHERE price_id = ? AND status != 'void'"
+        )
+        .bind(pid)
+        .fetch_one(pool.get_ref())
+        .await
+        .unwrap_or(0);
+
+        if sold >= max_qty {
+            return actix_web::HttpResponse::Conflict().json(serde_json::json!({
+                "error": "Sold out",
+                "detail": "This ticket tier has reached its maximum capacity"
+            }));
+        }
+    }
 
     // variant field is accepted for backward compatibility but no longer validated
     let _ = &body.variant;
