@@ -106,6 +106,12 @@ pub async fn get(
 
             let merchant_origin = get_merchant_webhook_origin(pool.get_ref(), &inv.merchant_id).await;
 
+            let is_event = if let Some(ref pid) = inv.product_id {
+                crate::events::is_product_backed_by_event(pool.get_ref(), pid).await.unwrap_or(false)
+            } else {
+                false
+            };
+
             HttpResponse::Ok().json(serde_json::json!({
                 "id": inv.id,
                 "memo_code": inv.memo_code,
@@ -134,6 +140,7 @@ pub async fn get(
                 "price_zatoshis": inv.price_zatoshis,
                 "received_zatoshis": inv.received_zatoshis,
                 "overpaid": overpaid,
+                "is_event": is_event,
             }))
         }
         None => HttpResponse::NotFound().json(serde_json::json!({
