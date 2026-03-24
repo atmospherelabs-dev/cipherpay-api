@@ -236,8 +236,8 @@ pub async fn ensure_billing_cycle(pool: &SqlitePool, merchant_id: &str, config: 
 
     if carried > 0.0 {
         sqlx::query(
-            "UPDATE billing_cycles SET status = 'paid', outstanding_zec = 0.0
-             WHERE merchant_id = ? AND status = 'carried_over'"
+            "UPDATE billing_cycles SET outstanding_zec = 0.0
+             WHERE merchant_id = ? AND status = 'carried_over' AND outstanding_zec > 0"
         )
         .bind(merchant_id)
         .execute(pool)
@@ -456,7 +456,7 @@ pub async fn process_billing_cycles(
     for (merchant_id, current_tier) in &merchants_for_upgrade {
         let paid_count: i32 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM billing_cycles
-             WHERE merchant_id = ? AND status = 'paid'
+             WHERE merchant_id = ? AND status IN ('paid', 'carried_over')
              ORDER BY period_end DESC LIMIT 3"
         )
         .bind(merchant_id)
