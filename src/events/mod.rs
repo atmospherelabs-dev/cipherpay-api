@@ -54,6 +54,7 @@ pub struct EventSummary {
     pub sold_count: i64,
     pub used_count: i64,
     pub total_capacity: Option<i64>,
+    pub luma_event_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -187,7 +188,8 @@ pub async fn list_events_for_merchant(pool: &SqlitePool, merchant_id: &str) -> a
                WHEN EXISTS (SELECT 1 FROM prices WHERE product_id = e.product_id AND active = 1 AND max_quantity IS NULL)
                THEN NULL
                ELSE (SELECT SUM(max_quantity) FROM prices WHERE product_id = e.product_id AND active = 1)
-             END) AS total_capacity
+             END) AS total_capacity,
+            e.luma_event_id
          FROM events e
          WHERE e.merchant_id = ?
          ORDER BY e.created_at DESC"
@@ -473,7 +475,8 @@ pub async fn get_event_detail(
                WHEN EXISTS (SELECT 1 FROM prices WHERE product_id = e.product_id AND active = 1 AND max_quantity IS NULL)
                THEN NULL
                ELSE (SELECT SUM(max_quantity) FROM prices WHERE product_id = e.product_id AND active = 1)
-             END) AS total_capacity
+             END) AS total_capacity,
+            e.luma_event_id
          FROM events e
          WHERE e.id = ? AND e.merchant_id = ?"
     )

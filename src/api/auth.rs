@@ -129,6 +129,18 @@ pub async fn me(
         }
     });
 
+    let has_luma_key: bool = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT luma_api_key FROM merchants WHERE id = ?",
+    )
+    .bind(&merchant.id)
+    .fetch_optional(pool.get_ref())
+    .await
+    .ok()
+    .flatten()
+    .flatten()
+    .map(|k| !k.is_empty())
+    .unwrap_or(false);
+
     HttpResponse::Ok().json(serde_json::json!({
         "id": merchant.id,
         "name": merchant.name,
@@ -139,6 +151,7 @@ pub async fn me(
         "recovery_email_preview": masked_email,
         "created_at": merchant.created_at,
         "stats": stats,
+        "has_luma_key": has_luma_key,
     }))
 }
 
@@ -186,6 +199,17 @@ pub async fn my_invoices(
                 .into_iter()
                 .collect();
 
+            let luma_product_ids: std::collections::HashSet<String> =
+                sqlx::query_scalar::<_, String>(
+                    "SELECT product_id FROM events WHERE merchant_id = ? AND luma_event_id IS NOT NULL",
+                )
+                .bind(&merchant.id)
+                .fetch_all(pool.get_ref())
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+
             let enriched: Vec<serde_json::Value> = invoices
                 .iter()
                 .map(|inv| {
@@ -196,7 +220,13 @@ pub async fn my_invoices(
                             .as_ref()
                             .map(|pid| event_product_ids.contains(pid))
                             .unwrap_or(false);
+                        let is_luma = inv
+                            .product_id
+                            .as_ref()
+                            .map(|pid| luma_product_ids.contains(pid))
+                            .unwrap_or(false);
                         map.insert("is_event".into(), serde_json::json!(is_event));
+                        map.insert("is_luma".into(), serde_json::json!(is_luma));
                     }
                     val
                 })
@@ -370,6 +400,7 @@ pub struct UpdateMerchantRequest {
     pub name: Option<String>,
     pub webhook_url: Option<String>,
     pub recovery_email: Option<String>,
+    pub luma_api_key: Option<String>,
 }
 
 /// PATCH /api/merchants/me -- update name, webhook URL, and/or recovery email.
@@ -448,6 +479,35 @@ pub async fn update_me(
                 .ok();
         }
         tracing::info!(merchant_id = %merchant.id, "Recovery email updated");
+    }
+
+    if let Some(ref key) = body.luma_api_key {
+        if key.is_empty() {
+            sqlx::query("UPDATE merchants SET luma_api_key = NULL WHERE id = ?")
+                .bind(&merchant.id)
+                .execute(pool.get_ref())
+                .await
+                .ok();
+        } else {
+            let encrypted = if config.encryption_key.is_empty() {
+                key.clone()
+            } else {
+                match crate::crypto::encrypt(key, &config.encryption_key) {
+                    Ok(enc) => enc,
+                    Err(e) => {
+                        tracing::error!(error = %e, "Failed to encrypt Luma API key");
+                        return HttpResponse::InternalServerError().json(serde_json::json!({"error": "Internal error"}));
+                    }
+                }
+            };
+            sqlx::query("UPDATE merchants SET luma_api_key = ? WHERE id = ?")
+                .bind(&encrypted)
+                .bind(&merchant.id)
+                .execute(pool.get_ref())
+                .await
+                .ok();
+        }
+        tracing::info!(merchant_id = %merchant.id, "Luma API key updated");
     }
 
     HttpResponse::Ok().json(serde_json::json!({ "status": "updated" }))

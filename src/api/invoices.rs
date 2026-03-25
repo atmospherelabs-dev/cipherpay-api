@@ -112,6 +112,20 @@ pub async fn get(
                 false
             };
 
+            let is_luma = if let Some(ref pid) = inv.product_id {
+                sqlx::query_scalar::<_, Option<String>>(
+                    "SELECT luma_event_id FROM events WHERE product_id = ? AND luma_event_id IS NOT NULL LIMIT 1"
+                )
+                .bind(pid)
+                .fetch_optional(pool.get_ref())
+                .await
+                .ok()
+                .flatten()
+                .is_some()
+            } else {
+                false
+            };
+
             HttpResponse::Ok().json(serde_json::json!({
                 "id": inv.id,
                 "memo_code": inv.memo_code,
@@ -141,6 +155,7 @@ pub async fn get(
                 "received_zatoshis": inv.received_zatoshis,
                 "overpaid": overpaid,
                 "is_event": is_event,
+                "is_luma": is_luma,
             }))
         }
         None => HttpResponse::NotFound().json(serde_json::json!({

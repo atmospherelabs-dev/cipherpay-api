@@ -273,8 +273,8 @@ pub async fn get_public(
                 .filter(|p| p.active == 1)
                 .collect::<Vec<_>>();
 
-            let event = sqlx::query_as::<_, (Option<String>, Option<String>)>(
-                "SELECT event_date, event_location FROM events WHERE product_id = ? AND status != 'cancelled' LIMIT 1"
+            let event = sqlx::query_as::<_, (Option<String>, Option<String>, Option<String>, Option<String>)>(
+                "SELECT event_date, event_location, luma_event_id, luma_event_url FROM events WHERE product_id = ? AND status != 'cancelled' LIMIT 1"
             )
             .bind(&product.id)
             .fetch_optional(pool.get_ref())
@@ -291,9 +291,11 @@ pub async fn get_public(
                 "slug": product.slug,
                 "prices": prices,
             });
-            if let Some((date, location)) = event {
+            if let Some((date, location, luma_id, luma_url)) = event {
                 resp["event_date"] = serde_json::json!(date);
                 resp["event_location"] = serde_json::json!(location);
+                resp["is_luma"] = serde_json::json!(luma_id.is_some());
+                resp["luma_event_url"] = serde_json::json!(luma_url);
             }
             HttpResponse::Ok().json(resp)
         }
