@@ -7,6 +7,7 @@ mod db;
 mod email;
 mod events;
 mod invoices;
+mod luma;
 mod merchants;
 mod prices;
 mod products;

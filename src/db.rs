@@ -843,6 +843,24 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_merchants_email_hash ON merchants(recovery_email_hash)")
         .execute(&pool).await.ok();
 
+    // Luma integration: merchant API key, event/price linking, invoice PII + registration state
+    for sql in &[
+        "ALTER TABLE merchants ADD COLUMN luma_api_key TEXT",
+        "ALTER TABLE events ADD COLUMN luma_event_id TEXT",
+        "ALTER TABLE events ADD COLUMN luma_event_url TEXT",
+        "ALTER TABLE prices ADD COLUMN luma_ticket_type_id TEXT",
+        "ALTER TABLE invoices ADD COLUMN attendee_name TEXT",
+        "ALTER TABLE invoices ADD COLUMN attendee_email TEXT",
+        "ALTER TABLE invoices ADD COLUMN luma_registration_status TEXT",
+        "ALTER TABLE invoices ADD COLUMN luma_guest_data TEXT",
+        "ALTER TABLE invoices ADD COLUMN luma_retry_at TEXT",
+        "ALTER TABLE invoices ADD COLUMN luma_retry_count INTEGER DEFAULT 0",
+    ] {
+        sqlx::query(sql).execute(&pool).await.ok();
+    }
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_events_luma ON events(luma_event_id)")
+        .execute(&pool).await.ok();
+
     tracing::info!("Database ready (SQLite)");
     Ok(pool)
 }

@@ -102,7 +102,20 @@ pub async fn run(config: Config, pool: SqlitePool, http: reqwest::Client) {
         }
     });
 
-    let _ = tokio::join!(mempool_handle, block_handle, evict_handle);
+    let retry_config = config.clone();
+    let retry_pool = pool.clone();
+    let retry_http = http.clone();
+    let luma_retry_handle = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(
+            std::time::Duration::from_secs(60),
+        );
+        loop {
+            interval.tick().await;
+            retry_due_luma_registrations(&retry_config, &retry_pool, &retry_http).await;
+        }
+    });
+
+    let _ = tokio::join!(mempool_handle, block_handle, evict_handle, luma_retry_handle);
 }
 
 /// Build or refresh the PIVK cache when the merchant set changes.
@@ -421,46 +434,71 @@ async fn on_invoice_confirmed(
     if let Some(ref product_id) = invoice.product_id {
         match crate::events::is_product_backed_by_event(pool, product_id).await {
             Ok(true) => {
-                match crate::tickets::create_ticket(
-                    pool,
-                    &invoice.id,
-                    product_id,
-                    invoice.price_id.as_deref(),
-                    &invoice.merchant_id,
-                ).await {
-                    Ok(Some(ticket)) => {
-                        let event_ctx = crate::events::get_event_context_by_product(pool, product_id)
-                            .await
-                            .ok()
-                            .flatten();
-                        let payload = serde_json::json!({
-                            "invoice_id": invoice.id,
-                            "ticket_id": ticket.id,
-                            "ticket_code": ticket.code,
-                            "product_id": product_id,
-                            "price_id": invoice.price_id,
-                            "event_title": event_ctx.as_ref().map(|e| e.event_title.clone()),
-                            "event_date": event_ctx.as_ref().and_then(|e| e.event_date.clone()),
-                            "event_location": event_ctx.as_ref().and_then(|e| e.event_location.clone()),
-                        });
-                        let pool = pool.clone();
-                        let http = http.clone();
-                        let merchant_id = invoice.merchant_id.clone();
-                        let enc_key = config.encryption_key.clone();
-                        let inv_id = invoice.id.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) = webhooks::dispatch_event(
-                                &pool, &http, &merchant_id, "ticket.created", payload, &enc_key,
-                            ).await {
-                                tracing::error!(invoice_id = %inv_id, error = %e, "Failed to dispatch ticket.created webhook");
-                            }
-                        });
-                    }
-                    Ok(None) => {
-                        tracing::warn!(invoice_id = %invoice.id, product_id, "Ticket creation returned None (idempotent duplicate or code collision)");
-                    }
-                    Err(e) => {
-                        tracing::error!(invoice_id = %invoice.id, error = %e, "Failed to create ticket for confirmed invoice");
+                // Check if this is a Luma-linked event
+                let luma_info: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+                    "SELECT e.luma_event_id, p.luma_ticket_type_id
+                     FROM events e
+                     LEFT JOIN prices p ON p.id = ?
+                     WHERE e.product_id = ?",
+                )
+                .bind(invoice.price_id.as_deref())
+                .bind(product_id)
+                .fetch_optional(pool)
+                .await
+                .unwrap_or(None);
+
+                let luma_event_id = luma_info.as_ref().and_then(|r| r.0.as_ref());
+
+                if let Some(luma_eid) = luma_event_id {
+                    // Luma path: register guest on Luma, skip create_ticket
+                    handle_luma_registration(
+                        pool, http, config, invoice,
+                        luma_eid,
+                        luma_info.as_ref().and_then(|r| r.1.as_deref()),
+                    ).await;
+                } else {
+                    // Private event path: create CipherPay ticket
+                    match crate::tickets::create_ticket(
+                        pool,
+                        &invoice.id,
+                        product_id,
+                        invoice.price_id.as_deref(),
+                        &invoice.merchant_id,
+                    ).await {
+                        Ok(Some(ticket)) => {
+                            let event_ctx = crate::events::get_event_context_by_product(pool, product_id)
+                                .await
+                                .ok()
+                                .flatten();
+                            let payload = serde_json::json!({
+                                "invoice_id": invoice.id,
+                                "ticket_id": ticket.id,
+                                "ticket_code": ticket.code,
+                                "product_id": product_id,
+                                "price_id": invoice.price_id,
+                                "event_title": event_ctx.as_ref().map(|e| e.event_title.clone()),
+                                "event_date": event_ctx.as_ref().and_then(|e| e.event_date.clone()),
+                                "event_location": event_ctx.as_ref().and_then(|e| e.event_location.clone()),
+                            });
+                            let pool = pool.clone();
+                            let http = http.clone();
+                            let merchant_id = invoice.merchant_id.clone();
+                            let enc_key = config.encryption_key.clone();
+                            let inv_id = invoice.id.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = webhooks::dispatch_event(
+                                    &pool, &http, &merchant_id, "ticket.created", payload, &enc_key,
+                                ).await {
+                                    tracing::error!(invoice_id = %inv_id, error = %e, "Failed to dispatch ticket.created webhook");
+                                }
+                            });
+                        }
+                        Ok(None) => {
+                            tracing::warn!(invoice_id = %invoice.id, product_id, "Ticket creation returned None (idempotent duplicate or code collision)");
+                        }
+                        Err(e) => {
+                            tracing::error!(invoice_id = %invoice.id, error = %e, "Failed to create ticket for confirmed invoice");
+                        }
                     }
                 }
             }
@@ -507,6 +545,295 @@ async fn on_invoice_confirmed(
     if let Err(e) = billing::create_fee_entry(pool, &invoice.id, &invoice.merchant_id, fee_amount).await {
         tracing::error!(error = %e, "Failed to create fee entry");
     }
+}
+
+/// Register a buyer on Luma after payment confirmation.
+/// Decrypts stored PII, calls Luma add_guest + get_guest, stores result, then wipes PII.
+async fn handle_luma_registration(
+    pool: &SqlitePool,
+    http: &reqwest::Client,
+    config: &Config,
+    invoice: &invoices::Invoice,
+    luma_event_id: &str,
+    luma_ticket_type_id: Option<&str>,
+) {
+    // Idempotency: skip if already registered
+    let current_status: Option<String> = sqlx::query_scalar(
+        "SELECT luma_registration_status FROM invoices WHERE id = ?"
+    )
+    .bind(&invoice.id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
+
+    if current_status.as_deref() == Some("registered") {
+        tracing::debug!(invoice_id = %invoice.id, "Luma registration already complete, skipping");
+        return;
+    }
+
+    let enc_key = &config.encryption_key;
+
+    let row: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT attendee_name, attendee_email FROM invoices WHERE id = ?",
+    )
+    .bind(&invoice.id)
+    .fetch_optional(pool)
+    .await
+    .unwrap_or(None);
+
+    let (enc_name, enc_email) = match row {
+        Some(r) => r,
+        None => {
+            tracing::error!(invoice_id = %invoice.id, "Invoice not found for Luma registration");
+            return;
+        }
+    };
+
+    let email = match enc_email {
+        Some(ref e) if !e.is_empty() => {
+            if enc_key.is_empty() { e.clone() } else {
+                match crate::crypto::decrypt(e, enc_key) {
+                    Ok(d) => d,
+                    Err(err) => {
+                        tracing::error!(invoice_id = %invoice.id, error = %err, "Failed to decrypt attendee email");
+                        mark_luma_failed(pool, &invoice.id).await;
+                        return;
+                    }
+                }
+            }
+        }
+        _ => {
+            tracing::error!(invoice_id = %invoice.id, "No attendee email for Luma registration");
+            mark_luma_failed(pool, &invoice.id).await;
+            return;
+        }
+    };
+
+    let name = enc_name
+        .as_ref()
+        .filter(|n| !n.is_empty())
+        .map(|n| {
+            if enc_key.is_empty() { Ok(n.clone()) } else { crate::crypto::decrypt(n, enc_key) }
+        })
+        .transpose()
+        .ok()
+        .flatten();
+
+    // Decrypt merchant's Luma API key
+    let api_key: Option<String> = sqlx::query_scalar(
+        "SELECT luma_api_key FROM merchants WHERE id = ?",
+    )
+    .bind(&invoice.merchant_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .flatten();
+
+    let api_key = match api_key {
+        Some(k) if !k.is_empty() => {
+            if enc_key.is_empty() { k } else {
+                match crate::crypto::decrypt(&k, enc_key) {
+                    Ok(d) => d,
+                    Err(err) => {
+                        tracing::error!(invoice_id = %invoice.id, error = %err, "Failed to decrypt Luma API key");
+                        mark_luma_failed(pool, &invoice.id).await;
+                        return;
+                    }
+                }
+            }
+        }
+        _ => {
+            tracing::error!(invoice_id = %invoice.id, "No Luma API key for merchant");
+            mark_luma_failed(pool, &invoice.id).await;
+            return;
+        }
+    };
+
+    // Call Luma add_guest
+    match crate::luma::add_guest(http, &api_key, luma_event_id, &email, name.as_deref(), luma_ticket_type_id).await {
+        Ok(resp) => {
+            tracing::info!(
+                invoice_id = %invoice.id,
+                luma_event_id,
+                approval_status = ?resp.approval_status,
+                "Luma guest added"
+            );
+        }
+        Err(e) => {
+            let err_str = e.to_string();
+            tracing::error!(invoice_id = %invoice.id, error = %err_str, "Failed to add guest on Luma");
+            if is_transient_luma_error(&err_str) {
+                schedule_luma_retry(pool, &invoice.id).await;
+            } else {
+                mark_luma_failed(pool, &invoice.id).await;
+            }
+            return;
+        }
+    }
+
+    // Call Luma get_guest to retrieve check-in QR and full guest record
+    let guest_data = match crate::luma::get_guest(http, &api_key, luma_event_id, &email).await {
+        Ok(Some(g)) => serde_json::to_string(&g).unwrap_or_else(|_| "{}".into()),
+        Ok(None) => {
+            tracing::warn!(invoice_id = %invoice.id, "Luma get_guest returned empty after add");
+            "{}".into()
+        }
+        Err(e) => {
+            tracing::warn!(invoice_id = %invoice.id, error = %e, "Failed to get guest details from Luma (registration still succeeded)");
+            "{}".into()
+        }
+    };
+
+    // Store result and delete PII
+    sqlx::query(
+        "UPDATE invoices SET luma_registration_status = 'registered', luma_guest_data = ?, attendee_name = NULL, attendee_email = NULL, luma_retry_at = NULL WHERE id = ?",
+    )
+    .bind(&guest_data)
+    .bind(&invoice.id)
+    .execute(pool)
+    .await
+    .ok();
+
+    tracing::info!(invoice_id = %invoice.id, "Luma registration complete, PII deleted");
+
+    // Dispatch webhook
+    let payload = serde_json::json!({
+        "invoice_id": invoice.id,
+        "product_id": invoice.product_id,
+        "luma_event_id": luma_event_id,
+        "luma_registered": true,
+    });
+    let pool = pool.clone();
+    let http = http.clone();
+    let merchant_id = invoice.merchant_id.clone();
+    let enc_key = config.encryption_key.clone();
+    let inv_id = invoice.id.clone();
+    tokio::spawn(async move {
+        if let Err(e) = webhooks::dispatch_event(
+            &pool, &http, &merchant_id, "luma.registered", payload, &enc_key,
+        ).await {
+            tracing::error!(invoice_id = %inv_id, error = %e, "Failed to dispatch luma.registered webhook");
+        }
+    });
+}
+
+fn is_transient_luma_error(err: &str) -> bool {
+    let lower = err.to_lowercase();
+    lower.contains("timeout") ||
+    lower.contains("timed out") ||
+    lower.contains("connection") ||
+    lower.contains("429") ||
+    lower.contains("500") ||
+    lower.contains("502") ||
+    lower.contains("503") ||
+    lower.contains("504")
+}
+
+const MAX_LUMA_RETRIES: i64 = 5;
+
+async fn schedule_luma_retry(pool: &SqlitePool, invoice_id: &str) {
+    let retry_count: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(luma_retry_count, 0) FROM invoices WHERE id = ?"
+    )
+    .bind(invoice_id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+
+    let new_count = retry_count + 1;
+    if new_count > MAX_LUMA_RETRIES {
+        tracing::error!(invoice_id, retries = new_count, "Luma registration exceeded max retries, marking failed");
+        mark_luma_failed(pool, invoice_id).await;
+        return;
+    }
+
+    // Exponential backoff: min(60, 5 * 2^(attempt-1)) minutes
+    let backoff_minutes = std::cmp::min(60, 5 * (1i64 << (new_count - 1)));
+    let retry_at = chrono::Utc::now() + chrono::Duration::minutes(backoff_minutes);
+    let retry_at_str = retry_at.format("%Y-%m-%dT%H:%M:%S").to_string();
+
+    tracing::warn!(
+        invoice_id,
+        attempt = new_count,
+        retry_at = %retry_at_str,
+        "Scheduling Luma registration retry"
+    );
+
+    sqlx::query(
+        "UPDATE invoices SET luma_registration_status = 'retry', luma_retry_count = ?, luma_retry_at = ? WHERE id = ?"
+    )
+    .bind(new_count)
+    .bind(&retry_at_str)
+    .bind(invoice_id)
+    .execute(pool)
+    .await
+    .ok();
+}
+
+async fn retry_due_luma_registrations(config: &Config, pool: &SqlitePool, http: &reqwest::Client) {
+    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+
+    let rows: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT i.id, i.product_id, i.price_id FROM invoices i
+         WHERE i.luma_registration_status = 'retry'
+         AND i.luma_retry_at IS NOT NULL
+         AND i.luma_retry_at <= ?
+         AND i.status IN ('detected', 'confirmed')"
+    )
+    .bind(&now)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    if rows.is_empty() {
+        return;
+    }
+
+    tracing::info!(count = rows.len(), "Processing due Luma registration retries");
+
+    for (invoice_id, product_id, price_id) in rows {
+        let product_id = match product_id {
+            Some(pid) => pid,
+            None => continue,
+        };
+
+        let invoice = match invoices::get_invoice(pool, &invoice_id).await {
+            Ok(Some(inv)) => inv,
+            _ => continue,
+        };
+
+        let luma_info: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT e.luma_event_id, p.luma_ticket_type_id
+             FROM events e
+             LEFT JOIN prices p ON p.id = ?
+             WHERE e.product_id = ?",
+        )
+        .bind(price_id.as_deref())
+        .bind(&product_id)
+        .fetch_optional(pool)
+        .await
+        .unwrap_or(None);
+
+        let luma_event_id = luma_info.as_ref().and_then(|r| r.0.as_ref());
+        if let Some(luma_eid) = luma_event_id {
+            tracing::info!(invoice_id = %invoice.id, attempt = "retry", "Retrying Luma registration");
+            handle_luma_registration(
+                pool, http, config, &invoice,
+                luma_eid,
+                luma_info.as_ref().and_then(|r| r.1.as_deref()),
+            ).await;
+        }
+    }
+}
+
+async fn mark_luma_failed(pool: &SqlitePool, invoice_id: &str) {
+    sqlx::query("UPDATE invoices SET luma_registration_status = 'failed', luma_retry_at = NULL WHERE id = ?")
+        .bind(invoice_id)
+        .execute(pool)
+        .await
+        .ok();
 }
 
 /// After a merchant payment is detected, try to decrypt the same tx against

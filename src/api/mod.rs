@@ -2,6 +2,7 @@ pub mod admin;
 pub mod auth;
 pub mod events;
 pub mod invoices;
+pub mod luma;
 pub mod merchants;
 pub mod prices;
 pub mod products;
@@ -95,6 +96,11 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/tickets", web::get().to(tickets::list))
             .route("/tickets/{id}/void", web::post().to(tickets::void))
             .route("/rates", web::get().to(rates::get))
+            // Luma integration
+            .route("/luma/events", web::get().to(luma::list_events))
+            .route("/luma/import", web::post().to(luma::import_event))
+            .route("/luma/sync/{event_id}", web::post().to(luma::sync_event))
+            .route("/invoices/{id}/luma-pass", web::get().to(luma::luma_pass))
             // x402 facilitator
             .route("/x402/verify", web::post().to(x402::verify))
             // Admin endpoints (protected by ADMIN_KEY)
@@ -187,15 +193,37 @@ async fn checkout(
         }));
     };
 
+    // Resolve Luma status early (needed for capacity check and attendee validation)
+    let is_luma_event: bool = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT luma_event_id FROM events WHERE product_id = ? AND luma_event_id IS NOT NULL",
+    )
+    .bind(&product.id)
+    .fetch_optional(pool.get_ref())
+    .await
+    .ok()
+    .flatten()
+    .flatten()
+    .is_some();
+
     // Enforce max_quantity: reject checkout if this tier is sold out
     if let (Some(max_qty), Some(ref pid)) = (resolved_max_qty, &resolved_price_id) {
-        let sold: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM tickets WHERE price_id = ? AND status != 'void'"
-        )
-        .bind(pid)
-        .fetch_one(pool.get_ref())
-        .await
-        .unwrap_or(0);
+        let sold: i64 = if is_luma_event {
+            sqlx::query_scalar(
+                "SELECT COUNT(*) FROM invoices WHERE price_id = ? AND status NOT IN ('expired', 'refunded')"
+            )
+            .bind(pid)
+            .fetch_one(pool.get_ref())
+            .await
+            .unwrap_or(0)
+        } else {
+            sqlx::query_scalar(
+                "SELECT COUNT(*) FROM tickets WHERE price_id = ? AND status != 'void'"
+            )
+            .bind(pid)
+            .fetch_one(pool.get_ref())
+            .await
+            .unwrap_or(0)
+        };
 
         if sold >= max_qty {
             return actix_web::HttpResponse::Conflict().json(serde_json::json!({
@@ -206,7 +234,6 @@ async fn checkout(
     }
 
     // Real-time event expiry check: block ticket sales for past events
-    // (supplements the hourly sweep so there's no window for late sales)
     let event_row: Option<(String, Option<String>)> = sqlx::query_as(
         "SELECT status, event_date FROM events WHERE product_id = ? LIMIT 1"
     )
@@ -227,7 +254,6 @@ async fn checkout(
             {
                 let event_utc = dt.and_utc();
                 if event_utc < chrono::Utc::now() {
-                    // Mark as past in real-time (fire-and-forget)
                     let pool_bg = pool.clone();
                     let pid = product.id.clone();
                     tokio::spawn(async move {
@@ -240,6 +266,30 @@ async fn checkout(
                         "error": "Event has ended"
                     }));
                 }
+            }
+        }
+    }
+
+    if is_luma_event {
+        match &body.attendee_email {
+            Some(email) if !email.is_empty() => {
+                if !email.contains('@') || email.len() > 254 {
+                    return actix_web::HttpResponse::BadRequest().json(serde_json::json!({
+                        "error": "Valid email is required for Luma event registration"
+                    }));
+                }
+            }
+            _ => {
+                return actix_web::HttpResponse::BadRequest().json(serde_json::json!({
+                    "error": "attendee_email is required for Luma event registration"
+                }));
+            }
+        }
+        if let Some(ref name) = body.attendee_name {
+            if name.len() > 200 {
+                return actix_web::HttpResponse::BadRequest().json(serde_json::json!({
+                    "error": "attendee_name must be 200 characters or fewer"
+                }));
             }
         }
     }
@@ -313,7 +363,34 @@ async fn checkout(
     .await
     {
         Ok(resp) => {
-            let mut payload = serde_json::to_value(resp).unwrap_or_else(|_| serde_json::json!({}));
+            // Store encrypted attendee PII for Luma events
+            if is_luma_event {
+                let enc_key = &config.encryption_key;
+                let enc_name = body.attendee_name.as_deref()
+                    .filter(|n| !n.is_empty())
+                    .map(|n| if enc_key.is_empty() { Ok(n.to_string()) } else { crate::crypto::encrypt(n, enc_key) })
+                    .transpose()
+                    .ok()
+                    .flatten();
+                let enc_email = body.attendee_email.as_deref()
+                    .filter(|e| !e.is_empty())
+                    .map(|e| if enc_key.is_empty() { Ok(e.to_string()) } else { crate::crypto::encrypt(e, enc_key) })
+                    .transpose()
+                    .ok()
+                    .flatten();
+
+                sqlx::query(
+                    "UPDATE invoices SET attendee_name = ?, attendee_email = ?, luma_registration_status = 'pending' WHERE id = ?",
+                )
+                .bind(&enc_name)
+                .bind(&enc_email)
+                .bind(&resp.invoice_id)
+                .execute(pool.get_ref())
+                .await
+                .ok();
+            }
+
+            let mut payload = serde_json::to_value(&resp).unwrap_or_else(|_| serde_json::json!({}));
             if let Some(obj) = payload.as_object_mut() {
                 obj.insert("price_label".to_string(), serde_json::to_value(resolved_price_label).unwrap_or(serde_json::Value::Null));
                 if let Ok(Some(ctx)) = crate::events::get_event_context_by_product(pool.get_ref(), &product.id).await {
@@ -321,6 +398,7 @@ async fn checkout(
                     obj.insert("event_date".to_string(), serde_json::to_value(ctx.event_date).unwrap_or(serde_json::Value::Null));
                     obj.insert("event_location".to_string(), serde_json::to_value(ctx.event_location).unwrap_or(serde_json::Value::Null));
                 }
+                obj.insert("is_luma".to_string(), serde_json::json!(is_luma_event));
             }
             actix_web::HttpResponse::Created().json(payload)
         }
@@ -339,6 +417,8 @@ struct CheckoutRequest {
     price_id: Option<String>,
     variant: Option<String>,
     refund_address: Option<String>,
+    attendee_name: Option<String>,
+    attendee_email: Option<String>,
 }
 
 fn validate_checkout(req: &CheckoutRequest) -> Result<(), crate::validation::ValidationError> {
