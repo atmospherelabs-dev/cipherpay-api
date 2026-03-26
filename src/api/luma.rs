@@ -2,8 +2,14 @@ use actix_web::{web, HttpRequest, HttpResponse};
 use sqlx::SqlitePool;
 
 use crate::config::Config;
+use crate::events::parse_event_datetime;
 
 use super::auth::resolve_session;
+
+/// Normalize a Luma ISO 8601 datetime (e.g. "2026-04-01T15:00:00.000Z") to "YYYY-MM-DDTHH:MM"
+fn normalize_luma_date(s: &str) -> Option<String> {
+    parse_event_datetime(s).map(|dt| dt.format("%Y-%m-%dT%H:%M").to_string())
+}
 
 /// GET /api/luma/events -- list importable Luma events for the authenticated merchant
 pub async fn list_events(
@@ -44,10 +50,21 @@ pub async fn list_events(
             .into_iter()
             .collect();
 
+    let now = chrono::Utc::now().naive_utc();
+
     let mut result = Vec::new();
     for ev in events {
         if already_imported.contains(&ev.api_id) {
             continue;
+        }
+
+        // Skip past events
+        if let Some(ref start) = ev.start_at {
+            if let Some(dt) = parse_event_datetime(start) {
+                if dt < now {
+                    continue;
+                }
+            }
         }
 
         let tiers = match crate::luma::list_ticket_types(&http, &api_key, &ev.api_id).await {
@@ -158,10 +175,12 @@ pub async fn import_event(
         }
     }).collect();
 
+    let event_date = luma_event.start_at.as_deref().and_then(normalize_luma_date);
+
     let create_req = crate::events::CreateEventRequest {
         title: luma_event.name.clone(),
         description: None,
-        event_date: luma_event.start_at.clone(),
+        event_date,
         event_location: location,
         prices,
     };
@@ -337,10 +356,49 @@ pub async fn sync_event(
         }
     };
 
-    let luma_event = match events.into_iter().find(|e| e.api_id == luma_event_id) {
+    let luma_event = events.into_iter().find(|e| e.api_id == luma_event_id);
+
+    // Event gone from Luma (cancelled/deleted) → auto-cancel on CipherPay
+    let luma_event = match luma_event {
         Some(e) => e,
-        None => return HttpResponse::NotFound().json(serde_json::json!({"error": "Luma event no longer exists"})),
+        None => {
+            tracing::info!(event_id = %event_id, "Luma event no longer exists, cancelling locally");
+            match crate::events::archive_event(pool.get_ref(), &merchant.id, &event_id).await {
+                Ok(_) => return HttpResponse::Ok().json(serde_json::json!({
+                    "cancelled": true,
+                    "reason": "Event no longer exists on Luma",
+                })),
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to cancel event after Luma removal");
+                    return HttpResponse::InternalServerError().json(serde_json::json!({"error": "Failed to cancel event"}));
+                }
+            }
+        }
     };
+
+    // Event date has passed → transition to 'past' status
+    let now = chrono::Utc::now().naive_utc();
+    if let Some(ref start) = luma_event.start_at {
+        if let Some(dt) = parse_event_datetime(start) {
+            if dt < now {
+                tracing::info!(event_id = %event_id, "Luma event date has passed, marking as past");
+                sqlx::query("UPDATE events SET status = 'past' WHERE id = ? AND status != 'cancelled'")
+                    .bind(&event_id)
+                    .execute(pool.get_ref())
+                    .await
+                    .ok();
+                sqlx::query("UPDATE products SET active = 0 WHERE id = ?")
+                    .bind(&product_id)
+                    .execute(pool.get_ref())
+                    .await
+                    .ok();
+                return HttpResponse::Ok().json(serde_json::json!({
+                    "past": true,
+                    "reason": "Event date has passed",
+                }));
+            }
+        }
+    }
 
     let ticket_types = crate::luma::list_ticket_types(&http, &api_key, &luma_event_id)
         .await
@@ -353,11 +411,13 @@ pub async fn sync_event(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
+    let synced_date = luma_event.start_at.as_deref().and_then(normalize_luma_date);
+
     sqlx::query(
         "UPDATE events SET title = ?, event_date = ?, event_location = ?, luma_event_url = ? WHERE id = ?",
     )
     .bind(&luma_event.name)
-    .bind(&luma_event.start_at)
+    .bind(&synced_date)
     .bind(&location)
     .bind(&luma_event.url)
     .bind(&event_id)

@@ -86,6 +86,13 @@ pub struct EventDetailResponse {
 /// Parse event_date strings in either "YYYY-MM-DDTHH:MM:SS" or "YYYY-MM-DDTHH:MM" format.
 /// Returns the parsed NaiveDateTime if valid.
 pub fn parse_event_datetime(s: &str) -> Option<chrono::NaiveDateTime> {
+    // Strip trailing 'Z' and fractional seconds to normalize ISO 8601 variants
+    let s = s.trim_end_matches('Z');
+    let s = if let Some(dot) = s.rfind('.') {
+        &s[..dot]
+    } else {
+        s
+    };
     chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S")
         .or_else(|_| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M"))
         .ok()
@@ -182,8 +189,14 @@ pub async fn list_events_for_merchant(pool: &SqlitePool, merchant_id: &str) -> a
     let rows = sqlx::query_as::<_, EventSummary>(
         "SELECT
             e.id, e.product_id, e.title, e.description, e.event_date, e.event_location, e.status, e.created_at,
-            (SELECT COUNT(*) FROM tickets t WHERE t.product_id = e.product_id AND t.status != 'void') AS sold_count,
-            (SELECT COUNT(*) FROM tickets t WHERE t.product_id = e.product_id AND t.status = 'used') AS used_count,
+            CASE WHEN e.luma_event_id IS NOT NULL
+              THEN (SELECT COUNT(*) FROM invoices i WHERE i.product_id = e.product_id AND i.status = 'confirmed')
+              ELSE (SELECT COUNT(*) FROM tickets t WHERE t.product_id = e.product_id AND t.status != 'void')
+            END AS sold_count,
+            CASE WHEN e.luma_event_id IS NOT NULL
+              THEN 0
+              ELSE (SELECT COUNT(*) FROM tickets t WHERE t.product_id = e.product_id AND t.status = 'used')
+            END AS used_count,
             (SELECT CASE
                WHEN EXISTS (SELECT 1 FROM prices WHERE product_id = e.product_id AND active = 1 AND max_quantity IS NULL)
                THEN NULL
@@ -351,6 +364,16 @@ pub async fn archive_event(
         .execute(&mut *tx)
         .await?;
 
+    // Void all outstanding tickets for this event
+    sqlx::query(
+        "UPDATE tickets SET status = 'void'
+         WHERE product_id = ? AND merchant_id = ? AND status = 'valid'"
+    )
+    .bind(&product_id)
+    .bind(merchant_id)
+    .execute(&mut *tx)
+    .await?;
+
     tx.commit().await?;
     Ok(true)
 }
@@ -445,18 +468,42 @@ pub async fn update_event(
 }
 
 pub async fn get_event_tier_stats(pool: &SqlitePool, product_id: &str) -> anyhow::Result<Vec<EventTierStat>> {
-    let rows = sqlx::query_as::<_, EventTierStat>(
-        "SELECT
-            pr.id AS price_id, pr.label, pr.currency, pr.unit_amount, pr.max_quantity,
-            (SELECT COUNT(*) FROM tickets t WHERE t.price_id = pr.id AND t.status != 'void') AS sold_count,
-            (SELECT COUNT(*) FROM tickets t WHERE t.price_id = pr.id AND t.status = 'used') AS used_count
-         FROM prices pr
-         WHERE pr.product_id = ? AND pr.active = 1
-         ORDER BY pr.unit_amount ASC"
+    let is_luma: bool = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT luma_event_id FROM events WHERE product_id = ? LIMIT 1"
     )
     .bind(product_id)
-    .fetch_all(pool)
-    .await?;
+    .fetch_optional(pool)
+    .await?
+    .flatten()
+    .is_some();
+
+    let rows = if is_luma {
+        sqlx::query_as::<_, EventTierStat>(
+            "SELECT
+                pr.id AS price_id, pr.label, pr.currency, pr.unit_amount, pr.max_quantity,
+                (SELECT COUNT(*) FROM invoices i WHERE i.price_id = pr.id AND i.status = 'confirmed') AS sold_count,
+                0 AS used_count
+             FROM prices pr
+             WHERE pr.product_id = ? AND pr.active = 1
+             ORDER BY pr.unit_amount ASC"
+        )
+        .bind(product_id)
+        .fetch_all(pool)
+        .await?
+    } else {
+        sqlx::query_as::<_, EventTierStat>(
+            "SELECT
+                pr.id AS price_id, pr.label, pr.currency, pr.unit_amount, pr.max_quantity,
+                (SELECT COUNT(*) FROM tickets t WHERE t.price_id = pr.id AND t.status != 'void') AS sold_count,
+                (SELECT COUNT(*) FROM tickets t WHERE t.price_id = pr.id AND t.status = 'used') AS used_count
+             FROM prices pr
+             WHERE pr.product_id = ? AND pr.active = 1
+             ORDER BY pr.unit_amount ASC"
+        )
+        .bind(product_id)
+        .fetch_all(pool)
+        .await?
+    };
 
     Ok(rows)
 }
