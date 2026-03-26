@@ -210,6 +210,31 @@ pub async fn my_invoices(
                 .into_iter()
                 .collect();
 
+            let price_ids: Vec<String> = invoices
+                .iter()
+                .filter_map(|inv| inv.price_id.clone())
+                .collect();
+            let price_labels: std::collections::HashMap<String, String> = if price_ids.is_empty() {
+                std::collections::HashMap::new()
+            } else {
+                use sqlx::Row;
+                let placeholders = price_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+                let query_str = format!(
+                    "SELECT id, label FROM prices WHERE id IN ({}) AND label IS NOT NULL",
+                    placeholders
+                );
+                let mut q = sqlx::query(&query_str);
+                for pid in &price_ids {
+                    q = q.bind(pid);
+                }
+                q.fetch_all(pool.get_ref())
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|r| (r.get::<String, _>("id"), r.get::<String, _>("label")))
+                    .collect()
+            };
+
             let enriched: Vec<serde_json::Value> = invoices
                 .iter()
                 .map(|inv| {
@@ -227,6 +252,8 @@ pub async fn my_invoices(
                             .unwrap_or(false);
                         map.insert("is_event".into(), serde_json::json!(is_event));
                         map.insert("is_luma".into(), serde_json::json!(is_luma));
+                        let label = inv.price_id.as_ref().and_then(|pid| price_labels.get(pid));
+                        map.insert("price_label".into(), serde_json::json!(label));
                     }
                     val
                 })

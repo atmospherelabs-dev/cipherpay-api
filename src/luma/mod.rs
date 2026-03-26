@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 
-const LUMA_BASE: &str = "https://public-api.lu.ma/public/v3";
+const LUMA_BASE: &str = "https://public-api.luma.com/v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LumaEvent {
@@ -203,17 +203,19 @@ pub async fn add_guest(
     if let Some(n) = name {
         guest["name"] = serde_json::json!(n);
     }
-    if let Some(tt) = ticket_type_id {
-        guest["ticket_type_api_id"] = serde_json::json!(tt);
-    }
 
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "event_api_id": event_api_id,
         "guests": [guest],
     });
 
+    // Ticket type goes at root level per Luma v1 docs
+    if let Some(tt) = ticket_type_id {
+        body["ticket"] = serde_json::json!({ "event_ticket_type_id": tt });
+    }
+
     let resp = http
-        .post(format!("{}/event/guests/add", LUMA_BASE))
+        .post(format!("{}/event/add-guests", LUMA_BASE))
         .header("x-luma-api-key", api_key)
         .json(&body)
         .send()
@@ -226,17 +228,17 @@ pub async fn add_guest(
         return Err(anyhow!("Luma add-guests failed ({}): {}", status, body));
     }
 
+    // v1 API returns {} on success; extract guest data if present, otherwise treat as success
     let data: AddGuestsResponseWrapper = resp.json().await
         .map_err(|e| anyhow!("Failed to parse Luma add-guests response: {}", e))?;
 
     let guest = data.entries
         .and_then(|e| e.into_iter().next())
-        .and_then(|e| e.guest)
-        .ok_or_else(|| anyhow!("Luma add-guests returned empty response"))?;
+        .and_then(|e| e.guest);
 
     Ok(AddGuestResponse {
-        api_id: guest.api_id,
-        approval_status: guest.approval_status,
+        api_id: guest.as_ref().and_then(|g| g.api_id.clone()),
+        approval_status: guest.as_ref().and_then(|g| g.approval_status.clone()),
     })
 }
 
@@ -247,7 +249,7 @@ pub async fn get_guest(
     email: &str,
 ) -> Result<Option<LumaGuest>> {
     let resp = http
-        .get(format!("{}/event/guests/list", LUMA_BASE))
+        .get(format!("{}/event/get-guests", LUMA_BASE))
         .header("x-luma-api-key", api_key)
         .query(&[("event_api_id", event_api_id), ("email", email)])
         .send()

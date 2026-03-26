@@ -476,15 +476,18 @@ async fn list_invoices(
     };
 
     let rows = sqlx::query(
-        "SELECT id, merchant_id, memo_code, product_id, product_name, size,
-         price_eur, price_usd, currency, price_zec, zec_rate_at_creation,
-         amount, price_id,
+        "SELECT invoices.id, invoices.merchant_id, memo_code, invoices.product_id, product_name, size,
+         price_eur, price_usd, invoices.currency, price_zec, zec_rate_at_creation,
+         amount, invoices.price_id,
          payment_address, zcash_uri,
          status, detected_txid,
          detected_at, expires_at, confirmed_at, refunded_at,
-         refund_address, created_at, price_zatoshis, received_zatoshis,
-         (EXISTS (SELECT 1 FROM events WHERE product_id = invoices.product_id)) AS is_event
-         FROM invoices WHERE merchant_id = ? ORDER BY created_at DESC LIMIT 50",
+         refund_address, invoices.created_at, price_zatoshis, received_zatoshis,
+         (EXISTS (SELECT 1 FROM events WHERE product_id = invoices.product_id)) AS is_event,
+         pr.label AS price_label
+         FROM invoices
+         LEFT JOIN prices pr ON pr.id = invoices.price_id
+         WHERE invoices.merchant_id = ? ORDER BY invoices.created_at DESC LIMIT 50",
     )
     .bind(&merchant.id)
     .fetch_all(pool.get_ref())
@@ -527,6 +530,7 @@ async fn list_invoices(
                         "received_zatoshis": rz,
                         "overpaid": rz > pz + 1000 && pz > 0,
                         "is_event": r.get::<bool, _>("is_event"),
+                        "price_label": r.get::<Option<String>, _>("price_label"),
                     })
                 })
                 .collect();
