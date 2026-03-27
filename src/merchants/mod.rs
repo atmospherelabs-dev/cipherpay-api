@@ -260,6 +260,10 @@ pub async fn regenerate_dashboard_token(pool: &SqlitePool, merchant_id: &str) ->
         .bind(merchant_id)
         .execute(pool)
         .await?;
+    let _ = sqlx::query("DELETE FROM agent_sessions WHERE merchant_id = ?")
+        .bind(merchant_id)
+        .execute(pool)
+        .await;
 
     tracing::info!(merchant_id, "Dashboard token regenerated, all sessions invalidated");
     Ok(new_token)
@@ -353,6 +357,8 @@ pub async fn delete_merchant(pool: &SqlitePool, merchant_id: &str) -> anyhow::Re
 
     sqlx::query("DELETE FROM sessions WHERE merchant_id = ?")
         .bind(merchant_id).execute(&mut *conn).await?;
+    let _ = sqlx::query("DELETE FROM agent_sessions WHERE merchant_id = ?")
+        .bind(merchant_id).execute(&mut *conn).await;
     sqlx::query("DELETE FROM recovery_tokens WHERE merchant_id = ?")
         .bind(merchant_id).execute(&mut *conn).await?;
     sqlx::query("DELETE FROM fee_ledger WHERE merchant_id = ?")

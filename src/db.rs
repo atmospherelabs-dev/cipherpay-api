@@ -641,9 +641,9 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
     sqlx::query("ALTER TABLE x402_verifications ADD COLUMN protocol TEXT NOT NULL DEFAULT 'x402'")
         .execute(&pool).await.ok();
 
-    // Sessions table (agentic prepaid credit)
+    // Agent sessions table (agentic prepaid credit)
     sqlx::query(
-        "CREATE TABLE IF NOT EXISTS sessions (
+        "CREATE TABLE IF NOT EXISTS agent_sessions (
             id TEXT PRIMARY KEY,
             merchant_id TEXT NOT NULL REFERENCES merchants(id),
             deposit_txid TEXT NOT NULL,
@@ -663,9 +663,9 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
     .await
     .ok();
 
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(bearer_token)")
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_agent_sessions_token ON agent_sessions(bearer_token)")
         .execute(&pool).await.ok();
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_sessions_merchant ON sessions(merchant_id, status)")
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_agent_sessions_merchant ON agent_sessions(merchant_id, status)")
         .execute(&pool).await.ok();
 
     // Price type columns (one_time vs recurring)
@@ -923,12 +923,18 @@ pub async fn set_scanner_state(pool: &SqlitePool, key: &str, value: &str) -> any
 pub async fn run_data_purge(pool: &SqlitePool, purge_days: i64) -> anyhow::Result<()> {
     let cutoff = format!("-{} days", purge_days);
 
-    // Expired sessions + closed/depleted sessions older than cutoff
-    let sessions = sqlx::query(
-        "DELETE FROM sessions WHERE
+    // Expired agent sessions + closed/depleted sessions older than cutoff
+    let agent_sessions_purged = sqlx::query(
+        "DELETE FROM agent_sessions WHERE
             expires_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
             OR (status IN ('closed', 'depleted') AND created_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?))"
-    ).bind(&cutoff).execute(pool).await?;
+    ).bind(&cutoff).execute(pool).await
+    .map(|r| r.rows_affected()).unwrap_or(0);
+
+    // Expired dashboard login sessions
+    let _ = sqlx::query(
+        "DELETE FROM sessions WHERE expires_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
+    ).execute(pool).await;
 
     // Expired recovery tokens
     let tokens = sqlx::query(
@@ -947,13 +953,13 @@ pub async fn run_data_purge(pool: &SqlitePool, purge_days: i64) -> anyhow::Resul
          AND created_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?)"
     ).bind(&cutoff).execute(pool).await?;
 
-    let total = sessions.rows_affected()
+    let total = agent_sessions_purged
         + tokens.rows_affected()
         + webhooks.rows_affected()
         + tickets.rows_affected();
     if total > 0 {
         tracing::info!(
-            sessions = sessions.rows_affected(),
+            agent_sessions = agent_sessions_purged,
             tokens = tokens.rows_affected(),
             webhooks = webhooks.rows_affected(),
             tickets = tickets.rows_affected(),

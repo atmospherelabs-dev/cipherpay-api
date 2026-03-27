@@ -40,7 +40,7 @@ pub async fn create_session(
     let bearer_token = generate_token();
 
     sqlx::query(
-        "INSERT INTO sessions (id, merchant_id, deposit_txid, bearer_token, balance_zatoshis, balance_remaining, cost_per_request, requests_made, refund_address, status, expires_at)
+        "INSERT INTO agent_sessions (id, merchant_id, deposit_txid, bearer_token, balance_zatoshis, balance_remaining, cost_per_request, requests_made, refund_address, status, expires_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, 'active', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '+' || ? || ' hours'))"
     )
     .bind(&id)
@@ -72,7 +72,7 @@ pub async fn create_session(
 pub async fn get_session(pool: &SqlitePool, session_id: &str) -> Result<Option<Session>> {
     let row = sqlx::query_as::<_, (String, String, String, String, i64, i64, i64, i64, Option<String>, String, String, String, Option<String>)>(
         "SELECT id, merchant_id, deposit_txid, bearer_token, balance_zatoshis, balance_remaining, cost_per_request, requests_made, refund_address, status, expires_at, created_at, closed_at
-         FROM sessions WHERE id = ?"
+         FROM agent_sessions WHERE id = ?"
     )
     .bind(session_id)
     .fetch_optional(pool)
@@ -99,7 +99,7 @@ pub async fn validate_and_deduct(pool: &SqlitePool, bearer_token: &str) -> Resul
     // Atomic deduction: single UPDATE with WHERE guards prevents race conditions.
     // If balance < cost or session is expired/inactive, rows_affected == 0.
     let result = sqlx::query(
-        "UPDATE sessions SET
+        "UPDATE agent_sessions SET
             balance_remaining = balance_remaining - cost_per_request,
             requests_made = requests_made + 1
          WHERE bearer_token = ?
@@ -114,7 +114,7 @@ pub async fn validate_and_deduct(pool: &SqlitePool, bearer_token: &str) -> Resul
     if result.rows_affected() == 0 {
         // Mark depleted/expired sessions so they don't linger
         sqlx::query(
-            "UPDATE sessions SET status = CASE
+            "UPDATE agent_sessions SET status = CASE
                 WHEN expires_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now') THEN 'expired'
                 WHEN balance_remaining < cost_per_request THEN 'depleted'
                 ELSE status END
@@ -131,7 +131,7 @@ pub async fn validate_and_deduct(pool: &SqlitePool, bearer_token: &str) -> Resul
     // Read back the updated session state
     let row = sqlx::query_as::<_, (String, String, i64, i64, i64, Option<String>)>(
         "SELECT id, merchant_id, balance_remaining, cost_per_request, requests_made, refund_address
-         FROM sessions WHERE bearer_token = ?"
+         FROM agent_sessions WHERE bearer_token = ?"
     )
     .bind(bearer_token)
     .fetch_optional(pool)
@@ -177,7 +177,7 @@ pub async fn close_session(pool: &SqlitePool, session_id: &str) -> Result<Option
     };
 
     sqlx::query(
-        "UPDATE sessions SET status = 'closed', closed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?"
+        "UPDATE agent_sessions SET status = 'closed', closed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?"
     )
     .bind(session_id)
     .execute(pool)
@@ -219,7 +219,7 @@ pub async fn get_summary(pool: &SqlitePool, session_id: &str) -> Result<Option<S
 pub async fn list_for_merchant(pool: &SqlitePool, merchant_id: &str) -> Result<Vec<Session>> {
     let rows = sqlx::query_as::<_, (String, String, String, String, i64, i64, i64, i64, Option<String>, String, String, String, Option<String>)>(
         "SELECT id, merchant_id, deposit_txid, bearer_token, balance_zatoshis, balance_remaining, cost_per_request, requests_made, refund_address, status, expires_at, created_at, closed_at
-         FROM sessions WHERE merchant_id = ? ORDER BY created_at DESC LIMIT 100"
+         FROM agent_sessions WHERE merchant_id = ? ORDER BY created_at DESC LIMIT 100"
     )
     .bind(merchant_id)
     .fetch_all(pool)
@@ -245,7 +245,7 @@ pub async fn list_for_merchant(pool: &SqlitePool, merchant_id: &str) -> Result<V
 /// Check if a deposit txid has already been used for a session
 pub async fn txid_already_used(pool: &SqlitePool, txid: &str) -> bool {
     sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM sessions WHERE deposit_txid = ?"
+        "SELECT COUNT(*) FROM agent_sessions WHERE deposit_txid = ?"
     )
     .bind(txid)
     .fetch_one(pool)
