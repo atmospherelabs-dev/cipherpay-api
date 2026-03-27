@@ -96,56 +96,67 @@ pub async fn get_session(pool: &SqlitePool, session_id: &str) -> Result<Option<S
 }
 
 pub async fn validate_and_deduct(pool: &SqlitePool, bearer_token: &str) -> Result<Option<Session>> {
-    // Expire stale sessions first
-    sqlx::query("UPDATE sessions SET status = 'expired' WHERE status = 'active' AND expires_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now')")
-        .execute(pool).await.ok();
+    // Atomic deduction: single UPDATE with WHERE guards prevents race conditions.
+    // If balance < cost or session is expired/inactive, rows_affected == 0.
+    let result = sqlx::query(
+        "UPDATE sessions SET
+            balance_remaining = balance_remaining - cost_per_request,
+            requests_made = requests_made + 1
+         WHERE bearer_token = ?
+           AND status = 'active'
+           AND balance_remaining >= cost_per_request
+           AND expires_at >= strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
+    )
+    .bind(bearer_token)
+    .execute(pool)
+    .await?;
 
-    let session = sqlx::query_as::<_, (String, String, i64, i64, i64, String, Option<String>)>(
-        "SELECT id, merchant_id, balance_remaining, cost_per_request, requests_made, status, refund_address
-         FROM sessions WHERE bearer_token = ? AND status = 'active'"
+    if result.rows_affected() == 0 {
+        // Mark depleted/expired sessions so they don't linger
+        sqlx::query(
+            "UPDATE sessions SET status = CASE
+                WHEN expires_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now') THEN 'expired'
+                WHEN balance_remaining < cost_per_request THEN 'depleted'
+                ELSE status END
+             WHERE bearer_token = ? AND status = 'active'"
+        )
+        .bind(bearer_token)
+        .execute(pool)
+        .await
+        .ok();
+
+        return Ok(None);
+    }
+
+    // Read back the updated session state
+    let row = sqlx::query_as::<_, (String, String, i64, i64, i64, Option<String>)>(
+        "SELECT id, merchant_id, balance_remaining, cost_per_request, requests_made, refund_address
+         FROM sessions WHERE bearer_token = ?"
     )
     .bind(bearer_token)
     .fetch_optional(pool)
     .await?;
 
-    let (id, merchant_id, remaining, cost, requests, _status, refund_address) = match session {
-        Some(s) => s,
-        None => return Ok(None),
-    };
-
-    if remaining < cost {
-        sqlx::query("UPDATE sessions SET status = 'depleted' WHERE id = ?")
-            .bind(&id).execute(pool).await.ok();
-        return Ok(None);
+    match row {
+        Some((id, merchant_id, balance_remaining, cost_per_request, requests_made, refund_address)) => {
+            Ok(Some(Session {
+                id,
+                merchant_id,
+                deposit_txid: String::new(),
+                bearer_token: bearer_token.to_string(),
+                balance_zatoshis: 0,
+                balance_remaining,
+                cost_per_request,
+                requests_made,
+                refund_address,
+                status: "active".to_string(),
+                expires_at: String::new(),
+                created_at: String::new(),
+                closed_at: None,
+            }))
+        }
+        None => Ok(None),
     }
-
-    let new_remaining = remaining - cost;
-    let new_requests = requests + 1;
-
-    sqlx::query(
-        "UPDATE sessions SET balance_remaining = ?, requests_made = ? WHERE id = ?"
-    )
-    .bind(new_remaining)
-    .bind(new_requests)
-    .bind(&id)
-    .execute(pool)
-    .await?;
-
-    Ok(Some(Session {
-        id: id.clone(),
-        merchant_id,
-        deposit_txid: String::new(),
-        bearer_token: bearer_token.to_string(),
-        balance_zatoshis: 0,
-        balance_remaining: new_remaining,
-        cost_per_request: cost,
-        requests_made: new_requests,
-        refund_address,
-        status: "active".to_string(),
-        expires_at: String::new(),
-        created_at: String::new(),
-        closed_at: None,
-    }))
 }
 
 pub async fn close_session(pool: &SqlitePool, session_id: &str) -> Result<Option<SessionSummary>> {
@@ -243,13 +254,7 @@ pub async fn txid_already_used(pool: &SqlitePool, txid: &str) -> bool {
 }
 
 fn generate_token() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let seed = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-
     let uuid1 = uuid::Uuid::new_v4();
     let uuid2 = uuid::Uuid::new_v4();
-    format!("cps_{:x}{}{}", seed, uuid1.simple(), uuid2.simple())
+    format!("cps_{}{}", uuid1.simple(), uuid2.simple())
 }
