@@ -204,6 +204,33 @@ pub async fn get_summary(pool: &SqlitePool, session_id: &str) -> Result<Option<S
     }))
 }
 
+/// List sessions for a merchant (dashboard view)
+pub async fn list_for_merchant(pool: &SqlitePool, merchant_id: &str) -> Result<Vec<Session>> {
+    let rows = sqlx::query_as::<_, (String, String, String, String, i64, i64, i64, i64, Option<String>, String, String, String, Option<String>)>(
+        "SELECT id, merchant_id, deposit_txid, bearer_token, balance_zatoshis, balance_remaining, cost_per_request, requests_made, refund_address, status, expires_at, created_at, closed_at
+         FROM sessions WHERE merchant_id = ? ORDER BY created_at DESC LIMIT 100"
+    )
+    .bind(merchant_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows.into_iter().map(|r| Session {
+        id: r.0,
+        merchant_id: r.1,
+        deposit_txid: r.2,
+        bearer_token: r.3,
+        balance_zatoshis: r.4,
+        balance_remaining: r.5,
+        cost_per_request: r.6,
+        requests_made: r.7,
+        refund_address: r.8,
+        status: r.9,
+        expires_at: r.10,
+        created_at: r.11,
+        closed_at: r.12,
+    }).collect())
+}
+
 /// Check if a deposit txid has already been used for a session
 pub async fn txid_already_used(pool: &SqlitePool, txid: &str) -> bool {
     sqlx::query_scalar::<_, i64>(
