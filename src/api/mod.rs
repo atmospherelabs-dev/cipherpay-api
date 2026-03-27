@@ -28,6 +28,12 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .finish()
         .expect("Failed to build auth rate limiter");
 
+    let session_rate_limit = GovernorConfigBuilder::default()
+        .seconds_per_request(30)
+        .burst_size(3)
+        .finish()
+        .expect("Failed to build session rate limiter");
+
     cfg.service(
         web::scope("/api")
             .route("/health", web::get().to(health))
@@ -106,10 +112,13 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             // x402 facilitator
             .route("/x402/verify", web::post().to(x402::verify))
             // Session endpoints (agentic prepaid credit)
-            .route("/sessions/open", web::post().to(sessions::open))
-            .route("/sessions/validate", web::get().to(sessions::validate))
-            .route("/sessions/{id}", web::get().to(sessions::get_status))
-            .route("/sessions/{id}/close", web::post().to(sessions::close))
+            .service(
+                web::scope("/sessions")
+                    .route("/open", web::post().to(sessions::open).wrap(Governor::new(&session_rate_limit)))
+                    .route("/validate", web::get().to(sessions::validate))
+                    .route("/{id}", web::get().to(sessions::get_status))
+                    .route("/{id}/close", web::post().to(sessions::close))
+            )
             // Admin endpoints (protected by ADMIN_KEY)
             .route("/admin/auth", web::post().to(admin::auth_check))
             .route("/admin/stats", web::get().to(admin::stats))

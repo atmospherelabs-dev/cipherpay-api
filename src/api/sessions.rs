@@ -26,6 +26,14 @@ pub async fn open(
         }));
     }
 
+    if let Some(ref addr) = body.refund_address {
+        if !addr.is_empty() {
+            if let Err(e) = crate::validation::validate_zcash_address("refund_address", addr) {
+                return HttpResponse::BadRequest().json(e.to_json());
+            }
+        }
+    }
+
     if crate::sessions::txid_already_used(pool.get_ref(), &body.txid).await {
         return HttpResponse::Conflict().json(serde_json::json!({
             "error": "This transaction has already been used to open a session"
@@ -84,9 +92,9 @@ pub async fn open(
         .map(|o| o.amount_zatoshis as i64)
         .sum();
 
-    if total_zatoshis < 1000 {
+    if total_zatoshis < 10_000 {
         return HttpResponse::BadRequest().json(serde_json::json!({
-            "error": "Deposit too small — minimum 1000 zatoshis (0.00001 ZEC)"
+            "error": "Deposit too small — minimum 10,000 zatoshis (0.0001 ZEC)"
         }));
     }
 
@@ -115,11 +123,50 @@ pub async fn open(
     }
 }
 
+/// Resolve the merchant owning this session, requiring API key or dashboard auth.
+async fn require_session_owner(
+    req: &HttpRequest,
+    pool: &SqlitePool,
+    session_id: &str,
+) -> Result<(), HttpResponse> {
+    let session = crate::sessions::get_session(pool, session_id).await
+        .map_err(|_| HttpResponse::InternalServerError().json(serde_json::json!({"error": "Internal error"})))?
+        .ok_or_else(|| HttpResponse::NotFound().json(serde_json::json!({"error": "Session not found"})))?;
+
+    // Try dashboard session auth
+    if let Some(merchant) = crate::api::auth::resolve_session(req, &web::Data::new(pool.clone())).await {
+        if merchant.id == session.merchant_id {
+            return Ok(());
+        }
+    }
+
+    // Try API key auth
+    if let Some(auth_header) = req.headers().get("Authorization") {
+        if let Ok(auth_str) = auth_header.to_str() {
+            let key = auth_str.strip_prefix("Bearer ").unwrap_or(auth_str).trim();
+            let enc_key = req.app_data::<web::Data<Config>>()
+                .map(|c| c.encryption_key.clone()).unwrap_or_default();
+            if let Ok(Some(merchant)) = crate::merchants::authenticate(pool, key, &enc_key).await {
+                if merchant.id == session.merchant_id {
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    Err(HttpResponse::Unauthorized().json(serde_json::json!({"error": "Not authorized for this session"})))
+}
+
 pub async fn get_status(
+    req: HttpRequest,
     pool: web::Data<SqlitePool>,
     path: web::Path<String>,
 ) -> HttpResponse {
     let session_id = path.into_inner();
+
+    if let Err(resp) = require_session_owner(&req, pool.get_ref(), &session_id).await {
+        return resp;
+    }
 
     match crate::sessions::get_summary(pool.get_ref(), &session_id).await {
         Ok(Some(summary)) => {
@@ -144,10 +191,15 @@ pub async fn get_status(
 }
 
 pub async fn close(
+    req: HttpRequest,
     pool: web::Data<SqlitePool>,
     path: web::Path<String>,
 ) -> HttpResponse {
     let session_id = path.into_inner();
+
+    if let Err(resp) = require_session_owner(&req, pool.get_ref(), &session_id).await {
+        return resp;
+    }
 
     match crate::sessions::close_session(pool.get_ref(), &session_id).await {
         Ok(Some(summary)) => {
@@ -246,18 +298,26 @@ pub async fn validate(
     req: HttpRequest,
     pool: web::Data<SqlitePool>,
 ) -> HttpResponse {
-    let token = req.query_string()
-        .split('&')
-        .find_map(|pair| {
-            let (k, v) = pair.split_once('=')?;
-            if k == "token" { Some(v.to_string()) } else { None }
+    // Accept token from Authorization: Bearer header (preferred) or query param (legacy)
+    let token = req.headers().get("Authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .map(|s| s.trim().to_string())
+        .filter(|s| s.starts_with("cps_"))
+        .or_else(|| {
+            req.query_string()
+                .split('&')
+                .find_map(|pair| {
+                    let (k, v) = pair.split_once('=')?;
+                    if k == "token" { Some(v.to_string()) } else { None }
+                })
         });
 
     let token = match token {
         Some(t) if !t.is_empty() => t,
         _ => {
             return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": "token query parameter required"
+                "error": "Bearer token required — use Authorization: Bearer header or token query parameter"
             }));
         }
     };

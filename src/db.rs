@@ -923,10 +923,12 @@ pub async fn set_scanner_state(pool: &SqlitePool, key: &str, value: &str) -> any
 pub async fn run_data_purge(pool: &SqlitePool, purge_days: i64) -> anyhow::Result<()> {
     let cutoff = format!("-{} days", purge_days);
 
-    // Expired sessions
+    // Expired sessions + closed/depleted sessions older than cutoff
     let sessions = sqlx::query(
-        "DELETE FROM sessions WHERE expires_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
-    ).execute(pool).await?;
+        "DELETE FROM sessions WHERE
+            expires_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+            OR (status IN ('closed', 'depleted') AND created_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?))"
+    ).bind(&cutoff).execute(pool).await?;
 
     // Expired recovery tokens
     let tokens = sqlx::query(
