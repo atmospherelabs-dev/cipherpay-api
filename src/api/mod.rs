@@ -7,6 +7,7 @@ pub mod merchants;
 pub mod prices;
 pub mod products;
 pub mod rates;
+pub mod sessions;
 pub mod status;
 pub mod subscriptions;
 pub mod tickets;
@@ -103,6 +104,11 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/invoices/{id}/luma-pass", web::get().to(luma::luma_pass))
             // x402 facilitator
             .route("/x402/verify", web::post().to(x402::verify))
+            // Session endpoints (agentic prepaid credit)
+            .route("/sessions/open", web::post().to(sessions::open))
+            .route("/sessions/validate", web::get().to(sessions::validate))
+            .route("/sessions/{id}", web::get().to(sessions::get_status))
+            .route("/sessions/{id}/close", web::post().to(sessions::close))
             // Admin endpoints (protected by ADMIN_KEY)
             .route("/admin/auth", web::post().to(admin::auth_check))
             .route("/admin/stats", web::get().to(admin::stats))

@@ -12,6 +12,7 @@ mod merchants;
 mod prices;
 mod products;
 mod scanner;
+mod sessions;
 mod subscriptions;
 mod tickets;
 mod validation;
