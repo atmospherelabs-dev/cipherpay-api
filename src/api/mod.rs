@@ -46,6 +46,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                     .route("/me/delete", web::post().to(delete_account))
                     .route("/me/webhooks", web::get().to(auth::my_webhooks))
                     .route("/me/x402/history", web::get().to(x402::history))
+                    .route("/me/sessions", web::get().to(sessions::history))
             )
             .service(
                 web::scope("/auth")

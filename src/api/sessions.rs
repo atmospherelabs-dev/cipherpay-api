@@ -187,6 +187,61 @@ pub async fn close(
     }
 }
 
+pub async fn history(
+    req: HttpRequest,
+    pool: web::Data<SqlitePool>,
+) -> HttpResponse {
+    let merchant = match crate::api::auth::resolve_session(&req, &pool).await {
+        Some(m) => m,
+        None => {
+            return HttpResponse::Unauthorized().json(serde_json::json!({
+                "error": "Not authenticated"
+            }));
+        }
+    };
+
+    match crate::sessions::list_for_merchant(pool.get_ref(), &merchant.id).await {
+        Ok(sessions) => {
+            let items: Vec<_> = sessions.iter().map(|s| {
+                let balance_used = s.balance_zatoshis - s.balance_remaining;
+                let mut obj = serde_json::json!({
+                    "id": s.id,
+                    "deposit_txid": s.deposit_txid,
+                    "balance_zatoshis": s.balance_zatoshis,
+                    "balance_remaining": s.balance_remaining,
+                    "cost_per_request": s.cost_per_request,
+                    "requests_made": s.requests_made,
+                    "balance_used": balance_used,
+                    "status": s.status,
+                    "expires_at": s.expires_at,
+                    "created_at": s.created_at,
+                    "closed_at": s.closed_at,
+                });
+
+                if let Some(ref addr) = s.refund_address {
+                    if s.balance_remaining > 0 && (s.status == "closed" || s.status == "depleted" || s.status == "expired") {
+                        let refund_zec = s.balance_remaining as f64 / 100_000_000.0;
+                        obj.as_object_mut().unwrap().insert("refund".to_string(), serde_json::json!({
+                            "address": addr,
+                            "amount_zatoshis": s.balance_remaining,
+                            "amount_zec": refund_zec,
+                        }));
+                    }
+                }
+                obj
+            }).collect();
+
+            HttpResponse::Ok().json(serde_json::json!({ "sessions": items }))
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to list sessions");
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Internal error"
+            }))
+        }
+    }
+}
+
 pub async fn validate(
     req: HttpRequest,
     pool: web::Data<SqlitePool>,
