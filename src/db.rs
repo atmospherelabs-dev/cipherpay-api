@@ -641,6 +641,33 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
     sqlx::query("ALTER TABLE x402_verifications ADD COLUMN protocol TEXT NOT NULL DEFAULT 'x402'")
         .execute(&pool).await.ok();
 
+    // Sessions table (agentic prepaid credit)
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS sessions (
+            id TEXT PRIMARY KEY,
+            merchant_id TEXT NOT NULL REFERENCES merchants(id),
+            deposit_txid TEXT NOT NULL,
+            bearer_token TEXT NOT NULL UNIQUE,
+            balance_zatoshis INTEGER NOT NULL,
+            balance_remaining INTEGER NOT NULL,
+            cost_per_request INTEGER NOT NULL DEFAULT 1000,
+            requests_made INTEGER NOT NULL DEFAULT 0,
+            refund_address TEXT,
+            status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'closed', 'expired', 'depleted')),
+            expires_at TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            closed_at TEXT
+        )"
+    )
+    .execute(&pool)
+    .await
+    .ok();
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(bearer_token)")
+        .execute(&pool).await.ok();
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_sessions_merchant ON sessions(merchant_id, status)")
+        .execute(&pool).await.ok();
+
     // Price type columns (one_time vs recurring)
     for sql in &[
         "ALTER TABLE prices ADD COLUMN price_type TEXT NOT NULL DEFAULT 'one_time'",
