@@ -638,6 +638,9 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_x402_merchant ON x402_verifications(merchant_id, created_at)")
         .execute(&pool).await.ok();
 
+    sqlx::query("ALTER TABLE x402_verifications ADD COLUMN protocol TEXT NOT NULL DEFAULT 'x402'")
+        .execute(&pool).await.ok();
+
     // Price type columns (one_time vs recurring)
     for sql in &[
         "ALTER TABLE prices ADD COLUMN price_type TEXT NOT NULL DEFAULT 'one_time'",

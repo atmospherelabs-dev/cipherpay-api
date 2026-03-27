@@ -13,7 +13,11 @@ const SLIPPAGE_TOLERANCE: f64 = 0.995;
 pub struct VerifyRequest {
     pub txid: String,
     pub expected_amount_zec: f64,
+    #[serde(default = "default_protocol")]
+    pub protocol: String,
 }
+
+fn default_protocol() -> String { "x402".to_string() }
 
 #[derive(Debug, Serialize)]
 struct VerifyResponse {
@@ -70,11 +74,13 @@ pub async fn verify(
 
     let previously_verified = was_previously_verified(&pool, &merchant.id, &body.txid).await;
 
+    let protocol = if body.protocol == "mpp" { "mpp" } else { "x402" };
+
     let raw_hex = match mempool::fetch_raw_tx(&http_client, &config.cipherscan_api_url, &body.txid).await {
         Ok(hex) => hex,
         Err(e) => {
             tracing::warn!(txid = %body.txid, error = %e, "x402: failed to fetch raw tx");
-            let resp = build_rejected(&pool, &merchant.id, &body.txid, 0, previously_verified, "Transaction not found").await;
+            let resp = build_rejected(&pool, &merchant.id, &body.txid, 0, previously_verified, "Transaction not found", protocol).await;
             return HttpResponse::Ok().json(resp);
         }
     };
@@ -83,13 +89,13 @@ pub async fn verify(
         Ok(o) => o,
         Err(e) => {
             tracing::warn!(txid = %body.txid, error = %e, "x402: decryption error");
-            let resp = build_rejected(&pool, &merchant.id, &body.txid, 0, previously_verified, "Decryption failed").await;
+            let resp = build_rejected(&pool, &merchant.id, &body.txid, 0, previously_verified, "Decryption failed", protocol).await;
             return HttpResponse::Ok().json(resp);
         }
     };
 
     if outputs.is_empty() {
-        let resp = build_rejected(&pool, &merchant.id, &body.txid, 0, previously_verified, "No outputs addressed to this merchant").await;
+        let resp = build_rejected(&pool, &merchant.id, &body.txid, 0, previously_verified, "No outputs addressed to this merchant", protocol).await;
         return HttpResponse::Ok().json(resp);
     }
 
@@ -99,7 +105,7 @@ pub async fn verify(
     let min_acceptable = (expected_zatoshis as f64 * SLIPPAGE_TOLERANCE) as u64;
 
     if total_zatoshis >= min_acceptable {
-        log_verification(&pool, &merchant.id, &body.txid, total_zatoshis, "verified", None).await;
+        log_verification(&pool, &merchant.id, &body.txid, total_zatoshis, "verified", None, protocol).await;
 
         HttpResponse::Ok().json(VerifyResponse {
             valid: true,
@@ -113,7 +119,7 @@ pub async fn verify(
             "Insufficient amount: received {} ZEC, expected {} ZEC",
             total_zec, body.expected_amount_zec
         );
-        log_verification(&pool, &merchant.id, &body.txid, total_zatoshis, "rejected", Some(&reason)).await;
+        log_verification(&pool, &merchant.id, &body.txid, total_zatoshis, "rejected", Some(&reason), protocol).await;
 
         HttpResponse::Ok().json(VerifyResponse {
             valid: false,
@@ -149,8 +155,8 @@ pub async fn history(
     let limit = query.limit.unwrap_or(50).min(200);
     let offset = query.offset.unwrap_or(0).max(0);
 
-    let rows = sqlx::query_as::<_, (String, String, Option<i64>, Option<f64>, String, Option<String>, String)>(
-        "SELECT id, txid, amount_zatoshis, amount_zec, status, reason, created_at
+    let rows = sqlx::query_as::<_, (String, String, Option<i64>, Option<f64>, String, Option<String>, String, String)>(
+        "SELECT id, txid, amount_zatoshis, amount_zec, status, reason, created_at, COALESCE(protocol, 'x402')
          FROM x402_verifications
          WHERE merchant_id = ?
          ORDER BY created_at DESC
@@ -173,6 +179,7 @@ pub async fn history(
                     "status": r.4,
                     "reason": r.5,
                     "created_at": r.6,
+                    "protocol": r.7,
                 })
             }).collect();
             HttpResponse::Ok().json(serde_json::json!({ "verifications": items }))
@@ -217,8 +224,9 @@ async fn build_rejected(
     zatoshis: u64,
     previously_verified: bool,
     reason: &str,
+    protocol: &str,
 ) -> VerifyResponse {
-    log_verification(pool, merchant_id, txid, zatoshis, "rejected", Some(reason)).await;
+    log_verification(pool, merchant_id, txid, zatoshis, "rejected", Some(reason), protocol).await;
     VerifyResponse {
         valid: false,
         received_zec: zatoshis as f64 / 100_000_000.0,
@@ -246,13 +254,14 @@ async fn log_verification(
     amount_zatoshis: u64,
     status: &str,
     reason: Option<&str>,
+    protocol: &str,
 ) {
     let id = Uuid::new_v4().to_string();
     let amount_zec = amount_zatoshis as f64 / 100_000_000.0;
 
     let result = sqlx::query(
-        "INSERT INTO x402_verifications (id, merchant_id, txid, amount_zatoshis, amount_zec, status, reason)
-         VALUES (?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO x402_verifications (id, merchant_id, txid, amount_zatoshis, amount_zec, status, reason, protocol)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
     )
     .bind(&id)
     .bind(merchant_id)
@@ -261,6 +270,7 @@ async fn log_verification(
     .bind(amount_zec)
     .bind(status)
     .bind(reason)
+    .bind(protocol)
     .execute(pool)
     .await;
 
