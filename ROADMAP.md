@@ -90,9 +90,19 @@ Privacy-preserving Zcash payment gateway. Non-custodial, shielded-only.
 ## Phase 5 -- AI Agent Infrastructure
 
 - [x] **x402 facilitator** — verify shielded Zcash payments for HTTP 402 paywalls
-- [x] **@cipherpay/x402 SDK** — Express middleware for resource servers (`npm install @cipherpay/x402`)
-- [x] **@cipherpay/mcp** — MCP server for Claude/Cursor (invoices, rates, status, x402 verify)
-- [ ] **Agent wallet CLI** (`zipher-cli`) — extract Zipher's Rust wallet engine into a standalone binary
+- [x] **MPP support** — Machine Payments Protocol (WWW-Authenticate / Authorization headers)
+- [x] **Replay protection** — per-merchant txid tracking, prevents double-use of payment proofs
+- [x] **@cipherpay/x402 SDK** — Express middleware for resource servers, supports x402 + MPP + sessions (`npm install @cipherpay/x402`)
+- [x] **@cipherpay/mcp** — MCP server for Claude/Cursor (invoices, rates, x402 verify, sessions)
+- [x] **Agent sessions** — prepaid credit system: deposit ZEC, get bearer token, pay per-request
+- [x] **Agent wallet CLI** (`@cipherpay/zipher-cli`) — headless Zcash wallet for agents (pay, sessions, x402, MPP)
+- [ ] **Programmatic merchant registration** — agents create their own merchant accounts via API
+  - `POST /api/merchants/register` with `{ ufvk, payment_address }`
+  - Requires ~$10 USD deposit in shielded ZEC (anti-spam)
+  - Deposit split: portion kept as CipherPay activation fee, remainder credited to merchant fee balance
+  - Returns `{ merchant_id, api_key }` — no dashboard, no password
+  - Enables fully autonomous agent-to-agent commerce
+  - Rate limited + UFVK validation before scanner activation
 - [ ] **@cipherpay/wallet-mcp** — MCP server wrapping `zipher-cli` so AI agents can send ZEC
 - [ ] **Multi-recipient send** — enable batch payments from a single agent transaction
 
