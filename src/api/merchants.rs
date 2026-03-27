@@ -17,10 +17,17 @@ pub async fn create(
     match create_merchant(pool.get_ref(), &body, &config.encryption_key).await {
         Ok(resp) => HttpResponse::Created().json(resp),
         Err(e) => {
-            tracing::error!(error = %e, "Failed to create merchant");
-            HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Failed to create merchant"
-            }))
+            let msg = e.to_string();
+            if msg.contains("already registered") {
+                HttpResponse::Conflict().json(serde_json::json!({
+                    "error": msg
+                }))
+            } else {
+                tracing::error!(error = %e, "Failed to create merchant");
+                HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": "Failed to create merchant"
+                }))
+            }
         }
     }
 }

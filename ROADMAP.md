@@ -96,11 +96,14 @@ Privacy-preserving Zcash payment gateway. Non-custodial, shielded-only.
 - [x] **@cipherpay/mcp** — MCP server for Claude/Cursor (invoices, rates, x402 verify, sessions)
 - [x] **Agent sessions** — prepaid credit system: deposit ZEC, get bearer token, pay per-request
 - [x] **Agent wallet CLI** (`@cipherpay/zipher-cli`) — headless Zcash wallet for agents (pay, sessions, x402, MPP)
+- [x] **UIVK uniqueness enforcement** — reject registration if viewing key already belongs to a merchant (prevents duplicate scanning, double billing, cross-merchant payment confusion). Applies to both dashboard and programmatic registration.
 - [ ] **Programmatic merchant registration** — agents create their own merchant accounts via API
   - `POST /api/merchants/register` with `{ ufvk, payment_address }`
   - Requires ~$10 USD deposit in shielded ZEC (anti-spam)
   - Deposit split: portion kept as CipherPay activation fee, remainder credited to merchant fee balance
-  - Returns `{ merchant_id, api_key }` — no dashboard, no password
+  - Returns `{ merchant_id, api_key }` — no dashboard, no password, API-only
+  - Agent merchants have no dashboard access by design (no credentials to leak via prompt injection)
+  - If human wants dashboard: register normally, hand API key to agent
   - Enables fully autonomous agent-to-agent commerce
   - Rate limited + UFVK validation before scanner activation
 - [ ] **@cipherpay/wallet-mcp** — MCP server wrapping `zipher-cli` so AI agents can send ZEC

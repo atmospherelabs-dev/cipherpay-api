@@ -81,6 +81,18 @@ pub async fn create_merchant(
         .map_err(|e| anyhow::anyhow!("Invalid viewing key — could not derive address: {}", e))?;
     let payment_address = derived.ua_string;
 
+    // Reject if this viewing key is already registered (same UIVK = same derived address)
+    let existing: Option<(String,)> = sqlx::query_as(
+        "SELECT id FROM merchants WHERE payment_address = ?"
+    )
+    .bind(&payment_address)
+    .fetch_optional(pool)
+    .await?;
+
+    if existing.is_some() {
+        anyhow::bail!("A merchant with this viewing key is already registered");
+    }
+
     let id = Uuid::new_v4().to_string();
     let api_key = generate_api_key();
     let key_hash = hash_key(&api_key);
