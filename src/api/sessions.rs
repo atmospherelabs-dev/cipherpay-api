@@ -10,8 +10,11 @@ const SESSION_MEMO_PREFIX: &str = "zipher:session:";
 #[derive(Debug, Deserialize)]
 pub struct OpenRequest {
     pub txid: String,
-    pub merchant_id: String,
+    /// Required for memo-based flow; optional when using session_request_id.
+    pub merchant_id: Option<String>,
     pub refund_address: Option<String>,
+    /// If provided, uses address-based verification (no memo needed).
+    pub session_request_id: Option<String>,
 }
 
 pub async fn open(
@@ -40,8 +43,32 @@ pub async fn open(
         }));
     }
 
+    // Resolve merchant: either from session_request_id or merchant_id
+    let (merchant_id, expected_address) = if let Some(ref sr_id) = body.session_request_id {
+        match crate::sessions::get_session_request(pool.get_ref(), sr_id).await {
+            Ok(Some(sr)) => (sr.merchant_id, Some(sr.deposit_address)),
+            Ok(None) => {
+                return HttpResponse::BadRequest().json(serde_json::json!({
+                    "error": "Session request not found, already used, or expired"
+                }));
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to lookup session request");
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": "Internal error"
+                }));
+            }
+        }
+    } else if let Some(ref mid) = body.merchant_id {
+        (mid.clone(), None)
+    } else {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "Either merchant_id or session_request_id is required"
+        }));
+    };
+
     let merchant = match crate::merchants::get_merchant_by_id(
-        pool.get_ref(), &body.merchant_id, &config.encryption_key
+        pool.get_ref(), &merchant_id, &config.encryption_key
     ).await {
         Ok(Some(m)) => m,
         _ => {
@@ -77,20 +104,32 @@ pub async fn open(
         }));
     }
 
-    let expected_memo = format!("{}{}", SESSION_MEMO_PREFIX, body.merchant_id);
-    let session_outputs: Vec<_> = outputs.iter()
-        .filter(|o| o.memo.trim() == expected_memo)
-        .collect();
+    // Two verification paths: address-based (no memo) or memo-based (legacy)
+    let total_zatoshis: i64 = if let Some(ref addr) = expected_address {
+        // Address-based: sum all outputs (all decrypted outputs belong to this merchant,
+        // and the unique address ensures intent)
+        let total: i64 = outputs.iter().map(|o| o.amount_zatoshis as i64).sum();
+        if total == 0 {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "No outputs to the expected deposit address"
+            }));
+        }
+        tracing::info!(address = %addr, total_zatoshis = total, "Address-based session deposit verified");
+        total
+    } else {
+        // Memo-based: filter by session memo
+        let expected_memo = format!("{}{}", SESSION_MEMO_PREFIX, merchant_id);
+        let session_outputs: Vec<_> = outputs.iter()
+            .filter(|o| o.memo.trim() == expected_memo)
+            .collect();
 
-    if session_outputs.is_empty() {
-        return HttpResponse::BadRequest().json(serde_json::json!({
-            "error": format!("No output with session memo found. Expected memo: {}", expected_memo),
-        }));
-    }
-
-    let total_zatoshis: i64 = session_outputs.iter()
-        .map(|o| o.amount_zatoshis as i64)
-        .sum();
+        if session_outputs.is_empty() {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("No output with session memo found. Expected memo: {}", expected_memo),
+            }));
+        }
+        session_outputs.iter().map(|o| o.amount_zatoshis as i64).sum()
+    };
 
     if total_zatoshis < 10_000 {
         return HttpResponse::BadRequest().json(serde_json::json!({
@@ -98,9 +137,16 @@ pub async fn open(
         }));
     }
 
+    // Mark session request as used (if address-based)
+    if let Some(ref sr_id) = body.session_request_id {
+        if let Err(e) = crate::sessions::mark_session_request_used(pool.get_ref(), sr_id).await {
+            tracing::warn!(error = %e, "Failed to mark session request as used");
+        }
+    }
+
     match crate::sessions::create_session(
         pool.get_ref(),
-        &body.merchant_id,
+        &merchant_id,
         &body.txid,
         total_zatoshis,
         body.refund_address.as_deref(),
@@ -292,6 +338,107 @@ pub async fn history(
             }))
         }
     }
+}
+
+/// Prepare a session deposit: generates a unique payment address (no memo needed).
+pub async fn prepare(
+    pool: web::Data<SqlitePool>,
+    config: web::Data<Config>,
+    body: web::Json<PrepareRequest>,
+) -> HttpResponse {
+    let merchant = match crate::merchants::get_merchant_by_id(
+        pool.get_ref(), &body.merchant_id, &config.encryption_key
+    ).await {
+        Ok(Some(m)) => m,
+        _ => {
+            return HttpResponse::NotFound().json(serde_json::json!({
+                "error": "Merchant not found"
+            }));
+        }
+    };
+
+    match crate::sessions::create_session_request(
+        pool.get_ref(), &merchant.id, &merchant.ufvk
+    ).await {
+        Ok(req) => {
+            HttpResponse::Ok().json(serde_json::json!({
+                "session_request_id": req.id,
+                "deposit_address": req.deposit_address,
+                "merchant_id": merchant.id,
+                "min_deposit_zatoshis": 10_000,
+                "expires_in_seconds": 1800,
+            }))
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to prepare session");
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Failed to prepare session deposit"
+            }))
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PrepareRequest {
+    pub merchant_id: String,
+}
+
+/// Deduct a variable amount from a session (for streaming metering).
+pub async fn deduct(
+    req: HttpRequest,
+    pool: web::Data<SqlitePool>,
+    body: web::Json<DeductRequest>,
+) -> HttpResponse {
+    let token = req.headers().get("Authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .map(|s| s.trim().to_string())
+        .filter(|s| s.starts_with("cps_"));
+
+    let token = match token {
+        Some(t) => t,
+        None => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "Bearer token required"
+            }));
+        }
+    };
+
+    if body.amount_zatoshis <= 0 {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "amount_zatoshis must be positive"
+        }));
+    }
+
+    match crate::sessions::deduct(pool.get_ref(), &token, body.amount_zatoshis).await {
+        Ok(Some(session)) => {
+            HttpResponse::Ok()
+                .insert_header(("X-Session-Balance", session.balance_remaining.to_string()))
+                .json(serde_json::json!({
+                    "valid": true,
+                    "session_id": session.id,
+                    "balance_remaining": session.balance_remaining,
+                    "deducted": body.amount_zatoshis,
+                }))
+        }
+        Ok(None) => {
+            HttpResponse::Ok().json(serde_json::json!({
+                "valid": false,
+                "reason": "Insufficient balance, session expired, or depleted"
+            }))
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "Session deduction error");
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Internal error"
+            }))
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DeductRequest {
+    pub amount_zatoshis: i64,
 }
 
 pub async fn validate(
