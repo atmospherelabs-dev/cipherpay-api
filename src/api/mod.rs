@@ -114,8 +114,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             // Session endpoints (agentic prepaid credit)
             .service(
                 web::scope("/sessions")
+                    .route("/prepare", web::post().to(sessions::prepare).wrap(Governor::new(&session_rate_limit)))
                     .route("/open", web::post().to(sessions::open).wrap(Governor::new(&session_rate_limit)))
                     .route("/validate", web::get().to(sessions::validate))
+                    .route("/deduct", web::post().to(sessions::deduct))
                     .route("/{id}", web::get().to(sessions::get_status))
                     .route("/{id}/close", web::post().to(sessions::close))
             )
@@ -127,6 +129,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/admin/webhooks", web::get().to(admin::webhooks))
             .route("/admin/system", web::get().to(admin::system)),
     );
+
+    cfg.route("/.well-known/payment", web::get().to(well_known_payment));
 }
 
 /// Public checkout endpoint for buyer-driven invoice creation.
@@ -463,6 +467,29 @@ async fn health() -> actix_web::HttpResponse {
         "status": "ok",
         "service": "cipherpay",
     }))
+}
+
+async fn well_known_payment(
+    config: web::Data<crate::config::Config>,
+) -> actix_web::HttpResponse {
+    let network = if config.is_testnet() { "zcash:testnet" } else { "zcash:mainnet" };
+    actix_web::HttpResponse::Ok()
+        .insert_header(("Access-Control-Allow-Origin", "*"))
+        .insert_header(("Cache-Control", "public, max-age=3600"))
+        .json(serde_json::json!({
+            "version": "1.0",
+            "methods": ["zcash"],
+            "currencies": ["ZEC"],
+            "network": network,
+            "protocols": ["x402", "mpp"],
+            "capabilities": {
+                "sessions": true,
+                "streaming": true,
+                "replay_protection": true,
+            },
+            "facilitator": "https://api.cipherpay.app",
+            "documentation": "https://cipherpay.app/docs",
+        }))
 }
 
 /// List invoices: requires API key or session auth. Scoped to the authenticated merchant.

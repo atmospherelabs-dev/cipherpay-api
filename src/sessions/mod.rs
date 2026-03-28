@@ -253,6 +253,142 @@ pub async fn txid_already_used(pool: &SqlitePool, txid: &str) -> bool {
     .unwrap_or(0) > 0
 }
 
+/// Deduct a variable amount from a session (used for streaming metering).
+/// Returns the updated session if successful, None if insufficient balance or inactive.
+pub async fn deduct(pool: &SqlitePool, bearer_token: &str, amount_zatoshis: i64) -> Result<Option<Session>> {
+    if amount_zatoshis <= 0 {
+        anyhow::bail!("Deduction amount must be positive");
+    }
+
+    let result = sqlx::query(
+        "UPDATE agent_sessions SET
+            balance_remaining = balance_remaining - ?,
+            requests_made = requests_made + 1
+         WHERE bearer_token = ?
+           AND status = 'active'
+           AND balance_remaining >= ?
+           AND expires_at >= strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
+    )
+    .bind(amount_zatoshis)
+    .bind(bearer_token)
+    .bind(amount_zatoshis)
+    .execute(pool)
+    .await?;
+
+    if result.rows_affected() == 0 {
+        sqlx::query(
+            "UPDATE agent_sessions SET status = CASE
+                WHEN expires_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now') THEN 'expired'
+                WHEN balance_remaining < ? THEN 'depleted'
+                ELSE status END
+             WHERE bearer_token = ? AND status = 'active'"
+        )
+        .bind(amount_zatoshis)
+        .bind(bearer_token)
+        .execute(pool)
+        .await
+        .ok();
+
+        return Ok(None);
+    }
+
+    let row = sqlx::query_as::<_, (String, String, i64, i64, i64, Option<String>)>(
+        "SELECT id, merchant_id, balance_remaining, cost_per_request, requests_made, refund_address
+         FROM agent_sessions WHERE bearer_token = ?"
+    )
+    .bind(bearer_token)
+    .fetch_optional(pool)
+    .await?;
+
+    match row {
+        Some((id, merchant_id, balance_remaining, cost_per_request, requests_made, refund_address)) => {
+            Ok(Some(Session {
+                id,
+                merchant_id,
+                deposit_txid: String::new(),
+                bearer_token: bearer_token.to_string(),
+                balance_zatoshis: 0,
+                balance_remaining,
+                cost_per_request,
+                requests_made,
+                refund_address,
+                status: "active".to_string(),
+                expires_at: String::new(),
+                created_at: String::new(),
+                closed_at: None,
+            }))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Create a session deposit request with a unique address (memo-free flow).
+pub async fn create_session_request(
+    pool: &SqlitePool,
+    merchant_id: &str,
+    merchant_uivk: &str,
+) -> Result<SessionRequest> {
+    let id = format!("sr_{}", uuid::Uuid::new_v4().simple());
+    let div_index = crate::merchants::next_diversifier_index(pool, merchant_id).await?;
+    let derived = crate::addresses::derive_invoice_address(merchant_uivk, div_index)?;
+
+    sqlx::query(
+        "INSERT INTO session_requests (id, merchant_id, deposit_address, diversifier_index, status, expires_at)
+         VALUES (?, ?, ?, ?, 'pending', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '+30 minutes'))"
+    )
+    .bind(&id)
+    .bind(merchant_id)
+    .bind(&derived.ua_string)
+    .bind(div_index as i64)
+    .execute(pool)
+    .await?;
+
+    Ok(SessionRequest {
+        id,
+        merchant_id: merchant_id.to_string(),
+        deposit_address: derived.ua_string,
+        diversifier_index: div_index,
+        expires_at: String::new(), // filled by DB
+    })
+}
+
+/// Look up a pending session request by ID.
+pub async fn get_session_request(pool: &SqlitePool, request_id: &str) -> Result<Option<SessionRequest>> {
+    let row = sqlx::query_as::<_, (String, String, String, i64, String)>(
+        "SELECT id, merchant_id, deposit_address, diversifier_index, expires_at
+         FROM session_requests WHERE id = ? AND status = 'pending'
+         AND expires_at >= strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
+    )
+    .bind(request_id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|r| SessionRequest {
+        id: r.0,
+        merchant_id: r.1,
+        deposit_address: r.2,
+        diversifier_index: r.3 as u32,
+        expires_at: r.4,
+    }))
+}
+
+/// Mark a session request as used (prevents reuse).
+pub async fn mark_session_request_used(pool: &SqlitePool, request_id: &str) -> Result<()> {
+    sqlx::query("UPDATE session_requests SET status = 'used' WHERE id = ?")
+        .bind(request_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub struct SessionRequest {
+    pub id: String,
+    pub merchant_id: String,
+    pub deposit_address: String,
+    pub diversifier_index: u32,
+    pub expires_at: String,
+}
+
 fn generate_token() -> String {
     let uuid1 = uuid::Uuid::new_v4();
     let uuid2 = uuid::Uuid::new_v4();

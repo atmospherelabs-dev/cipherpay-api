@@ -668,6 +668,25 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_agent_sessions_merchant ON agent_sessions(merchant_id, status)")
         .execute(&pool).await.ok();
 
+    // Session deposit requests (address-based, memo-free session opening)
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS session_requests (
+            id TEXT PRIMARY KEY,
+            merchant_id TEXT NOT NULL REFERENCES merchants(id),
+            deposit_address TEXT NOT NULL,
+            diversifier_index INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'used', 'expired')),
+            expires_at TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        )"
+    )
+    .execute(&pool)
+    .await
+    .ok();
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_session_requests_merchant ON session_requests(merchant_id, status)")
+        .execute(&pool).await.ok();
+
     // Price type columns (one_time vs recurring)
     for sql in &[
         "ALTER TABLE prices ADD COLUMN price_type TEXT NOT NULL DEFAULT 'one_time'",
@@ -930,6 +949,11 @@ pub async fn run_data_purge(pool: &SqlitePool, purge_days: i64) -> anyhow::Resul
             OR (status IN ('closed', 'depleted') AND created_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?))"
     ).bind(&cutoff).execute(pool).await
     .map(|r| r.rows_affected()).unwrap_or(0);
+
+    // Expired session deposit requests
+    let _ = sqlx::query(
+        "DELETE FROM session_requests WHERE expires_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
+    ).execute(pool).await;
 
     // Expired dashboard login sessions
     let _ = sqlx::query(

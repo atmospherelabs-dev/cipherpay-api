@@ -106,6 +106,10 @@ Privacy-preserving Zcash payment gateway. Non-custodial, shielded-only.
   - If human wants dashboard: register normally, hand API key to agent
   - Enables fully autonomous agent-to-agent commerce
   - Rate limited + UFVK validation before scanner activation
+- [x] **Challenge expiry (`valid_until`)** — 402 responses include expiry timestamp; verification rejects stale challenges (prevents agents paying outdated prices after ZEC rate changes)
+- [x] **`/.well-known/payment` discovery** — standardized endpoint for agents to auto-detect payment methods, currencies, protocols, session support, and facilitator URL
+- [x] **Streaming (pay-per-token)** — SSE metering on top of sessions; middleware deducts in batches (~100 tokens), sends `event: payment_required` when balance insufficient. Non-custodial (same session model, different metering)
+- [x] **Address-based session deposits** — generate unique deposit address per session (via diversifier), eliminating memo dependency. Future-proofs against NU7/Tachyon memo changes. Includes cleanup of abandoned prepare requests (30 min expiry)
 - [ ] **@cipherpay/wallet-mcp** — MCP server wrapping `zipher-cli` so AI agents can send ZEC
 - [ ] **Multi-recipient send** — enable batch payments from a single agent transaction
 
