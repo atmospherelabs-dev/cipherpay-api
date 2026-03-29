@@ -9,6 +9,7 @@ mod events;
 mod invoices;
 mod luma;
 mod merchants;
+mod payment_links;
 mod prices;
 mod products;
 mod scanner;
