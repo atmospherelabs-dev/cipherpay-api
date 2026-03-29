@@ -687,6 +687,30 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_session_requests_merchant ON session_requests(merchant_id, status)")
         .execute(&pool).await.ok();
 
+    // Payment Links: reusable URLs tied to prices (no-code checkout)
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS payment_links (
+            id TEXT PRIMARY KEY,
+            merchant_id TEXT NOT NULL REFERENCES merchants(id),
+            price_id TEXT NOT NULL REFERENCES prices(id),
+            slug TEXT NOT NULL UNIQUE,
+            name TEXT,
+            success_url TEXT,
+            metadata TEXT,
+            active INTEGER NOT NULL DEFAULT 1,
+            total_created INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        )"
+    )
+    .execute(&pool)
+    .await
+    .ok();
+
+    sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS idx_payment_links_slug ON payment_links(slug)")
+        .execute(&pool).await.ok();
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_payment_links_merchant ON payment_links(merchant_id)")
+        .execute(&pool).await.ok();
+
     // Price type columns (one_time vs recurring)
     for sql in &[
         "ALTER TABLE prices ADD COLUMN price_type TEXT NOT NULL DEFAULT 'one_time'",

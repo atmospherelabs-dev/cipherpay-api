@@ -55,15 +55,19 @@ Privacy-preserving Zcash payment gateway. Non-custodial, shielded-only.
 
 ## Phase 3 -- Integrations & Go-to-Market
 
-- [ ] **Hosted checkout page** (`pay.cipherpay.app/{invoice_id}`)
+- [x] **Hosted checkout page** (`pay.cipherpay.app/{invoice_id}`)
   - Standalone payment page merchants can redirect to
   - Mobile-optimized with QR code and deep-link to Zashi/YWallet
-- [ ] **Shopify Custom App integration**
+  - Checkout API returns `checkout_url` with optional `success_url` redirect baked in
+- [x] **Shopify Custom App integration**
   - Merchant installs Custom App in Shopify admin
   - CipherPay marks orders as paid via Shopify Admin REST API
   - (`POST /admin/api/2024-10/orders/{id}/transactions.json`)
   - Avoids Shopify App Store approval process
-- [ ] **WooCommerce plugin** (WordPress/PHP webhook receiver)
+- [x] **WooCommerce plugin** (WordPress/PHP webhook receiver)
+- [x] **Payment Links (no-code)**
+  - Reusable URLs tied to a price — visit creates invoice, redirects to checkout
+  - Dashboard tab for managing links; public resolve endpoint with rate limiting
 - [ ] **Embeddable widget** (JS snippet for any website)
   - `<script src="https://pay.cipherpay.app/widget.js">`
   - Drop-in payment button with modal checkout

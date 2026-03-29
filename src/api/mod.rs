@@ -4,6 +4,7 @@ pub mod events;
 pub mod invoices;
 pub mod luma;
 pub mod merchants;
+pub mod payment_links;
 pub mod prices;
 pub mod products;
 pub mod rates;
@@ -84,6 +85,12 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/subscriptions", web::post().to(subscriptions::create))
             .route("/subscriptions", web::get().to(subscriptions::list))
             .route("/subscriptions/{id}/cancel", web::post().to(subscriptions::cancel))
+            // Payment links (merchant auth)
+            .route("/payment-links", web::post().to(payment_links::create))
+            .route("/payment-links", web::get().to(payment_links::list))
+            .route("/payment-links/{id}", web::patch().to(payment_links::update))
+            .route("/payment-links/{id}", web::delete().to(payment_links::delete))
+            .route("/payment-links/{slug}/checkout", web::post().to(payment_links::resolve).wrap(Governor::new(&session_rate_limit)))
             // Buyer checkout (public)
             .route("/checkout", web::post().to(checkout))
             // Invoice endpoints (API key auth)
@@ -419,6 +426,17 @@ async fn checkout(
                     obj.insert("event_location".to_string(), serde_json::to_value(ctx.event_location).unwrap_or(serde_json::Value::Null));
                 }
                 obj.insert("is_luma".to_string(), serde_json::json!(is_luma_event));
+
+                let frontend_url = config.frontend_url.as_deref().unwrap_or("https://cipherpay.app");
+                let mut checkout_url = format!("{}/pay/{}", frontend_url, resp.invoice_id);
+                if let Some(ref url) = body.success_url {
+                    let encoded: String = url.chars().map(|c| match c {
+                        '&' | '=' | '?' | '#' | ' ' => format!("%{:02X}", c as u8),
+                        _ => c.to_string(),
+                    }).collect();
+                    checkout_url = format!("{}?return_url={}", checkout_url, encoded);
+                }
+                obj.insert("checkout_url".to_string(), serde_json::Value::String(checkout_url));
             }
             actix_web::HttpResponse::Created().json(payload)
         }
@@ -439,6 +457,7 @@ struct CheckoutRequest {
     refund_address: Option<String>,
     attendee_name: Option<String>,
     attendee_email: Option<String>,
+    success_url: Option<String>,
 }
 
 fn validate_checkout(req: &CheckoutRequest) -> Result<(), crate::validation::ValidationError> {
@@ -457,6 +476,14 @@ fn validate_checkout(req: &CheckoutRequest) -> Result<(), crate::validation::Val
     if let Some(ref addr) = req.refund_address {
         if !addr.is_empty() {
             crate::validation::validate_zcash_address("refund_address", addr)?;
+        }
+    }
+    if let Some(ref url) = req.success_url {
+        crate::validation::validate_length("success_url", url, 2000)?;
+        if !url.starts_with("https://") && !url.starts_with("http://") {
+            return Err(crate::validation::ValidationError::invalid(
+                "success_url", "must be a valid HTTP(S) URL"
+            ));
         }
     }
     Ok(())

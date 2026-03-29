@@ -380,6 +380,8 @@ pub async fn delete_merchant(pool: &SqlitePool, merchant_id: &str) -> anyhow::Re
     ).bind(merchant_id).execute(&mut *conn).await?;
     sqlx::query("DELETE FROM tickets WHERE merchant_id = ?")
         .bind(merchant_id).execute(&mut *conn).await?;
+    let _ = sqlx::query("DELETE FROM payment_links WHERE merchant_id = ?")
+        .bind(merchant_id).execute(&mut *conn).await;
     sqlx::query("DELETE FROM billing_cycles WHERE merchant_id = ?")
         .bind(merchant_id).execute(&mut *conn).await?;
     sqlx::query("DELETE FROM subscriptions WHERE merchant_id = ?")
