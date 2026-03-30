@@ -238,7 +238,8 @@ async fn scan_mempool(
                 Ok(outputs) => {
                     for output in &outputs {
                         let recipient_hex = hex::encode(output.recipient_raw);
-                        tracing::info!(txid, memo = %output.memo, amount = output.amount_zec, "Decrypted mempool tx");
+                        tracing::info!(txid, "Decrypted mempool output");
+                        tracing::debug!(txid, memo = %output.memo, amount = output.amount_zec, "Decrypted output details");
 
                         if let Some(invoice) = matching::find_matching_invoice(&pending, &recipient_hex, &output.memo) {
                             let entry = invoice_totals.entry(invoice.id.clone())
@@ -275,7 +276,6 @@ async fn scan_mempool(
                     let overpaid = new_received > invoice.price_zatoshis + 1000;
                     spawn_payment_webhook(pool, http, invoice_id, "detected", txid,
                         invoice.price_zatoshis, new_received, overpaid, &config.encryption_key);
-                    try_detect_fee(pool, config, raw_hex, invoice_id).await;
                 }
             } else if invoice.status == "pending" {
                 invoices::mark_underpaid(pool, invoice_id, new_received, txid).await?;
@@ -311,7 +311,10 @@ async fn scan_blocks(
                     Ok(true) => {
                         let changed = invoices::mark_confirmed(pool, &invoice.id).await?;
                         if changed {
-                            spawn_webhook(pool, http, &invoice.id, "confirmed", txid, &config.encryption_key);
+                            let overpaid = invoice.received_zatoshis > invoice.price_zatoshis + 1000;
+                            spawn_payment_webhook(pool, http, &invoice.id, "confirmed", txid,
+                                invoice.price_zatoshis, invoice.received_zatoshis, overpaid,
+                                &config.encryption_key);
                             on_invoice_confirmed(pool, http, config, invoice).await;
                         }
                     }

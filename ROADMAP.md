@@ -32,9 +32,9 @@ Privacy-preserving Zcash payment gateway. Non-custodial, shielded-only.
 - [x] `ALLOWED_ORIGINS` config for production deployment
 - [x] Concurrent batch raw tx fetching (futures::join_all, batches of 20)
 - [x] CipherScan raw tx endpoint (`GET /api/tx/{txid}/raw`)
-- [ ] Rate limiting on public endpoints (actix-web-middleware or tower)
-- [ ] Invoice lookup auth (merchant can only see own invoices)
-- [ ] Merchant registration guard (admin key or invite-only in production)
+- [ ] **Payment link server-side resolution** — move invoice creation from public API endpoint (`POST /api/payment-links/{slug}/checkout`) into the Next.js server component. Invoice creation happens server-to-server (authenticated with internal key), removing the unauthenticated public endpoint entirely. Follows Stripe's model: buyers load a web page, not an API. Page-level protection via Vercel/Cloudflare.
+- [ ] Rate limiting on public endpoints — per-API-key for authenticated routes, per-IP for remaining unauthenticated routes (registration). `actix-governor` keyed limiters, `429` with `Retry-After`.
+- [ ] Invoice lookup auth (merchant can only see own invoices via API; checkout page unaffected)
 - [ ] Input validation hardening (UFVK format check, address validation)
 - [x] **Switch from UFVK to UIVK storage** — accept UFVK or UIVK at registration, derive and store only the UIVK (discard FVK). Existing merchants migrated on startup. Reduces data exposure per principle of least privilege.
 - [ ] **Account deletion cooldown** — schedule deletion for 48h instead of immediate hard-delete. Protects against compromised sessions. Merchant can cancel within the window. After 48h, purge all data (viewing keys, invoices, products, sessions).

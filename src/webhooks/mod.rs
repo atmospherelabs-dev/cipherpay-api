@@ -365,8 +365,17 @@ pub async fn retry_failed(pool: &SqlitePool, http: &reqwest::Client, encryption_
     .await?;
 
     for (id, url, payload, raw_secret, attempts) in rows {
-        let secret = crate::crypto::decrypt_webhook_secret(&raw_secret, encryption_key)
-            .unwrap_or(raw_secret);
+        let secret = match crate::crypto::decrypt_webhook_secret(&raw_secret, encryption_key) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!(delivery_id = %id, error = %e, "Failed to decrypt webhook secret, marking delivery failed");
+                sqlx::query("UPDATE webhook_deliveries SET status = 'failed', response_error = 'Webhook secret decryption failed' WHERE id = ?")
+                    .bind(&id)
+                    .execute(pool)
+                    .await?;
+                continue;
+            }
+        };
         if let Err(reason) = crate::validation::resolve_and_check_host(&url) {
             tracing::warn!(delivery_id = %id, %url, %reason, "Webhook retry blocked: SSRF protection");
             sqlx::query("UPDATE webhook_deliveries SET status = 'failed' WHERE id = ?")

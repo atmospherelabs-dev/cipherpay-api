@@ -99,4 +99,13 @@ impl Config {
     pub fn fee_enabled(&self) -> bool {
         self.fee_address.is_some() && self.fee_ufvk.is_some() && self.fee_rate > 0.0
     }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if !self.is_testnet() && self.encryption_key.is_empty() {
+            anyhow::bail!(
+                "ENCRYPTION_KEY is required in production (mainnet). Set a 64-char hex key."
+            );
+        }
+        Ok(())
+    }
 }
