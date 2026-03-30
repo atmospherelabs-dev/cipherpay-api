@@ -125,7 +125,7 @@ pub async fn open(
 
         if session_outputs.is_empty() {
             return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": format!("No output with session memo found. Expected memo: {}", expected_memo),
+                "error": "No output with matching session memo found in transaction",
             }));
         }
         session_outputs.iter().map(|o| o.amount_zatoshis as i64).sum()

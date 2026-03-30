@@ -249,11 +249,15 @@ pub async fn create_invoice(
 
     tracing::info!(
         invoice_id = %id,
-        memo = %memo_code,
         currency = %currency,
-        amount = %amount,
         diversifier_index = div_index,
         "Invoice created with unique address"
+    );
+    tracing::debug!(
+        invoice_id = %id,
+        memo = %memo_code,
+        amount = %amount,
+        "Invoice details"
     );
 
     Ok(CreateInvoiceResponse {
@@ -356,13 +360,17 @@ pub async fn get_pending_invoices(pool: &SqlitePool) -> anyhow::Result<Vec<Invoi
 /// Returns true if the status actually changed (used to gate webhook dispatch).
 pub async fn mark_detected(pool: &SqlitePool, invoice_id: &str, txid: &str, received_zatoshis: i64) -> anyhow::Result<bool> {
     let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let new_expires = (Utc::now() + Duration::minutes(30))
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
     let result = sqlx::query(
-        "UPDATE invoices SET status = 'detected', detected_txid = ?, detected_at = ?, received_zatoshis = ?
+        "UPDATE invoices SET status = 'detected', detected_txid = ?, detected_at = ?, received_zatoshis = ?, expires_at = ?
          WHERE id = ? AND status IN ('pending', 'underpaid')"
     )
     .bind(txid)
     .bind(&now)
     .bind(received_zatoshis)
+    .bind(&new_expires)
     .bind(invoice_id)
     .execute(pool)
     .await?;
