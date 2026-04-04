@@ -83,15 +83,27 @@ pub fn decrypt_webhook_secret(data: &str, key_hex: &str) -> Result<String> {
     decrypt(data, key_hex)
 }
 
-/// Deterministic hash for blind-index lookups (e.g. recovery email).
-/// Uses SHA-256 of the lowercased, trimmed value so we can do
-/// WHERE hash_col = ? without needing to decrypt every row.
-pub fn blind_index(value: &str) -> String {
-    use sha2::{Digest, Sha256};
+/// Deterministic keyed hash for blind-index lookups (e.g. recovery email).
+/// Uses HMAC-SHA256 keyed with the encryption key so the index cannot be
+/// brute-forced without the key. Falls back to plain SHA-256 when no key is set.
+pub fn blind_index(value: &str, key_hex: &str) -> String {
+    use sha2::Sha256;
     let normalized = value.trim().to_lowercase();
-    let mut hasher = Sha256::new();
-    hasher.update(normalized.as_bytes());
-    hex::encode(hasher.finalize())
+
+    if key_hex.is_empty() {
+        use sha2::Digest;
+        let mut hasher = Sha256::new();
+        hasher.update(normalized.as_bytes());
+        return hex::encode(hasher.finalize());
+    }
+
+    use hmac::{Hmac, Mac};
+    type HmacSha256 = Hmac<Sha256>;
+    let key_bytes = key_hex.as_bytes();
+    let mut mac = <HmacSha256 as Mac>::new_from_slice(key_bytes)
+        .expect("HMAC accepts any key length");
+    mac.update(normalized.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
 }
 
 /// Decrypt a recovery email, handling migration from plaintext.

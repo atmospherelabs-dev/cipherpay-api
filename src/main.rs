@@ -41,6 +41,7 @@ async fn main() -> anyhow::Result<()> {
     db::migrate_ufvk_to_uivk(&pool, &config.encryption_key).await?;
     db::migrate_encrypt_webhook_secrets(&pool, &config.encryption_key).await?;
     db::migrate_encrypt_recovery_emails(&pool, &config.encryption_key).await?;
+    db::migrate_blind_index_to_hmac(&pool, &config.encryption_key).await?;
     let mut default_headers = reqwest::header::HeaderMap::new();
     default_headers.insert("User-Agent", reqwest::header::HeaderValue::from_static("CipherPay/1.0"));
     if let Ok(key) = std::env::var("CIPHERSCAN_SERVICE_KEY") {
@@ -181,7 +182,7 @@ async fn main() -> anyhow::Result<()> {
         .expect("Failed to build rate limiter");
 
     HttpServer::new(move || {
-        let cors = if config.is_testnet() || config.allowed_origins.is_empty() {
+        let cors = if config.is_testnet() {
             Cors::default()
                 .allowed_origin_fn(|_origin, _req_head| true)
                 .allow_any_method()
@@ -209,6 +210,7 @@ async fn main() -> anyhow::Result<()> {
                 .add(("Referrer-Policy", "strict-origin-when-cross-origin"))
                 .add(("Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload"))
                 .add(("Permissions-Policy", "camera=(), microphone=(), geolocation=()"))
+                .add(("Cache-Control", "private, no-store"))
             )
             .app_data(web::JsonConfig::default().limit(65_536))
             .app_data(web::Data::new(pool.clone()))

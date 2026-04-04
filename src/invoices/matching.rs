@@ -1,19 +1,36 @@
+use std::collections::HashMap;
 use super::Invoice;
 
-/// Primary matching: find an invoice by its Orchard receiver address.
-/// The cryptographic address is the authoritative source of truth.
-pub fn find_by_address<'a>(
+/// Pre-built index for O(1) invoice matching by Orchard receiver address.
+pub struct InvoiceIndex<'a> {
+    by_address: HashMap<&'a str, &'a Invoice>,
     invoices: &'a [Invoice],
-    recipient_hex: &str,
-) -> Option<&'a Invoice> {
-    invoices.iter().find(|i| {
-        i.orchard_receiver_hex.as_deref() == Some(recipient_hex)
-    })
+}
+
+impl<'a> InvoiceIndex<'a> {
+    pub fn build(invoices: &'a [Invoice]) -> Self {
+        let mut by_address = HashMap::with_capacity(invoices.len());
+        for inv in invoices {
+            if let Some(ref addr) = inv.orchard_receiver_hex {
+                by_address.insert(addr.as_str(), inv);
+            }
+        }
+        Self { by_address, invoices }
+    }
+
+    /// O(1) address lookup, then linear memo fallback for legacy invoices.
+    /// Security invariant: address match wins unconditionally over memo.
+    pub fn find(&self, recipient_hex: &str, memo_text: &str) -> Option<&'a Invoice> {
+        if let Some(inv) = self.by_address.get(recipient_hex) {
+            return Some(inv);
+        }
+        find_by_memo(self.invoices, memo_text)
+    }
 }
 
 /// Fallback matching: find a pending invoice whose memo_code matches the decrypted memo text.
 /// Only used for old invoices created before diversified addresses were enabled.
-pub fn find_by_memo<'a>(
+fn find_by_memo<'a>(
     invoices: &'a [Invoice],
     memo_text: &str,
 ) -> Option<&'a Invoice> {
@@ -29,17 +46,18 @@ pub fn find_by_memo<'a>(
     invoices.iter().find(|i| memo_trimmed.contains(&i.memo_code))
 }
 
-/// Find the matching invoice using address-first, memo-fallback strategy.
-/// Security invariant: if address matches Invoice A, that wins unconditionally,
-/// even if the memo points to a different invoice.
+/// Convenience wrapper that builds an index inline — use InvoiceIndex::build
+/// directly when matching against the same invoice set multiple times.
 pub fn find_matching_invoice<'a>(
     invoices: &'a [Invoice],
     recipient_hex: &str,
     memo_text: &str,
 ) -> Option<&'a Invoice> {
-    if let Some(inv) = find_by_address(invoices, recipient_hex) {
+    // For single-call sites, delegate to linear scan (index overhead not worth it)
+    if let Some(inv) = invoices.iter().find(|i| {
+        i.orchard_receiver_hex.as_deref() == Some(recipient_hex)
+    }) {
         return Some(inv);
     }
-
     find_by_memo(invoices, memo_text)
 }

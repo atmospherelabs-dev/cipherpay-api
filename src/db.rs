@@ -1042,7 +1042,7 @@ pub async fn migrate_encrypt_recovery_emails(pool: &SqlitePool, encryption_key: 
             email_raw.clone()
         };
 
-        let hash = crate::crypto::blind_index(&plaintext);
+        let hash = crate::crypto::blind_index(&plaintext, encryption_key);
 
         let stored = if !encryption_key.is_empty() && plaintext.contains('@') {
             crate::crypto::encrypt(&plaintext, encryption_key)?
@@ -1058,6 +1058,50 @@ pub async fn migrate_encrypt_recovery_emails(pool: &SqlitePool, encryption_key: 
             .await?;
     }
     tracing::info!("Recovery email encryption migration complete");
+    Ok(())
+}
+
+/// Re-hash blind indices from plain SHA-256 to HMAC-SHA256 keyed with ENCRYPTION_KEY.
+/// Detects old-format hashes by length (SHA-256 = 64 hex chars) and re-computes them.
+/// Safe to run multiple times — skips rows that already have HMAC hashes.
+pub async fn migrate_blind_index_to_hmac(pool: &SqlitePool, encryption_key: &str) -> anyhow::Result<()> {
+    if encryption_key.is_empty() {
+        return Ok(());
+    }
+
+    let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
+        "SELECT id, recovery_email, recovery_email_hash FROM merchants
+         WHERE recovery_email IS NOT NULL AND recovery_email != ''
+         AND recovery_email_hash IS NOT NULL AND recovery_email_hash != ''"
+    )
+    .fetch_all(pool)
+    .await?;
+
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    let mut migrated = 0u32;
+    for (id, enc_email, existing_hash) in &rows {
+        let plaintext = crate::crypto::decrypt_email(enc_email, encryption_key)
+            .unwrap_or_else(|_| enc_email.clone());
+        let new_hash = crate::crypto::blind_index(&plaintext, encryption_key);
+
+        if existing_hash.as_deref() == Some(&new_hash) {
+            continue;
+        }
+
+        sqlx::query("UPDATE merchants SET recovery_email_hash = ? WHERE id = ?")
+            .bind(&new_hash)
+            .bind(id)
+            .execute(pool)
+            .await?;
+        migrated += 1;
+    }
+
+    if migrated > 0 {
+        tracing::info!(count = migrated, "Migrated blind indices to HMAC-SHA256");
+    }
     Ok(())
 }
 
