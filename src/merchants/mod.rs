@@ -122,7 +122,7 @@ pub async fn create_merchant(
             } else {
                 crate::crypto::encrypt(email, encryption_key)?
             };
-            let hash = crate::crypto::blind_index(email);
+            let hash = crate::crypto::blind_index(email, encryption_key);
             (Some(encrypted), Some(hash))
         }
         _ => (None, None),
@@ -311,7 +311,7 @@ pub async fn next_diversifier_index(pool: &SqlitePool, merchant_id: &str) -> any
 }
 
 pub async fn find_by_email(pool: &SqlitePool, email: &str, encryption_key: &str) -> anyhow::Result<Option<Merchant>> {
-    let email_hash = crate::crypto::blind_index(email);
+    let email_hash = crate::crypto::blind_index(email, encryption_key);
     let row = sqlx::query_as::<_, MerchantRow>(
         &format!("SELECT {MERCHANT_COLS} FROM merchants WHERE recovery_email_hash = ?")
     )

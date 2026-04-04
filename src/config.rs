@@ -106,6 +106,11 @@ impl Config {
                 "ENCRYPTION_KEY is required in production (mainnet). Set a 64-char hex key."
             );
         }
+        if !self.is_testnet() && self.allowed_origins.is_empty() {
+            anyhow::bail!(
+                "ALLOWED_ORIGINS is required in production (mainnet). Set comma-separated origins, e.g. https://cipherpay.app,https://www.cipherpay.app"
+            );
+        }
         Ok(())
     }
 }

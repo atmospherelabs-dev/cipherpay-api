@@ -496,7 +496,7 @@ pub async fn update_me(
                     }
                 }
             };
-            let hash = crate::crypto::blind_index(email);
+            let hash = crate::crypto::blind_index(email, &config.encryption_key);
             sqlx::query("UPDATE merchants SET recovery_email = ?, recovery_email_hash = ? WHERE id = ?")
                 .bind(&encrypted)
                 .bind(&hash)

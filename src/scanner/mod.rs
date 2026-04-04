@@ -26,6 +26,7 @@ struct KeyCache {
 }
 
 pub async fn run(config: Config, pool: SqlitePool, http: reqwest::Client) {
+    let circuit_breaker = Arc::new(blocks::CircuitBreaker::new());
     let seen_txids: SeenTxids = Arc::new(RwLock::new(HashMap::new()));
 
     let persisted_height = crate::db::get_scanner_state(&pool, "last_height").await
@@ -46,6 +47,7 @@ pub async fn run(config: Config, pool: SqlitePool, http: reqwest::Client) {
     let mempool_pool = pool.clone();
     let mempool_http = http.clone();
     let mempool_seen = seen_txids.clone();
+    let mempool_cb = circuit_breaker.clone();
 
     let mempool_handle = tokio::spawn(async move {
         let mut key_cache: Option<KeyCache> = None;
@@ -54,8 +56,16 @@ pub async fn run(config: Config, pool: SqlitePool, http: reqwest::Client) {
         );
         loop {
             interval.tick().await;
-            if let Err(e) = scan_mempool(&mempool_config, &mempool_pool, &mempool_http, &mempool_seen, &mut key_cache).await {
-                tracing::error!(error = %e, "Mempool scan error");
+            if mempool_cb.is_open() {
+                tracing::debug!("CipherScan circuit breaker open, skipping mempool scan");
+                continue;
+            }
+            match scan_mempool(&mempool_config, &mempool_pool, &mempool_http, &mempool_seen, &mut key_cache).await {
+                Ok(_) => mempool_cb.record_success(),
+                Err(e) => {
+                    mempool_cb.record_failure();
+                    tracing::error!(error = %e, "Mempool scan error");
+                }
             }
 
             if mempool_config.fee_enabled() {
@@ -68,6 +78,7 @@ pub async fn run(config: Config, pool: SqlitePool, http: reqwest::Client) {
     let block_pool = pool.clone();
     let block_http = http.clone();
     let block_seen = seen_txids.clone();
+    let block_cb = circuit_breaker.clone();
 
     let block_handle = tokio::spawn(async move {
         let mut key_cache: Option<KeyCache> = None;
@@ -78,8 +89,16 @@ pub async fn run(config: Config, pool: SqlitePool, http: reqwest::Client) {
             interval.tick().await;
             let _ = invoices::expire_old_invoices(&block_pool).await;
 
-            if let Err(e) = scan_blocks(&block_config, &block_pool, &block_http, &block_seen, &last_height, &mut key_cache).await {
-                tracing::error!(error = %e, "Block scan error");
+            if block_cb.is_open() {
+                tracing::debug!("CipherScan circuit breaker open, skipping block scan");
+                continue;
+            }
+            match scan_blocks(&block_config, &block_pool, &block_http, &block_seen, &last_height, &mut key_cache).await {
+                Ok(_) => block_cb.record_success(),
+                Err(e) => {
+                    block_cb.record_failure();
+                    tracing::error!(error = %e, "Block scan error");
+                }
             }
         }
     });
@@ -145,21 +164,6 @@ fn refresh_key_cache<'a>(
     }
 
     &cache.as_ref().unwrap().keys
-}
-
-/// Fire a webhook without blocking the scan loop.
-fn spawn_webhook(pool: &SqlitePool, http: &reqwest::Client, invoice_id: &str, event: &str, txid: &str, encryption_key: &str) {
-    let pool = pool.clone();
-    let http = http.clone();
-    let invoice_id = invoice_id.to_string();
-    let event = event.to_string();
-    let txid = txid.to_string();
-    let enc_key = encryption_key.to_string();
-    tokio::spawn(async move {
-        if let Err(e) = webhooks::dispatch(&pool, &http, &invoice_id, &event, &txid, &enc_key).await {
-            tracing::error!(invoice_id, event, error = %e, "Async webhook failed");
-        }
-    });
 }
 
 /// Fire a payment webhook without blocking the scan loop.
@@ -229,8 +233,9 @@ async fn scan_mempool(
     let raw_txs = mempool::fetch_raw_txs_batch(http, &config.cipherscan_api_url, &new_txids).await;
     tracing::debug!(fetched = raw_txs.len(), total = new_txids.len(), "Batch fetched raw txs");
 
+    let invoice_index = matching::InvoiceIndex::build(&pending);
+
     for (txid, raw_hex) in &raw_txs {
-        // Aggregate all outputs per invoice across all merchants in this tx
         let mut invoice_totals: HashMap<String, (invoices::Invoice, i64)> = HashMap::new();
 
         for (_merchant_id, keys) in cached_keys {
@@ -241,7 +246,7 @@ async fn scan_mempool(
                         tracing::info!(txid, "Decrypted mempool output");
                         tracing::debug!(txid, memo = %output.memo, amount = output.amount_zec, "Decrypted output details");
 
-                        if let Some(invoice) = matching::find_matching_invoice(&pending, &recipient_hex, &output.memo) {
+                        if let Some(invoice) = invoice_index.find(&recipient_hex, &output.memo) {
                             let entry = invoice_totals.entry(invoice.id.clone())
                                 .or_insert((invoice.clone(), 0));
                             entry.1 += output.amount_zatoshis as i64;
@@ -353,6 +358,8 @@ async fn scan_blocks(
         let cached_keys = refresh_key_cache(key_cache, &merchants);
         let block_txids = blocks::fetch_block_txids(http, &config.cipherscan_api_url, start_height, batch_end).await?;
 
+        let block_invoice_index = matching::InvoiceIndex::build(&pending);
+
         for txid in &block_txids {
             if seen.read().await.contains_key(txid) {
                 continue;
@@ -368,7 +375,7 @@ async fn scan_blocks(
                 if let Ok(outputs) = decrypt::try_decrypt_with_keys(&raw_hex, keys) {
                     for output in &outputs {
                         let recipient_hex = hex::encode(output.recipient_raw);
-                        if let Some(invoice) = matching::find_matching_invoice(&pending, &recipient_hex, &output.memo) {
+                        if let Some(invoice) = block_invoice_index.find(&recipient_hex, &output.memo) {
                             let entry = invoice_totals.entry(invoice.id.clone())
                                 .or_insert((invoice.clone(), 0));
                             entry.1 += output.amount_zatoshis as i64;
@@ -537,7 +544,7 @@ async fn on_invoice_confirmed(
     }
 
     let fee_amount = invoice.price_zec * config.fee_rate;
-    if fee_amount < 0.00000001 {
+    if fee_amount < 0.00025 {
         return;
     }
 

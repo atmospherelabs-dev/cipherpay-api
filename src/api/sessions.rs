@@ -60,10 +60,11 @@ pub async fn open(
             }
         }
     } else if let Some(ref mid) = body.merchant_id {
+        tracing::warn!(merchant_id = %mid, "Deprecated: memo-based session opening. Use POST /api/sessions/prepare + session_request_id instead.");
         (mid.clone(), None)
     } else {
         return HttpResponse::BadRequest().json(serde_json::json!({
-            "error": "Either merchant_id or session_request_id is required"
+            "error": "session_request_id is required. Use POST /api/sessions/prepare to get one."
         }));
     };
 
@@ -445,26 +446,17 @@ pub async fn validate(
     req: HttpRequest,
     pool: web::Data<SqlitePool>,
 ) -> HttpResponse {
-    // Accept token from Authorization: Bearer header (preferred) or query param (legacy)
     let token = req.headers().get("Authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "))
         .map(|s| s.trim().to_string())
-        .filter(|s| s.starts_with("cps_"))
-        .or_else(|| {
-            req.query_string()
-                .split('&')
-                .find_map(|pair| {
-                    let (k, v) = pair.split_once('=')?;
-                    if k == "token" { Some(v.to_string()) } else { None }
-                })
-        });
+        .filter(|s| s.starts_with("cps_"));
 
     let token = match token {
         Some(t) if !t.is_empty() => t,
         _ => {
             return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": "Bearer token required — use Authorization: Bearer header or token query parameter"
+                "error": "Bearer token required — use Authorization: Bearer cps_... header"
             }));
         }
     };
