@@ -44,11 +44,9 @@ async fn main() -> anyhow::Result<()> {
     db::migrate_blind_index_to_hmac(&pool, &config.encryption_key).await?;
     let mut default_headers = reqwest::header::HeaderMap::new();
     default_headers.insert("User-Agent", reqwest::header::HeaderValue::from_static("CipherPay/1.0"));
-    if let Ok(key) = std::env::var("CIPHERSCAN_SERVICE_KEY") {
-        if !key.is_empty() {
-            if let Ok(val) = reqwest::header::HeaderValue::from_str(&key) {
-                default_headers.insert("X-Service-Key", val);
-            }
+    if let Some(ref key) = config.cipherscan_service_key {
+        if let Ok(val) = reqwest::header::HeaderValue::from_str(key) {
+            default_headers.insert("X-Service-Key", val);
         }
     }
     let http_client = reqwest::Client::builder()

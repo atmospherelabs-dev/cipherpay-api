@@ -1,6 +1,7 @@
 pub mod mempool;
 pub mod blocks;
 pub mod decrypt;
+pub mod ws;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -43,33 +44,83 @@ pub async fn run(config: Config, pool: SqlitePool, http: reqwest::Client) {
         "Scanner started"
     );
 
+    // Spawn WS client if service key is configured
+    let mut ws_rx: Option<tokio::sync::mpsc::Receiver<ws::MempoolPush>> = None;
+    if let Some(ref key) = config.cipherscan_service_key {
+        let ws_url = ws::api_url_to_ws(&config.cipherscan_api_url);
+        let (tx, rx) = tokio::sync::mpsc::channel(256);
+        ws_rx = Some(rx);
+        let ws_key = key.clone();
+        tokio::spawn(async move {
+            ws::run(ws_url, ws_key, tx).await;
+        });
+    }
+
     let mempool_config = config.clone();
     let mempool_pool = pool.clone();
     let mempool_http = http.clone();
     let mempool_seen = seen_txids.clone();
     let mempool_cb = circuit_breaker.clone();
+    let has_ws = ws_rx.is_some();
 
     let mempool_handle = tokio::spawn(async move {
         let mut key_cache: Option<KeyCache> = None;
-        let mut interval = tokio::time::interval(
-            std::time::Duration::from_secs(mempool_config.mempool_poll_interval_secs),
-        );
-        loop {
-            interval.tick().await;
-            if mempool_cb.is_open() {
-                tracing::debug!("CipherScan circuit breaker open, skipping mempool scan");
-                continue;
-            }
-            match scan_mempool(&mempool_config, &mempool_pool, &mempool_http, &mempool_seen, &mut key_cache).await {
-                Ok(_) => mempool_cb.record_success(),
-                Err(e) => {
-                    mempool_cb.record_failure();
-                    tracing::error!(error = %e, "Mempool scan error");
-                }
-            }
+        let mut ws_receiver = ws_rx;
 
-            if mempool_config.fee_enabled() {
-                let _ = billing::check_settlement_payments(&mempool_pool).await;
+        // With WS: poll every 30s as a slow fallback. Without: use configured interval.
+        let poll_secs = if has_ws { 30 } else { mempool_config.mempool_poll_interval_secs };
+        let mut interval = tokio::time::interval(
+            std::time::Duration::from_secs(poll_secs),
+        );
+
+        if has_ws {
+            tracing::info!(poll_fallback_secs = poll_secs, "Mempool: WebSocket mode + polling fallback");
+        }
+
+        loop {
+            tokio::select! {
+                result = async {
+                    match ws_receiver.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    match result {
+                        Some(push) => {
+                            {
+                                let mut seen_set = mempool_seen.write().await;
+                                seen_set.insert(push.txid.clone(), Instant::now());
+                            }
+                            if let Err(e) = process_ws_mempool_tx(
+                                &mempool_config, &mempool_pool, &mempool_http,
+                                &push, &mut key_cache,
+                            ).await {
+                                tracing::error!(error = %e, txid = %push.txid, "WS mempool tx error");
+                            }
+                        }
+                        None => {
+                            tracing::warn!("[WS] Channel closed, falling back to polling only");
+                            ws_receiver = None;
+                        }
+                    }
+                }
+                _ = interval.tick() => {
+                    if mempool_cb.is_open() {
+                        tracing::debug!("CipherScan circuit breaker open, skipping mempool scan");
+                        continue;
+                    }
+                    match scan_mempool(&mempool_config, &mempool_pool, &mempool_http, &mempool_seen, &mut key_cache).await {
+                        Ok(_) => mempool_cb.record_success(),
+                        Err(e) => {
+                            mempool_cb.record_failure();
+                            tracing::error!(error = %e, "Mempool scan error");
+                        }
+                    }
+
+                    if mempool_config.fee_enabled() {
+                        let _ = billing::check_settlement_payments(&mempool_pool).await;
+                    }
+                }
             }
         }
     });
@@ -287,6 +338,87 @@ async fn scan_mempool(
                 spawn_payment_webhook(pool, http, invoice_id, "underpaid", txid,
                     invoice.price_zatoshis, new_received, false, &config.encryption_key);
             }
+        }
+    }
+
+    Ok(())
+}
+
+/// Process a single mempool transaction pushed via WebSocket (with raw_hex included).
+/// Skips the HTTP fetch entirely — goes straight to trial decryption.
+async fn process_ws_mempool_tx(
+    config: &Config,
+    pool: &SqlitePool,
+    http: &reqwest::Client,
+    push: &ws::MempoolPush,
+    key_cache: &mut Option<KeyCache>,
+) -> anyhow::Result<()> {
+    let pending = invoices::get_pending_invoices(pool).await?;
+    if pending.is_empty() {
+        return Ok(());
+    }
+
+    let merchants = crate::merchants::get_all_merchants(pool, &config.encryption_key).await?;
+    if merchants.is_empty() {
+        return Ok(());
+    }
+
+    let cached_keys = refresh_key_cache(key_cache, &merchants);
+    let invoice_index = matching::InvoiceIndex::build(&pending);
+
+    let mut invoice_totals: HashMap<String, (invoices::Invoice, i64)> = HashMap::new();
+
+    for (_merchant_id, keys) in cached_keys {
+        match decrypt::try_decrypt_with_keys(&push.raw_hex, keys) {
+            Ok(outputs) => {
+                for output in &outputs {
+                    let recipient_hex = hex::encode(output.recipient_raw);
+                    tracing::info!(txid = %push.txid, "[WS] Decrypted mempool output");
+                    tracing::debug!(
+                        txid = %push.txid, memo = %output.memo,
+                        amount = output.amount_zec, "Decrypted output details"
+                    );
+
+                    if let Some(invoice) = invoice_index.find(&recipient_hex, &output.memo) {
+                        let entry = invoice_totals.entry(invoice.id.clone())
+                            .or_insert((invoice.clone(), 0));
+                        entry.1 += output.amount_zatoshis as i64;
+                    }
+                }
+            }
+            Err(_) => {}
+        }
+    }
+
+    for (invoice_id, (invoice, tx_total)) in &invoice_totals {
+        let dust_min = std::cmp::max(
+            (invoice.price_zatoshis as f64 * decrypt::DUST_THRESHOLD_FRACTION) as i64,
+            decrypt::DUST_THRESHOLD_MIN_ZATOSHIS,
+        );
+        if *tx_total < dust_min && *tx_total < invoice.price_zatoshis {
+            tracing::debug!(invoice_id, tx_total, dust_min, "Ignoring dust payment");
+            continue;
+        }
+
+        let new_received = if invoice.status == "underpaid" {
+            invoices::accumulate_payment(pool, invoice_id, *tx_total).await?
+        } else {
+            *tx_total
+        };
+
+        let min = (invoice.price_zatoshis as f64 * decrypt::SLIPPAGE_TOLERANCE) as i64;
+
+        if new_received >= min {
+            let changed = invoices::mark_detected(pool, invoice_id, &push.txid, new_received).await?;
+            if changed {
+                let overpaid = new_received > invoice.price_zatoshis + 1000;
+                spawn_payment_webhook(pool, http, invoice_id, "detected", &push.txid,
+                    invoice.price_zatoshis, new_received, overpaid, &config.encryption_key);
+            }
+        } else if invoice.status == "pending" {
+            invoices::mark_underpaid(pool, invoice_id, new_received, &push.txid).await?;
+            spawn_payment_webhook(pool, http, invoice_id, "underpaid", &push.txid,
+                invoice.price_zatoshis, new_received, false, &config.encryption_key);
         }
     }
 
