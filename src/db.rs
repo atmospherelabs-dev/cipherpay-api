@@ -934,6 +934,63 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_events_luma ON events(luma_event_id)")
         .execute(&pool).await.ok();
 
+    // Donation infrastructure: extend payment_links and invoices
+    for sql in &[
+        "ALTER TABLE payment_links ADD COLUMN mode TEXT NOT NULL DEFAULT 'payment'",
+        "ALTER TABLE payment_links ADD COLUMN donation_config TEXT",
+        "ALTER TABLE payment_links ADD COLUMN total_raised INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE invoices ADD COLUMN payment_link_id TEXT",
+        "ALTER TABLE invoices ADD COLUMN is_donation INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE invoices ADD COLUMN campaign_counted INTEGER NOT NULL DEFAULT 0",
+    ] {
+        sqlx::query(sql).execute(&pool).await.ok();
+    }
+
+    // Make price_id nullable for donation mode (donation links have no price).
+    // SQLite requires table recreation to change column constraints.
+    let needs_pl_migrate: bool = sqlx::query_scalar::<_, i32>(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='payment_links'
+         AND sql LIKE '%price_id TEXT NOT NULL%'"
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap_or(0) > 0;
+
+    if needs_pl_migrate {
+        tracing::info!("Migrating payment_links (making price_id nullable for donation mode)...");
+        sqlx::query("ALTER TABLE payment_links RENAME TO payment_links_old")
+            .execute(&pool).await.ok();
+        sqlx::query(
+            "CREATE TABLE payment_links (
+                id TEXT PRIMARY KEY,
+                merchant_id TEXT NOT NULL REFERENCES merchants(id),
+                price_id TEXT REFERENCES prices(id),
+                slug TEXT NOT NULL UNIQUE,
+                name TEXT,
+                success_url TEXT,
+                metadata TEXT,
+                active INTEGER NOT NULL DEFAULT 1,
+                total_created INTEGER NOT NULL DEFAULT 0,
+                mode TEXT NOT NULL DEFAULT 'payment',
+                donation_config TEXT,
+                total_raised INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            )"
+        ).execute(&pool).await.ok();
+        sqlx::query(
+            "INSERT INTO payment_links SELECT
+                id, merchant_id, price_id, slug, name, success_url, metadata,
+                active, total_created, mode, donation_config, total_raised, created_at
+             FROM payment_links_old"
+        ).execute(&pool).await.ok();
+        sqlx::query("DROP TABLE payment_links_old").execute(&pool).await.ok();
+        sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS idx_payment_links_slug ON payment_links(slug)")
+            .execute(&pool).await.ok();
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_payment_links_merchant ON payment_links(merchant_id)")
+            .execute(&pool).await.ok();
+        tracing::info!("payment_links migration complete (price_id now nullable)");
+    }
+
     tracing::info!("Database ready (SQLite)");
     Ok(pool)
 }

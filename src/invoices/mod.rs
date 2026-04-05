@@ -43,6 +43,9 @@ pub struct Invoice {
     pub price_zatoshis: i64,
     pub received_zatoshis: i64,
     pub subscription_id: Option<String>,
+    pub payment_link_id: Option<String>,
+    pub is_donation: i32,
+    pub campaign_counted: i32,
 }
 
 #[derive(Debug, Serialize, FromRow)]
@@ -288,7 +291,8 @@ pub async fn get_invoice(pool: &SqlitePool, id: &str) -> anyhow::Result<Option<I
          i.confirmed_at, i.refunded_at, i.refund_txid, i.expires_at, i.purge_after, i.created_at,
          i.orchard_receiver_hex, i.diversifier_index,
          i.price_zatoshis, i.received_zatoshis,
-         i.subscription_id
+         i.subscription_id,
+         i.payment_link_id, i.is_donation, i.campaign_counted
          FROM invoices i
          LEFT JOIN merchants m ON m.id = i.merchant_id
          WHERE i.id = ?"
@@ -313,7 +317,8 @@ pub async fn get_invoice_by_memo(pool: &SqlitePool, memo_code: &str) -> anyhow::
          i.confirmed_at, i.refunded_at, i.refund_txid, i.expires_at, i.purge_after, i.created_at,
          i.orchard_receiver_hex, i.diversifier_index,
          i.price_zatoshis, i.received_zatoshis,
-         i.subscription_id
+         i.subscription_id,
+         i.payment_link_id, i.is_donation, i.campaign_counted
          FROM invoices i
          LEFT JOIN merchants m ON m.id = i.merchant_id
          WHERE i.memo_code = ?"
@@ -347,7 +352,8 @@ pub async fn get_pending_invoices(pool: &SqlitePool) -> anyhow::Result<Vec<Invoi
          confirmed_at, NULL AS refunded_at, NULL AS refund_txid, expires_at, purge_after, created_at,
          orchard_receiver_hex, diversifier_index,
          price_zatoshis, received_zatoshis,
-         subscription_id
+         subscription_id,
+         payment_link_id, is_donation, campaign_counted
          FROM invoices WHERE status IN ('pending', 'underpaid', 'detected')
          AND expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
     )

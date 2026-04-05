@@ -566,13 +566,35 @@ async fn scan_blocks(
 }
 
 /// When an invoice is confirmed, create a fee ledger entry, ensure a billing cycle exists,
-/// and advance the subscription period if this is a subscription invoice.
+/// advance the subscription period if this is a subscription invoice, and increment
+/// campaign totals for donation invoices.
 async fn on_invoice_confirmed(
     pool: &SqlitePool,
     http: &reqwest::Client,
     config: &Config,
     invoice: &invoices::Invoice,
 ) {
+    // Donation campaign tracking: increment total_raised exactly once per invoice
+    if invoice.is_donation == 1 && invoice.campaign_counted == 0 {
+        if let Some(ref link_id) = invoice.payment_link_id {
+            let amount_cents = (invoice.amount.unwrap_or(invoice.price_eur) * 100.0) as i64;
+            // Atomic: set campaign_counted=1 only if still 0 (belt-and-suspenders idempotency)
+            let marked = sqlx::query(
+                "UPDATE invoices SET campaign_counted = 1 WHERE id = ? AND campaign_counted = 0"
+            )
+            .bind(&invoice.id)
+            .execute(pool)
+            .await;
+
+            if let Ok(r) = marked {
+                if r.rows_affected() > 0 {
+                    if let Err(e) = crate::payment_links::increment_raised(pool, link_id, amount_cents).await {
+                        tracing::error!(invoice_id = %invoice.id, error = %e, "Failed to increment campaign total_raised");
+                    }
+                }
+            }
+        }
+    }
     if let Some(ref product_id) = invoice.product_id {
         match crate::events::is_product_backed_by_event(pool, product_id).await {
             Ok(true) => {

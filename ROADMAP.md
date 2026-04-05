@@ -41,14 +41,19 @@ Privacy-preserving Zcash payment gateway. Non-custodial, shielded-only.
 
 ## Phase 2 -- Performance & Real-Time
 
-- [ ] **Parallel trial decryption** with `rayon` (.par_iter() over merchants x actions)
-- [ ] **CipherScan WebSocket stream** (`ws://api.cipherscan.app/mempool/stream`)
-  - Push raw tx hex as Zebra sees new txids
-  - Eliminates polling latency entirely
-  - Single persistent connection per CipherPay instance
+- [x] **CipherScan WebSocket stream** (real-time mempool push via service key)
+  - CipherScan receives mempool events from Zebra gRPC indexer
+  - Service clients subscribe to `raw_mempool` channel via `X-Service-Key` header
+  - Raw tx hex pushed to CipherPay on every mempool event — zero HTTP overhead
+  - Sub-second payment detection (was 5s polling)
+  - 30s polling retained as resilience fallback
+  - Auto-reconnect with exponential backoff (3s → 30s cap)
+- [ ] **hasOrchard early filter** — skip non-Orchard txs before trial decryption (CipherPay side). Quick win at scale.
+- [ ] **Cached pending invoices + merchant keys** — refresh every 2–5s instead of per-WS-push DB query. Removes SQLite bottleneck under high mempool throughput.
+- [ ] **Parallel trial decryption** with `rayon` (.par_iter() over merchants × actions). Near-linear speedup across CPU cores.
 - [ ] **CipherScan batch raw tx endpoint** (`POST /api/tx/raw/batch`)
   - Accept array of txids, return array of hex
-  - Single HTTP round-trip instead of N calls
+  - Single HTTP round-trip instead of N calls (for polling fallback path)
 - [ ] Mempool deduplication improvements (bloom filter for seen txids)
 - [ ] Sapling trial decryption support (currently Orchard-only)
 - [ ] Scanner metrics (Prometheus endpoint: decryption rate, latency, match rate)
@@ -73,6 +78,50 @@ Privacy-preserving Zcash payment gateway. Non-custodial, shielded-only.
   - Drop-in payment button with modal checkout
 - [ ] Multi-currency display (EUR, USD, GBP with locked ZEC rate)
 - [ ] Email notifications (optional, privacy-conscious: no PII in email body)
+
+## Phase 3.5 -- Donation Infrastructure
+
+- [ ] **Donation mode for payment links** — `mode` column on `payment_links` ('payment' | 'donation')
+  - Donation links have no `price_id` — amount chosen by donor at checkout
+  - `donation_config` JSON: mission statement, suggested amounts, thank-you message, campaign name/goal
+  - `total_raised` counter incremented on confirmation
+  - `payment_link_id` FK on invoices for campaign progress tracking
+  - `is_donation` flag on invoices for checkout UI adaptation
+  - Same fee structure as commerce (no bypass vector)
+- [ ] **Donor-facing amount selection page** (`/donate/{slug}`)
+  - Preset amount buttons (configurable per link) + custom amount input
+  - Campaign progress bar (if goal set)
+  - Org name + mission statement display
+  - Min/max amount validation ($1–$10K default, configurable)
+  - Resolves to standard checkout flow (`/pay/{id}`)
+- [ ] **Donation checkout UX** — conditional UI in existing checkout page
+  - "Donation to [Org]" header instead of product name
+  - Custom thank-you message from org (replaces generic receipt)
+  - Suppress overpaid warning (overpayment = generosity)
+  - Hide refund address field (donations aren't refundable)
+  - Download proof-of-donation receipt (image export)
+- [ ] **Dashboard donation management** — integrated into existing tabs
+  - Donation link creation/management in Links tab (toggle: Payment Links | Donation Links)
+  - `donation` type filter in Invoices tab (alongside billing/recurring/payment)
+  - Donation summary card in Overview tab (total raised, active campaigns)
+- [ ] **Public donation link info endpoint** (`GET /api/payment-links/{slug}/info`)
+  - Returns donation config, campaign progress, org name (no invoice creation)
+  - Powers amount selection page and future embeddable widget
+
+## Phase 3.6 -- Charity Split (requires Phase 3.5 + wallet testing)
+
+- [ ] **3-output ZIP-321 wallet testing** — verify Zashi/YWallet handle 3+ output URIs on testnet
+  - CipherPay already uses 2-output (merchant + fee); charity adds a 3rd
+  - Blocking test: if wallets don't support 3 outputs, this phase is deferred
+- [ ] **Merchant charity pledge** — dashboard setting: "Donate X% of sales to [Org]"
+  - Third output added to ZIP-321 URI at invoice creation (merchant + fee + charity)
+  - Org must be registered on CipherPay with a viewing key
+  - Badge on checkout page: "This merchant supports [Org Name]"
+- [ ] **Donor opt-in at checkout** — "Add $1 to [Org]?" toggle on payment page
+  - Adjusts total and adds third output to zcash URI
+  - Org selectable from CipherPay-registered nonprofits
+- [ ] **Round-up for charity** — round to nearest dollar, difference goes to org
+  - Classic retail pattern adapted to shielded payments
 
 ## Phase 4 -- Production Infrastructure
 
@@ -146,8 +195,8 @@ Privacy-preserving Zcash payment gateway. Non-custodial, shielded-only.
 These are changes needed in the CipherScan explorer/indexer to support CipherPay at scale:
 
 - [x] `GET /api/tx/{txid}/raw` -- raw hex endpoint for trial decryption
+- [x] **WebSocket mempool stream with tiered broadcast** -- service clients (authenticated via `X-Service-Key`) subscribe to `raw_mempool` channel and receive `mempool_tx` events enriched with `raw_hex`. Regular browser clients receive the slim payload. Powered by Zebra gRPC indexer (`MempoolChange` + `ChainTipChange` streams).
 - [ ] `POST /api/tx/raw/batch` -- batch raw hex endpoint (Phase 2)
-- [ ] `ws://api.cipherscan.app/mempool/stream` -- WebSocket mempool stream (Phase 2)
 - [ ] Multi-Zebra-node infrastructure with load balancing (Phase 4)
 - [ ] Rate limit tiers for API consumers (Phase 5)
 - [ ] Dedicated CipherPay API key with higher rate limits (Phase 5)

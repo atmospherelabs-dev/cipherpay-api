@@ -156,6 +156,8 @@ pub async fn get(
                 "overpaid": overpaid,
                 "is_event": is_event,
                 "is_luma": is_luma,
+                "is_donation": inv.is_donation == 1,
+                "payment_link_id": inv.payment_link_id,
             }))
         }
         None => HttpResponse::NotFound().json(serde_json::json!({
