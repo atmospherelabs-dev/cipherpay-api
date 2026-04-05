@@ -91,6 +91,9 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/payment-links/{id}", web::patch().to(payment_links::update))
             .route("/payment-links/{id}", web::delete().to(payment_links::delete))
             .route("/payment-links/{slug}/checkout", web::post().to(payment_links::resolve).wrap(Governor::new(&session_rate_limit)))
+            .route("/payment-links/{slug}/info", web::get().to(payment_links::info))
+            // Donation links (merchant auth)
+            .route("/donation-links", web::post().to(payment_links::create_donation))
             // Buyer checkout (public)
             .route("/checkout", web::post().to(checkout))
             // Invoice endpoints (API key auth)
@@ -554,7 +557,8 @@ async fn list_invoices(
          detected_at, expires_at, confirmed_at, refunded_at,
          refund_address, invoices.created_at, price_zatoshis, received_zatoshis,
          (EXISTS (SELECT 1 FROM events WHERE product_id = invoices.product_id)) AS is_event,
-         pr.label AS price_label
+         pr.label AS price_label,
+         invoices.is_donation, invoices.payment_link_id
          FROM invoices
          LEFT JOIN prices pr ON pr.id = invoices.price_id
          WHERE invoices.merchant_id = ? ORDER BY invoices.created_at DESC LIMIT 50",
@@ -601,6 +605,8 @@ async fn list_invoices(
                         "overpaid": rz > pz + 1000 && pz > 0,
                         "is_event": r.get::<bool, _>("is_event"),
                         "price_label": r.get::<Option<String>, _>("price_label"),
+                        "is_donation": r.get::<i32, _>("is_donation") == 1,
+                        "payment_link_id": r.get::<Option<String>, _>("payment_link_id"),
                     })
                 })
                 .collect();
