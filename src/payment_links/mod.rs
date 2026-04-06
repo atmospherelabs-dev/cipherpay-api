@@ -289,9 +289,33 @@ pub async fn update_payment_link(
         .or(existing.metadata);
 
     let donation_config_json = if existing.mode == "donation" {
-        req.donation_config.as_ref()
-            .map(|dc| serde_json::to_string(dc).unwrap_or_default())
-            .or(existing.donation_config)
+        match (&req.donation_config, &existing.donation_config) {
+            (Some(updates), Some(existing_json)) => {
+                let mut base: DonationConfig = serde_json::from_str(existing_json)
+                    .unwrap_or(DonationConfig {
+                        mission: None, thank_you: None, suggested_amounts: None,
+                        currency: "USD".to_string(), min_amount: None, max_amount: None,
+                        campaign_name: None, campaign_goal: None, cover_image_url: None,
+                        cover_image_position: None, contact_email: None, website_url: None,
+                        social_share_text: None,
+                    });
+                if updates.mission.is_some() { base.mission = updates.mission.clone(); }
+                if updates.thank_you.is_some() { base.thank_you = updates.thank_you.clone(); }
+                if updates.suggested_amounts.is_some() { base.suggested_amounts = updates.suggested_amounts.clone(); }
+                if updates.min_amount.is_some() { base.min_amount = updates.min_amount; }
+                if updates.max_amount.is_some() { base.max_amount = updates.max_amount; }
+                if updates.campaign_name.is_some() { base.campaign_name = updates.campaign_name.clone(); }
+                if updates.campaign_goal.is_some() { base.campaign_goal = updates.campaign_goal; }
+                if updates.cover_image_url.is_some() { base.cover_image_url = updates.cover_image_url.clone(); }
+                if updates.cover_image_position.is_some() { base.cover_image_position = updates.cover_image_position.clone(); }
+                if updates.contact_email.is_some() { base.contact_email = updates.contact_email.clone(); }
+                if updates.website_url.is_some() { base.website_url = updates.website_url.clone(); }
+                if updates.social_share_text.is_some() { base.social_share_text = updates.social_share_text.clone(); }
+                Some(serde_json::to_string(&base).unwrap_or_default())
+            }
+            (Some(dc), None) => Some(serde_json::to_string(dc).unwrap_or_default()),
+            (None, existing_dc) => existing_dc.clone(),
+        }
     } else {
         existing.donation_config
     };
