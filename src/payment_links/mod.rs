@@ -107,6 +107,72 @@ fn generate_slug() -> String {
     format!("pl_{}", &id[..12])
 }
 
+fn slugify(text: &str) -> String {
+    text.to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+const RESERVED_SLUGS: &[&str] = &[
+    "paypal", "stripe", "gofundme", "venmo", "cashapp", "zelle",
+    "unicef", "redcross", "red-cross", "who", "unhcr",
+    "bitcoin", "ethereum", "coinbase", "binance",
+    "admin", "api", "login", "dashboard", "settings",
+    "cipherpay", "cipherscan", "atmosphere", "atmospherelabs",
+];
+
+fn is_slug_reserved(slug: &str) -> bool {
+    RESERVED_SLUGS.iter().any(|r| slug == *r || slug.starts_with(&format!("{}-", r)))
+}
+
+async fn generate_donation_slug(pool: &SqlitePool, name: &str) -> anyhow::Result<String> {
+    let base = slugify(name);
+    if base.is_empty() || base.len() < 3 {
+        return Ok(generate_slug());
+    }
+
+    let base = if base.len() > 60 {
+        base[..60].trim_end_matches('-').to_string()
+    } else {
+        base
+    };
+
+    if is_slug_reserved(&base) {
+        anyhow::bail!("This campaign name is not allowed — it conflicts with a reserved name");
+    }
+
+    let existing: Option<(String,)> = sqlx::query_as(
+        "SELECT id FROM payment_links WHERE slug = ?"
+    )
+    .bind(&base)
+    .fetch_optional(pool)
+    .await?;
+
+    if existing.is_none() {
+        return Ok(base);
+    }
+
+    for i in 2..=99 {
+        let candidate = format!("{}-{}", base, i);
+        let exists: Option<(String,)> = sqlx::query_as(
+            "SELECT id FROM payment_links WHERE slug = ?"
+        )
+        .bind(&candidate)
+        .fetch_optional(pool)
+        .await?;
+        if exists.is_none() {
+            return Ok(candidate);
+        }
+    }
+
+    Ok(generate_slug())
+}
+
 pub async fn create_payment_link(
     pool: &SqlitePool,
     merchant_id: &str,
@@ -208,7 +274,8 @@ pub async fn create_donation_link(
 
     let config_json = serde_json::to_string(&config)?;
     let id = Uuid::new_v4().to_string();
-    let slug = generate_slug();
+    let slug_source = req.campaign_name.as_deref().unwrap_or(&req.name);
+    let slug = generate_donation_slug(pool, slug_source).await?;
 
     sqlx::query(
         "INSERT INTO payment_links (id, merchant_id, slug, name, success_url, mode, donation_config)
