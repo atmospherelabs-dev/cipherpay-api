@@ -355,12 +355,17 @@ async fn resolve_donation(
     };
 
     let amount_fiat = amount_cents as f64 / 100.0;
-    let org_label = if merchant.name.is_empty() {
-        link.name.as_deref().unwrap_or("Organization")
-    } else {
-        &merchant.name
-    };
-    let display_name = format!("Donation to {}", org_label);
+    let display_name = donation_config.campaign_name.as_deref()
+        .filter(|n| !n.is_empty())
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| {
+            let org = if merchant.name.is_empty() {
+                link.name.as_deref().unwrap_or("Organization")
+            } else {
+                &merchant.name
+            };
+            format!("Donation to {}", org)
+        });
 
     let invoice_req = crate::invoices::CreateInvoiceRequest {
         product_id: None,
