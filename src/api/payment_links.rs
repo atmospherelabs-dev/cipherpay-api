@@ -77,7 +77,21 @@ pub async fn list(
 
     match payment_links::list_payment_links(pool.get_ref(), &merchant.id).await {
         Ok(links) => {
-            let result: Vec<_> = links.iter().map(link_response).collect();
+            let mut result = Vec::with_capacity(links.len());
+            for link in &links {
+                let mut resp = link_response(link);
+                if link.is_donation() {
+                    let confirmed: i32 = sqlx::query_scalar(
+                        "SELECT COUNT(*) FROM invoices WHERE payment_link_id = ? AND is_donation = 1 AND campaign_counted = 1"
+                    )
+                    .bind(&link.id)
+                    .fetch_one(pool.get_ref())
+                    .await
+                    .unwrap_or(0);
+                    resp["total_confirmed"] = serde_json::json!(confirmed);
+                }
+                result.push(resp);
+            }
             HttpResponse::Ok().json(result)
         }
         Err(e) => {
