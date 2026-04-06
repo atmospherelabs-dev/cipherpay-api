@@ -236,7 +236,7 @@ pub async fn info(
                 "social_share_text": config.social_share_text,
             });
         }
-        response["donate_url"] = serde_json::json!(format!("{}/donate/{}", frontend_url, link.slug));
+        response["donate_url"] = serde_json::json!(format!("{}/en/donate/{}", frontend_url, link.slug));
     } else {
         response["checkout_url"] = serde_json::json!(format!("{}/link/{}", frontend_url, link.slug));
     }
