@@ -178,7 +178,8 @@ pub async fn my_invoices(
          refund_address, status, detected_txid, detected_at,
          confirmed_at, refunded_at, refund_txid, expires_at, purge_after, created_at,
          orchard_receiver_hex, diversifier_index,
-         price_zatoshis, received_zatoshis
+         price_zatoshis, received_zatoshis,
+         payment_link_id, is_donation, campaign_counted
          FROM invoices WHERE merchant_id = ?
          ORDER BY created_at DESC LIMIT 100"
     )
