@@ -126,6 +126,32 @@ pub async fn get(
                 false
             };
 
+            let donation_meta = if inv.is_donation == 1 {
+                if let Some(ref link_id) = inv.payment_link_id {
+                    let dc_json: Option<String> = sqlx::query_scalar(
+                        "SELECT donation_config FROM payment_links WHERE id = ?"
+                    )
+                    .bind(link_id)
+                    .fetch_optional(pool.get_ref())
+                    .await
+                    .ok()
+                    .flatten()
+                    .flatten();
+                    dc_json.and_then(|json| {
+                        let dc: crate::payment_links::DonationConfig = serde_json::from_str(&json).ok()?;
+                        Some(serde_json::json!({
+                            "thank_you": dc.thank_you,
+                            "campaign_name": dc.campaign_name,
+                            "contact_email": dc.contact_email,
+                        }))
+                    })
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
             HttpResponse::Ok().json(serde_json::json!({
                 "id": inv.id,
                 "memo_code": inv.memo_code,
@@ -158,6 +184,7 @@ pub async fn get(
                 "is_luma": is_luma,
                 "is_donation": inv.is_donation == 1,
                 "payment_link_id": inv.payment_link_id,
+                "donation_meta": donation_meta,
             }))
         }
         None => HttpResponse::NotFound().json(serde_json::json!({
