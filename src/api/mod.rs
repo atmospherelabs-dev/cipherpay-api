@@ -35,6 +35,12 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .finish()
         .expect("Failed to build session rate limiter");
 
+    let public_read_limit = GovernorConfigBuilder::default()
+        .seconds_per_request(2)
+        .burst_size(15)
+        .finish()
+        .expect("Failed to build public read rate limiter");
+
     cfg.service(
         web::scope("/api")
             .route("/health", web::get().to(health))
@@ -91,7 +97,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/payment-links/{id}", web::patch().to(payment_links::update))
             .route("/payment-links/{id}", web::delete().to(payment_links::delete))
             .route("/payment-links/{slug}/checkout", web::post().to(payment_links::resolve).wrap(Governor::new(&session_rate_limit)))
-            .route("/payment-links/{slug}/info", web::get().to(payment_links::info).wrap(Governor::new(&session_rate_limit)))
+            .route("/payment-links/{slug}/info", web::get().to(payment_links::info).wrap(Governor::new(&public_read_limit)))
             // Donation links (merchant auth)
             .route("/donation-links", web::post().to(payment_links::create_donation))
             // Buyer checkout (public)
