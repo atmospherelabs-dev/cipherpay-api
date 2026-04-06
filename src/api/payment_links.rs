@@ -604,18 +604,24 @@ fn validate_create_donation(req: &CreateDonationLinkRequest) -> Result<(), valid
     }
     if let Some(ref url) = req.cover_image_url {
         validation::validate_length("cover_image_url", url, 2000)?;
+        validation::validate_url_protocol("cover_image_url", url, false)?;
+    }
+    if let Some(ref pos) = req.cover_image_position {
+        validation::validate_image_position("cover_image_position", pos)?;
     }
     if let Some(ref email) = req.contact_email {
         validation::validate_length("contact_email", email, 200)?;
     }
     if let Some(ref url) = req.website_url {
         validation::validate_length("website_url", url, 2000)?;
+        validation::validate_url_protocol("website_url", url, true)?;
     }
     if let Some(ref text) = req.social_share_text {
         validation::validate_length("social_share_text", text, 500)?;
     }
     if let Some(ref url) = req.success_url {
         validation::validate_length("success_url", url, 2000)?;
+        validation::validate_url_protocol("success_url", url, true)?;
     }
     Ok(())
 }
@@ -626,6 +632,9 @@ fn validate_update(req: &UpdatePaymentLinkRequest) -> Result<(), validation::Val
     }
     if let Some(ref url) = req.success_url {
         validation::validate_length("success_url", url, 2000)?;
+        if !url.is_empty() {
+            validation::validate_url_protocol("success_url", url, true)?;
+        }
     }
     if let Some(ref dc) = req.donation_config {
         if let Some(ref mission) = dc.mission {
@@ -639,12 +648,21 @@ fn validate_update(req: &UpdatePaymentLinkRequest) -> Result<(), validation::Val
         }
         if let Some(ref url) = dc.cover_image_url {
             validation::validate_length("cover_image_url", url, 2000)?;
+            if !url.is_empty() {
+                validation::validate_url_protocol("cover_image_url", url, false)?;
+            }
+        }
+        if let Some(ref pos) = dc.cover_image_position {
+            validation::validate_image_position("cover_image_position", pos)?;
         }
         if let Some(ref email) = dc.contact_email {
             validation::validate_length("contact_email", email, 200)?;
         }
         if let Some(ref url) = dc.website_url {
             validation::validate_length("website_url", url, 2000)?;
+            if !url.is_empty() {
+                validation::validate_url_protocol("website_url", url, true)?;
+            }
         }
         if let Some(ref text) = dc.social_share_text {
             validation::validate_length("social_share_text", text, 500)?;

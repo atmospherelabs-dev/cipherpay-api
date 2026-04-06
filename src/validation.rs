@@ -47,6 +47,33 @@ pub fn validate_optional_length(
     Ok(())
 }
 
+pub fn validate_url_protocol(field: &str, url: &str, allow_http: bool) -> Result<(), ValidationError> {
+    if url.starts_with("https://") {
+        return Ok(());
+    }
+    if allow_http && url.starts_with("http://") {
+        return Ok(());
+    }
+    let msg = if allow_http {
+        "must start with http:// or https://"
+    } else {
+        "must start with https://"
+    };
+    Err(ValidationError::invalid(field, msg))
+}
+
+const ALLOWED_IMAGE_POSITIONS: &[&str] = &[
+    "center top", "center center", "center bottom",
+];
+
+pub fn validate_image_position(field: &str, value: &str) -> Result<(), ValidationError> {
+    if ALLOWED_IMAGE_POSITIONS.contains(&value) {
+        Ok(())
+    } else {
+        Err(ValidationError::invalid(field, "must be one of: center top, center center, center bottom"))
+    }
+}
+
 pub fn validate_email_format(field: &str, email: &str) -> Result<(), ValidationError> {
     validate_length(field, email, 254)?;
 
@@ -284,6 +311,27 @@ mod tests {
         assert!(validate_zcash_address("addr", "").is_err());
         // A properly encoded t-address would pass; we verify the crate rejects garbage
         assert!(validate_zcash_address("addr", "t1000000000000000000000000000000000").is_err());
+    }
+
+    #[test]
+    fn test_validate_url_protocol() {
+        assert!(validate_url_protocol("url", "https://example.com", false).is_ok());
+        assert!(validate_url_protocol("url", "http://example.com", false).is_err());
+        assert!(validate_url_protocol("url", "http://example.com", true).is_ok());
+        assert!(validate_url_protocol("url", "javascript:alert(1)", false).is_err());
+        assert!(validate_url_protocol("url", "javascript:alert(1)", true).is_err());
+        assert!(validate_url_protocol("url", "data:text/html,<h1>hi</h1>", false).is_err());
+        assert!(validate_url_protocol("url", "ftp://example.com", true).is_err());
+    }
+
+    #[test]
+    fn test_validate_image_position() {
+        assert!(validate_image_position("pos", "center top").is_ok());
+        assert!(validate_image_position("pos", "center center").is_ok());
+        assert!(validate_image_position("pos", "center bottom").is_ok());
+        assert!(validate_image_position("pos", "left top").is_err());
+        assert!(validate_image_position("pos", "expression(alert(1))").is_err());
+        assert!(validate_image_position("pos", "").is_err());
     }
 
     #[test]

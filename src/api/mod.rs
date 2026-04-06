@@ -91,7 +91,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/payment-links/{id}", web::patch().to(payment_links::update))
             .route("/payment-links/{id}", web::delete().to(payment_links::delete))
             .route("/payment-links/{slug}/checkout", web::post().to(payment_links::resolve).wrap(Governor::new(&session_rate_limit)))
-            .route("/payment-links/{slug}/info", web::get().to(payment_links::info))
+            .route("/payment-links/{slug}/info", web::get().to(payment_links::info).wrap(Governor::new(&session_rate_limit)))
             // Donation links (merchant auth)
             .route("/donation-links", web::post().to(payment_links::create_donation))
             // Buyer checkout (public)
