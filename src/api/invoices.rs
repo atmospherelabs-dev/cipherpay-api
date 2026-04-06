@@ -128,22 +128,25 @@ pub async fn get(
 
             let donation_meta = if inv.is_donation == 1 {
                 if let Some(ref link_id) = inv.payment_link_id {
-                    let dc_json: Option<String> = sqlx::query_scalar(
-                        "SELECT donation_config FROM payment_links WHERE id = ?"
+                    let row: Option<(Option<String>, String)> = sqlx::query_as(
+                        "SELECT donation_config, slug FROM payment_links WHERE id = ?"
                     )
                     .bind(link_id)
                     .fetch_optional(pool.get_ref())
                     .await
                     .ok()
-                    .flatten()
                     .flatten();
-                    dc_json.and_then(|json| {
-                        let dc: crate::payment_links::DonationConfig = serde_json::from_str(&json).ok()?;
-                        Some(serde_json::json!({
-                            "thank_you": dc.thank_you,
-                            "campaign_name": dc.campaign_name,
-                            "contact_email": dc.contact_email,
-                        }))
+                    row.map(|(dc_json, slug)| {
+                        let dc: Option<crate::payment_links::DonationConfig> = dc_json
+                            .as_deref()
+                            .and_then(|j| serde_json::from_str(j).ok());
+                        serde_json::json!({
+                            "thank_you": dc.as_ref().and_then(|d| d.thank_you.clone()),
+                            "campaign_name": dc.as_ref().and_then(|d| d.campaign_name.clone()),
+                            "contact_email": dc.as_ref().and_then(|d| d.contact_email.clone()),
+                            "social_share_text": dc.as_ref().and_then(|d| d.social_share_text.clone()),
+                            "slug": slug,
+                        })
                     })
                 } else {
                     None
