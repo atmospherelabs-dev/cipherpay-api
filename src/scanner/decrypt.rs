@@ -1,14 +1,14 @@
 use anyhow::Result;
 use std::io::Cursor;
 
-use zcash_note_encryption::try_note_decryption;
 use orchard::{
-    keys::{FullViewingKey, IncomingViewingKey, Scope, PreparedIncomingViewingKey},
+    keys::{FullViewingKey, IncomingViewingKey, PreparedIncomingViewingKey, Scope},
     note_encryption::OrchardDomain,
 };
 use zcash_address::unified::{Container, Encoding, Fvk, Ivk, Ufvk, Uivk};
 #[allow(deprecated)]
 use zcash_address::Network as NetworkType;
+use zcash_note_encryption::try_note_decryption;
 use zcash_primitives::transaction::Transaction;
 
 /// Accept payments within 0.5% of invoice price to account for
@@ -55,21 +55,23 @@ pub fn parse_orchard_ivk(key_str: &str) -> Result<IncomingViewingKey> {
 /// Used for address derivation where we need the network for UA encoding.
 pub fn parse_key_with_network(key_str: &str) -> Result<(NetworkType, IncomingViewingKey)> {
     if key_str.starts_with("uivk") || key_str.starts_with("uivktest") {
-        let (network, uivk) = Uivk::decode(key_str)
-            .map_err(|e| anyhow::anyhow!("UIVK decode failed: {:?}", e))?;
-        let ivk_bytes = uivk.items().iter().find_map(|ivk| {
-            match ivk {
+        let (network, uivk) =
+            Uivk::decode(key_str).map_err(|e| anyhow::anyhow!("UIVK decode failed: {:?}", e))?;
+        let ivk_bytes = uivk
+            .items()
+            .iter()
+            .find_map(|ivk| match ivk {
                 Ivk::Orchard(data) => Some(*data),
                 _ => None,
-            }
-        }).ok_or_else(|| anyhow::anyhow!("No Orchard IVK found in UIVK"))?;
+            })
+            .ok_or_else(|| anyhow::anyhow!("No Orchard IVK found in UIVK"))?;
         let ivk = IncomingViewingKey::from_bytes(&ivk_bytes)
             .into_option()
             .ok_or_else(|| anyhow::anyhow!("Failed to parse Orchard IVK from bytes"))?;
         Ok((network, ivk))
     } else {
-        let (network, _) = Ufvk::decode(key_str)
-            .map_err(|e| anyhow::anyhow!("UFVK decode failed: {:?}", e))?;
+        let (network, _) =
+            Ufvk::decode(key_str).map_err(|e| anyhow::anyhow!("UFVK decode failed: {:?}", e))?;
         let fvk = parse_orchard_fvk(key_str)?;
         Ok((network, fvk.to_ivk(Scope::External)))
     }
@@ -77,15 +79,17 @@ pub fn parse_key_with_network(key_str: &str) -> Result<(NetworkType, IncomingVie
 
 /// Parse an Orchard IVK directly from a UIVK string.
 fn parse_ivk_from_uivk(uivk_str: &str) -> Result<IncomingViewingKey> {
-    let (_network, uivk) = Uivk::decode(uivk_str)
-        .map_err(|e| anyhow::anyhow!("UIVK decode failed: {:?}", e))?;
+    let (_network, uivk) =
+        Uivk::decode(uivk_str).map_err(|e| anyhow::anyhow!("UIVK decode failed: {:?}", e))?;
 
-    let ivk_bytes = uivk.items().iter().find_map(|ivk| {
-        match ivk {
+    let ivk_bytes = uivk
+        .items()
+        .iter()
+        .find_map(|ivk| match ivk {
             Ivk::Orchard(data) => Some(*data),
             _ => None,
-        }
-    }).ok_or_else(|| anyhow::anyhow!("No Orchard IVK found in UIVK"))?;
+        })
+        .ok_or_else(|| anyhow::anyhow!("No Orchard IVK found in UIVK"))?;
 
     IncomingViewingKey::from_bytes(&ivk_bytes)
         .into_option()
@@ -95,8 +99,8 @@ fn parse_ivk_from_uivk(uivk_str: &str) -> Result<IncomingViewingKey> {
 /// Derive a UIVK string from a UFVK string. Extracts the External IVK
 /// and encodes it as a proper UIVK (ZIP 316).
 pub fn derive_uivk_from_ufvk(ufvk_str: &str) -> Result<String> {
-    let (network, _) = Ufvk::decode(ufvk_str)
-        .map_err(|e| anyhow::anyhow!("UFVK decode failed: {:?}", e))?;
+    let (network, _) =
+        Ufvk::decode(ufvk_str).map_err(|e| anyhow::anyhow!("UFVK decode failed: {:?}", e))?;
 
     let fvk = parse_orchard_fvk(ufvk_str)?;
     let ivk = fvk.to_ivk(Scope::External);
@@ -137,13 +141,13 @@ pub fn try_decrypt_with_keys(raw_hex: &str, keys: &CachedKeys) -> Result<Vec<Dec
             if let Some((note, _recipient, memo)) = try_note_decryption(&domain, pivk, *action) {
                 let recipient_raw = note.recipient().to_raw_address_bytes();
                 let memo_bytes = memo.as_slice();
-                let memo_len = memo_bytes.iter()
+                let memo_len = memo_bytes
+                    .iter()
                     .position(|&b| b == 0)
                     .unwrap_or(memo_bytes.len());
 
                 let memo_text = if memo_len > 0 {
-                    String::from_utf8(memo_bytes[..memo_len].to_vec())
-                        .unwrap_or_default()
+                    String::from_utf8(memo_bytes[..memo_len].to_vec()).unwrap_or_default()
                 } else {
                     String::new()
                 };
@@ -175,15 +179,17 @@ pub fn try_decrypt_with_keys(raw_hex: &str, keys: &CachedKeys) -> Result<Vec<Dec
 
 /// Parse a UFVK string and extract the Orchard FullViewingKey.
 pub(crate) fn parse_orchard_fvk(ufvk_str: &str) -> Result<FullViewingKey> {
-    let (_network, ufvk) = Ufvk::decode(ufvk_str)
-        .map_err(|e| anyhow::anyhow!("UFVK decode failed: {:?}", e))?;
+    let (_network, ufvk) =
+        Ufvk::decode(ufvk_str).map_err(|e| anyhow::anyhow!("UFVK decode failed: {:?}", e))?;
 
-    let orchard_fvk_bytes = ufvk.items().iter().find_map(|fvk| {
-        match fvk {
+    let orchard_fvk_bytes = ufvk
+        .items()
+        .iter()
+        .find_map(|fvk| match fvk {
             Fvk::Orchard(data) => Some(data.clone()),
             _ => None,
-        }
-    }).ok_or_else(|| anyhow::anyhow!("No Orchard FVK found in UFVK"))?;
+        })
+        .ok_or_else(|| anyhow::anyhow!("No Orchard FVK found in UFVK"))?;
 
     FullViewingKey::from_bytes(&orchard_fvk_bytes)
         .ok_or_else(|| anyhow::anyhow!("Failed to parse Orchard FVK from bytes"))
@@ -231,16 +237,17 @@ pub fn try_decrypt_all_outputs_ivk(raw_hex: &str, key_str: &str) -> Result<Vec<D
     for action in &actions {
         let domain = OrchardDomain::for_action(*action);
 
-        if let Some((note, _recipient, memo)) = try_note_decryption(&domain, &prepared_ivk, *action) {
+        if let Some((note, _recipient, memo)) = try_note_decryption(&domain, &prepared_ivk, *action)
+        {
             let recipient_raw = note.recipient().to_raw_address_bytes();
             let memo_bytes = memo.as_slice();
-            let memo_len = memo_bytes.iter()
+            let memo_len = memo_bytes
+                .iter()
                 .position(|&b| b == 0)
                 .unwrap_or(memo_bytes.len());
 
             let memo_text = if memo_len > 0 {
-                String::from_utf8(memo_bytes[..memo_len].to_vec())
-                    .unwrap_or_default()
+                String::from_utf8(memo_bytes[..memo_len].to_vec()).unwrap_or_default()
             } else {
                 String::new()
             };
@@ -306,16 +313,18 @@ pub fn try_decrypt_all_outputs(raw_hex: &str, ufvk_str: &str) -> Result<Vec<Decr
             let ivk = fvk.to_ivk(scope);
             let prepared_ivk = PreparedIncomingViewingKey::new(&ivk);
 
-            if let Some((note, _recipient, memo)) = try_note_decryption(&domain, &prepared_ivk, *action) {
+            if let Some((note, _recipient, memo)) =
+                try_note_decryption(&domain, &prepared_ivk, *action)
+            {
                 let recipient_raw = note.recipient().to_raw_address_bytes();
                 let memo_bytes = memo.as_slice();
-                let memo_len = memo_bytes.iter()
+                let memo_len = memo_bytes
+                    .iter()
                     .position(|&b| b == 0)
                     .unwrap_or(memo_bytes.len());
 
                 let memo_text = if memo_len > 0 {
-                    String::from_utf8(memo_bytes[..memo_len].to_vec())
-                        .unwrap_or_default()
+                    String::from_utf8(memo_bytes[..memo_len].to_vec()).unwrap_or_default()
                 } else {
                     String::new()
                 };

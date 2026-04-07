@@ -1,26 +1,26 @@
+use chrono::Utc;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use sqlx::SqlitePool;
 use uuid::Uuid;
-use chrono::Utc;
 
 type HmacSha256 = Hmac<Sha256>;
 
 fn sign_payload(secret: &str, timestamp: &str, payload: &str) -> String {
     let message = format!("{}.{}", timestamp, payload);
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
-        .expect("HMAC accepts any key length");
+    let mut mac =
+        HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
     mac.update(message.as_bytes());
     hex::encode(mac.finalize().into_bytes())
 }
 
 fn retry_delay_secs(attempt: i64) -> i64 {
     match attempt {
-        1 => 60,       // 1 min
-        2 => 300,      // 5 min
-        3 => 1500,     // 25 min
-        4 => 7200,     // 2 hours
-        _ => 36000,    // 10 hours
+        1 => 60,    // 1 min
+        2 => 300,   // 5 min
+        3 => 1500,  // 25 min
+        4 => 7200,  // 2 hours
+        _ => 36000, // 10 hours
     }
 }
 
@@ -35,7 +35,7 @@ pub async fn dispatch(
     let merchant_row = sqlx::query_as::<_, (String, Option<String>, String)>(
         "SELECT m.id, m.webhook_url, m.webhook_secret FROM invoices i
          JOIN merchants m ON i.merchant_id = m.id
-         WHERE i.id = ?"
+         WHERE i.id = ?",
     )
     .bind(invoice_id)
     .fetch_optional(pool)
@@ -84,7 +84,8 @@ pub async fn dispatch(
     .execute(pool)
     .await?;
 
-    match http.post(&webhook_url)
+    match http
+        .post(&webhook_url)
         .header("X-CipherPay-Signature", &signature)
         .header("X-CipherPay-Timestamp", &timestamp)
         .header("X-CipherPay-Delivery-Id", &delivery_id)
@@ -141,7 +142,7 @@ pub async fn dispatch_payment(
     let merchant_row = sqlx::query_as::<_, (String, Option<String>, String)>(
         "SELECT m.id, m.webhook_url, m.webhook_secret FROM invoices i
          JOIN merchants m ON i.merchant_id = m.id
-         WHERE i.id = ?"
+         WHERE i.id = ?",
     )
     .bind(invoice_id)
     .fetch_optional(pool)
@@ -193,7 +194,8 @@ pub async fn dispatch_payment(
     .execute(pool)
     .await?;
 
-    match http.post(&webhook_url)
+    match http
+        .post(&webhook_url)
         .header("X-CipherPay-Signature", &signature)
         .header("X-CipherPay-Timestamp", &timestamp)
         .header("X-CipherPay-Delivery-Id", &delivery_id)
@@ -248,7 +250,7 @@ pub async fn dispatch_event(
     encryption_key: &str,
 ) -> anyhow::Result<()> {
     let merchant_row = sqlx::query_as::<_, (Option<String>, String)>(
-        "SELECT webhook_url, webhook_secret FROM merchants WHERE id = ?"
+        "SELECT webhook_url, webhook_secret FROM merchants WHERE id = ?",
     )
     .bind(merchant_id)
     .fetch_optional(pool)
@@ -269,8 +271,14 @@ pub async fn dispatch_event(
 
     let mut payload = extra;
     if let Some(obj) = payload.as_object_mut() {
-        obj.insert("event".to_string(), serde_json::Value::String(event.to_string()));
-        obj.insert("timestamp".to_string(), serde_json::Value::String(timestamp.clone()));
+        obj.insert(
+            "event".to_string(),
+            serde_json::Value::String(event.to_string()),
+        );
+        obj.insert(
+            "timestamp".to_string(),
+            serde_json::Value::String(timestamp.clone()),
+        );
     }
 
     let payload_str = payload.to_string();
@@ -281,28 +289,25 @@ pub async fn dispatch_event(
         .format("%Y-%m-%dT%H:%M:%SZ")
         .to_string();
 
-    let invoice_id_for_fk = payload.get("invoice_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let invoice_id_for_fk = payload.get("invoice_id").and_then(|v| v.as_str());
 
-    if !invoice_id_for_fk.is_empty() {
-        sqlx::query(
-            "INSERT INTO webhook_deliveries (id, invoice_id, url, payload, status, attempts, last_attempt_at, next_retry_at, event_type, merchant_id)
-             VALUES (?, ?, ?, ?, 'pending', 1, ?, ?, ?, ?)"
-        )
-        .bind(&delivery_id)
-        .bind(invoice_id_for_fk)
-        .bind(&webhook_url)
-        .bind(&payload_str)
-        .bind(&timestamp)
-        .bind(&next_retry)
-        .bind(event)
-        .bind(merchant_id)
-        .execute(pool)
-        .await?;
-    }
+    sqlx::query(
+        "INSERT INTO webhook_deliveries (id, invoice_id, url, payload, status, attempts, last_attempt_at, next_retry_at, event_type, merchant_id)
+         VALUES (?, ?, ?, ?, 'pending', 1, ?, ?, ?, ?)"
+    )
+    .bind(&delivery_id)
+    .bind(invoice_id_for_fk)
+    .bind(&webhook_url)
+    .bind(&payload_str)
+    .bind(&timestamp)
+    .bind(&next_retry)
+    .bind(event)
+    .bind(merchant_id)
+    .execute(pool)
+    .await?;
 
-    match http.post(&webhook_url)
+    match http
+        .post(&webhook_url)
         .header("X-CipherPay-Signature", &signature)
         .header("X-CipherPay-Timestamp", &timestamp)
         .header("X-CipherPay-Delivery-Id", &delivery_id)
@@ -313,37 +318,31 @@ pub async fn dispatch_event(
     {
         Ok(resp) if resp.status().is_success() => {
             let status_code = resp.status().as_u16() as i32;
-            if !invoice_id_for_fk.is_empty() {
-                sqlx::query("UPDATE webhook_deliveries SET status = 'delivered', response_status = ? WHERE id = ?")
-                    .bind(status_code)
-                    .bind(&delivery_id)
-                    .execute(pool)
-                    .await?;
-            }
+            sqlx::query("UPDATE webhook_deliveries SET status = 'delivered', response_status = ? WHERE id = ?")
+                .bind(status_code)
+                .bind(&delivery_id)
+                .execute(pool)
+                .await?;
             tracing::info!(merchant_id, event, "Lifecycle webhook delivered");
         }
         Ok(resp) => {
             let status_code = resp.status().as_u16() as i32;
             let error_text = format!("HTTP {}", resp.status());
-            if !invoice_id_for_fk.is_empty() {
-                sqlx::query("UPDATE webhook_deliveries SET response_status = ?, response_error = ? WHERE id = ?")
-                    .bind(status_code)
-                    .bind(&error_text)
-                    .bind(&delivery_id)
-                    .execute(pool)
-                    .await?;
-            }
+            sqlx::query("UPDATE webhook_deliveries SET response_status = ?, response_error = ? WHERE id = ?")
+                .bind(status_code)
+                .bind(&error_text)
+                .bind(&delivery_id)
+                .execute(pool)
+                .await?;
             tracing::warn!(merchant_id, event, status = %resp.status(), "Lifecycle webhook rejected, will retry");
         }
         Err(e) => {
             let error_text = e.to_string();
-            if !invoice_id_for_fk.is_empty() {
-                sqlx::query("UPDATE webhook_deliveries SET response_status = 0, response_error = ? WHERE id = ?")
-                    .bind(&error_text)
-                    .bind(&delivery_id)
-                    .execute(pool)
-                    .await?;
-            }
+            sqlx::query("UPDATE webhook_deliveries SET response_status = 0, response_error = ? WHERE id = ?")
+                .bind(&error_text)
+                .bind(&delivery_id)
+                .execute(pool)
+                .await?;
             tracing::warn!(merchant_id, event, error = %e, "Lifecycle webhook failed, will retry");
         }
     }
@@ -351,17 +350,20 @@ pub async fn dispatch_event(
     Ok(())
 }
 
-pub async fn retry_failed(pool: &SqlitePool, http: &reqwest::Client, encryption_key: &str) -> anyhow::Result<()> {
+pub async fn retry_failed(
+    pool: &SqlitePool,
+    http: &reqwest::Client,
+    encryption_key: &str,
+) -> anyhow::Result<()> {
     let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
     let rows = sqlx::query_as::<_, (String, String, String, String, i64)>(
         "SELECT wd.id, wd.url, wd.payload, m.webhook_secret, wd.attempts
          FROM webhook_deliveries wd
-         JOIN invoices i ON wd.invoice_id = i.id
-         JOIN merchants m ON i.merchant_id = m.id
+         JOIN merchants m ON wd.merchant_id = m.id
          WHERE wd.status = 'pending'
          AND wd.attempts < 5
-         AND (wd.next_retry_at IS NULL OR wd.next_retry_at <= ?)"
+         AND (wd.next_retry_at IS NULL OR wd.next_retry_at <= ?)",
     )
     .bind(&now)
     .fetch_all(pool)
@@ -391,12 +393,16 @@ pub async fn retry_failed(pool: &SqlitePool, http: &reqwest::Client, encryption_
         let ts = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
         let mut body: serde_json::Value = serde_json::from_str(&payload)?;
         if let Some(obj) = body.as_object_mut() {
-            obj.insert("timestamp".to_string(), serde_json::Value::String(ts.clone()));
+            obj.insert(
+                "timestamp".to_string(),
+                serde_json::Value::String(ts.clone()),
+            );
         }
         let updated_payload = body.to_string();
         let signature = sign_payload(&secret, &ts, &updated_payload);
 
-        let (resp_status, resp_error, success) = match http.post(&url)
+        let (resp_status, resp_error, success) = match http
+            .post(&url)
             .header("X-CipherPay-Signature", &signature)
             .header("X-CipherPay-Timestamp", &ts)
             .header("X-CipherPay-Delivery-Id", &id)
@@ -405,15 +411,13 @@ pub async fn retry_failed(pool: &SqlitePool, http: &reqwest::Client, encryption_
             .send()
             .await
         {
-            Ok(resp) if resp.status().is_success() => {
-                (resp.status().as_u16() as i32, None, true)
-            }
-            Ok(resp) => {
-                (resp.status().as_u16() as i32, Some(format!("HTTP {}", resp.status())), false)
-            }
-            Err(e) => {
-                (0, Some(e.to_string()), false)
-            }
+            Ok(resp) if resp.status().is_success() => (resp.status().as_u16() as i32, None, true),
+            Ok(resp) => (
+                resp.status().as_u16() as i32,
+                Some(format!("HTTP {}", resp.status())),
+                false,
+            ),
+            Err(e) => (0, Some(e.to_string()), false),
         };
 
         if success {

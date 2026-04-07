@@ -3,10 +3,7 @@ use sqlx::SqlitePool;
 
 use crate::invoices;
 
-pub async fn get(
-    pool: web::Data<SqlitePool>,
-    path: web::Path<String>,
-) -> HttpResponse {
+pub async fn get(pool: web::Data<SqlitePool>, path: web::Path<String>) -> HttpResponse {
     let id = path.into_inner();
 
     match invoices::get_invoice_status(pool.get_ref(), &id).await {

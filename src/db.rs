@@ -13,11 +13,13 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
         .connect_with(options)
         .await?;
 
-    // Run migrations inline
-    sqlx::query(include_str!("../migrations/001_init.sql"))
-        .execute(&pool)
-        .await
-        .ok(); // Ignore if tables already exist
+    ensure_migration_tracking_table(&pool).await?;
+    run_tracked_migration(&pool, "schema_inline_v2026_04_07", || async {
+        // Run migrations inline
+        sqlx::query(include_str!("../migrations/001_init.sql"))
+            .execute(&pool)
+            .await
+            .ok(); // Ignore if tables already exist
 
     // Schema upgrades for existing databases
     let upgrades = [
@@ -36,7 +38,7 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
             merchant_id TEXT NOT NULL REFERENCES merchants(id),
             expires_at TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-        )"
+        )",
     )
     .execute(&pool)
     .await
@@ -63,7 +65,7 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
             metadata TEXT,
             active INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-        )"
+        )",
     )
     .execute(&pool)
     .await
@@ -76,9 +78,13 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
 
     // Drop legacy UNIQUE constraint on slug (slug is now cosmetic, product ID is the identifier)
     sqlx::query("DROP INDEX IF EXISTS sqlite_autoindex_products_1")
-        .execute(&pool).await.ok();
+        .execute(&pool)
+        .await
+        .ok();
     sqlx::query("DROP INDEX IF EXISTS idx_products_slug")
-        .execute(&pool).await.ok();
+        .execute(&pool)
+        .await
+        .ok();
 
     // Add product_id and refund_address to invoices for existing databases
     sqlx::query("ALTER TABLE invoices ADD COLUMN product_id TEXT REFERENCES products(id)")
@@ -123,23 +129,34 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
 
     // Disable FK checks and prevent SQLite from auto-rewriting FK references
     // in other tables during ALTER TABLE RENAME (requires legacy_alter_table).
-    sqlx::query("PRAGMA foreign_keys = OFF").execute(&pool).await.ok();
-    sqlx::query("PRAGMA legacy_alter_table = ON").execute(&pool).await.ok();
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query("PRAGMA legacy_alter_table = ON")
+        .execute(&pool)
+        .await
+        .ok();
 
     let needs_migrate: bool = sqlx::query_scalar::<_, i32>(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='invoices'
-         AND sql LIKE '%CHECK%' AND (sql NOT LIKE '%refunded%' OR sql LIKE '%shipped%')"
+         AND sql LIKE '%CHECK%' AND (sql NOT LIKE '%refunded%' OR sql LIKE '%shipped%')",
     )
     .fetch_one(&pool)
     .await
-    .unwrap_or(0) > 0;
+    .unwrap_or(0)
+        > 0;
 
     if needs_migrate {
         tracing::info!("Migrating invoices table (removing shipped status)...");
         sqlx::query("UPDATE invoices SET status = 'confirmed' WHERE status = 'shipped'")
-            .execute(&pool).await.ok();
+            .execute(&pool)
+            .await
+            .ok();
         sqlx::query("ALTER TABLE invoices RENAME TO invoices_old")
-            .execute(&pool).await.ok();
+            .execute(&pool)
+            .await
+            .ok();
         sqlx::query(
             "CREATE TABLE invoices (
                 id TEXT PRIMARY KEY,
@@ -165,21 +182,34 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
                 expires_at TEXT NOT NULL,
                 purge_after TEXT,
                 created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-            )"
-        ).execute(&pool).await.ok();
+            )",
+        )
+        .execute(&pool)
+        .await
+        .ok();
         sqlx::query(
             "INSERT INTO invoices SELECT
                 id, merchant_id, memo_code, product_id, product_name, size,
                 price_eur, price_usd, currency, price_zec, zec_rate_at_creation,
                 payment_address, zcash_uri, refund_address, status, detected_txid, detected_at,
                 confirmed_at, refunded_at, expires_at, purge_after, created_at
-             FROM invoices_old"
-        ).execute(&pool).await.ok();
-        sqlx::query("DROP TABLE invoices_old").execute(&pool).await.ok();
+             FROM invoices_old",
+        )
+        .execute(&pool)
+        .await
+        .ok();
+        sqlx::query("DROP TABLE invoices_old")
+            .execute(&pool)
+            .await
+            .ok();
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_invoices_status ON invoices(status)")
-            .execute(&pool).await.ok();
+            .execute(&pool)
+            .await
+            .ok();
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_invoices_memo ON invoices(memo_code)")
-            .execute(&pool).await.ok();
+            .execute(&pool)
+            .await
+            .ok();
         tracing::info!("Invoices table migration complete");
     }
 
@@ -190,35 +220,48 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
 
     // Diversified addresses: per-invoice unique address derivation
     sqlx::query("ALTER TABLE merchants ADD COLUMN diversifier_index INTEGER NOT NULL DEFAULT 0")
-        .execute(&pool).await.ok();
+        .execute(&pool)
+        .await
+        .ok();
     sqlx::query("ALTER TABLE invoices ADD COLUMN diversifier_index INTEGER")
-        .execute(&pool).await.ok();
+        .execute(&pool)
+        .await
+        .ok();
     sqlx::query("ALTER TABLE invoices ADD COLUMN orchard_receiver_hex TEXT")
-        .execute(&pool).await.ok();
+        .execute(&pool)
+        .await
+        .ok();
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_invoices_orchard_receiver ON invoices(orchard_receiver_hex)")
         .execute(&pool).await.ok();
 
     // Underpayment/overpayment: zatoshi-based amount tracking
     sqlx::query("ALTER TABLE invoices ADD COLUMN price_zatoshis INTEGER NOT NULL DEFAULT 0")
-        .execute(&pool).await.ok();
+        .execute(&pool)
+        .await
+        .ok();
     sqlx::query("ALTER TABLE invoices ADD COLUMN received_zatoshis INTEGER NOT NULL DEFAULT 0")
-        .execute(&pool).await.ok();
+        .execute(&pool)
+        .await
+        .ok();
     sqlx::query("UPDATE invoices SET price_zatoshis = CAST(price_zec * 100000000 AS INTEGER) WHERE price_zatoshis = 0 AND price_zec > 0")
         .execute(&pool).await.ok();
 
     // Add 'underpaid' to status CHECK -- requires table recreation in SQLite
     let needs_underpaid: bool = sqlx::query_scalar::<_, i32>(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='invoices'
-         AND sql LIKE '%CHECK%' AND sql NOT LIKE '%underpaid%'"
+         AND sql LIKE '%CHECK%' AND sql NOT LIKE '%underpaid%'",
     )
     .fetch_one(&pool)
     .await
-    .unwrap_or(0) > 0;
+    .unwrap_or(0)
+        > 0;
 
     if needs_underpaid {
         tracing::info!("Migrating invoices table (adding underpaid status)...");
         sqlx::query("ALTER TABLE invoices RENAME TO invoices_old2")
-            .execute(&pool).await.ok();
+            .execute(&pool)
+            .await
+            .ok();
         sqlx::query(
             "CREATE TABLE invoices (
                 id TEXT PRIMARY KEY,
@@ -257,34 +300,53 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
                 payment_address, zcash_uri, refund_address, status, detected_txid, detected_at,
                 confirmed_at, refunded_at, expires_at, purge_after, created_at,
                 diversifier_index, orchard_receiver_hex, price_zatoshis, received_zatoshis
-             FROM invoices_old2"
-        ).execute(&pool).await.ok();
-        sqlx::query("DROP TABLE invoices_old2").execute(&pool).await.ok();
+             FROM invoices_old2",
+        )
+        .execute(&pool)
+        .await
+        .ok();
+        sqlx::query("DROP TABLE invoices_old2")
+            .execute(&pool)
+            .await
+            .ok();
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_invoices_status ON invoices(status)")
-            .execute(&pool).await.ok();
+            .execute(&pool)
+            .await
+            .ok();
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_invoices_memo ON invoices(memo_code)")
-            .execute(&pool).await.ok();
+            .execute(&pool)
+            .await
+            .ok();
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_invoices_orchard_receiver ON invoices(orchard_receiver_hex)")
             .execute(&pool).await.ok();
         tracing::info!("Invoices table migration (underpaid) complete");
     }
 
     // Clean up leftover temp tables from migrations
-    sqlx::query("DROP TABLE IF EXISTS invoices_old").execute(&pool).await.ok();
-    sqlx::query("DROP TABLE IF EXISTS invoices_old2").execute(&pool).await.ok();
+    sqlx::query("DROP TABLE IF EXISTS invoices_old")
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query("DROP TABLE IF EXISTS invoices_old2")
+        .execute(&pool)
+        .await
+        .ok();
 
     // Drop legacy price_eur/currency columns from products (moved to prices table)
     let products_has_price_eur: bool = sqlx::query_scalar::<_, i32>(
-        "SELECT COUNT(*) FROM pragma_table_info('products') WHERE name = 'price_eur'"
+        "SELECT COUNT(*) FROM pragma_table_info('products') WHERE name = 'price_eur'",
     )
     .fetch_one(&pool)
     .await
-    .unwrap_or(0) > 0;
+    .unwrap_or(0)
+        > 0;
 
     if products_has_price_eur {
         tracing::info!("Migrating products table (dropping legacy price_eur/currency columns)...");
         sqlx::query("ALTER TABLE products RENAME TO products_old")
-            .execute(&pool).await.ok();
+            .execute(&pool)
+            .await
+            .ok();
         sqlx::query(
             "CREATE TABLE products (
                 id TEXT PRIMARY KEY,
@@ -296,30 +358,46 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
                 metadata TEXT,
                 active INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-            )"
-        ).execute(&pool).await.ok();
+            )",
+        )
+        .execute(&pool)
+        .await
+        .ok();
         sqlx::query(
             "INSERT INTO products (id, merchant_id, slug, name, description, default_price_id, metadata, active, created_at)
              SELECT id, merchant_id, slug, name, description, default_price_id, metadata, active, created_at
              FROM products_old"
         ).execute(&pool).await.ok();
-        sqlx::query("DROP TABLE products_old").execute(&pool).await.ok();
+        sqlx::query("DROP TABLE products_old")
+            .execute(&pool)
+            .await
+            .ok();
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_products_merchant ON products(merchant_id)")
-            .execute(&pool).await.ok();
+            .execute(&pool)
+            .await
+            .ok();
         tracing::info!("Products table migration complete (price_eur/currency removed)");
     }
-    sqlx::query("DROP TABLE IF EXISTS products_old").execute(&pool).await.ok();
+    sqlx::query("DROP TABLE IF EXISTS products_old")
+        .execute(&pool)
+        .await
+        .ok();
 
     // Repair FK references in prices/invoices that may have been auto-rewritten
     // by SQLite during products RENAME TABLE (pointing to products_old).
-    let prices_schema: Option<String> = sqlx::query_scalar(
-        "SELECT sql FROM sqlite_master WHERE type='table' AND name='prices'"
-    ).fetch_optional(&pool).await.ok().flatten();
+    let prices_schema: Option<String> =
+        sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type='table' AND name='prices'")
+            .fetch_optional(&pool)
+            .await
+            .ok()
+            .flatten();
     if let Some(ref schema) = prices_schema {
         if schema.contains("products_old") {
             tracing::info!("Repairing prices table FK references...");
             sqlx::query("ALTER TABLE prices RENAME TO _prices_repair")
-                .execute(&pool).await.ok();
+                .execute(&pool)
+                .await
+                .ok();
             sqlx::query(
                 "CREATE TABLE prices (
                     id TEXT PRIMARY KEY,
@@ -331,42 +409,72 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
                     price_type TEXT NOT NULL DEFAULT 'one_time',
                     billing_interval TEXT,
                     interval_count INTEGER
-                )"
-            ).execute(&pool).await.ok();
+                )",
+            )
+            .execute(&pool)
+            .await
+            .ok();
             sqlx::query("INSERT OR IGNORE INTO prices SELECT * FROM _prices_repair")
-                .execute(&pool).await.ok();
-            sqlx::query("DROP TABLE _prices_repair").execute(&pool).await.ok();
+                .execute(&pool)
+                .await
+                .ok();
+            sqlx::query("DROP TABLE _prices_repair")
+                .execute(&pool)
+                .await
+                .ok();
             sqlx::query("CREATE INDEX IF NOT EXISTS idx_prices_product ON prices(product_id)")
-                .execute(&pool).await.ok();
+                .execute(&pool)
+                .await
+                .ok();
             tracing::info!("prices FK repair complete");
         }
     }
-    sqlx::query("DROP TABLE IF EXISTS _prices_repair").execute(&pool).await.ok();
+    sqlx::query("DROP TABLE IF EXISTS _prices_repair")
+        .execute(&pool)
+        .await
+        .ok();
 
     // Repair FK references in invoices if they point to products_old
-    let inv_schema: Option<String> = sqlx::query_scalar(
-        "SELECT sql FROM sqlite_master WHERE type='table' AND name='invoices'"
-    ).fetch_optional(&pool).await.ok().flatten();
+    let inv_schema: Option<String> =
+        sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type='table' AND name='invoices'")
+            .fetch_optional(&pool)
+            .await
+            .ok()
+            .flatten();
     if let Some(ref schema) = inv_schema {
         if schema.contains("products_old") {
             tracing::info!("Repairing invoices table FK references (products_old)...");
             let inv_sql = schema.replace("products_old", "products");
             sqlx::query("ALTER TABLE invoices RENAME TO _inv_repair")
-                .execute(&pool).await.ok();
+                .execute(&pool)
+                .await
+                .ok();
             sqlx::query(&inv_sql).execute(&pool).await.ok();
             sqlx::query("INSERT OR IGNORE INTO invoices SELECT * FROM _inv_repair")
-                .execute(&pool).await.ok();
-            sqlx::query("DROP TABLE _inv_repair").execute(&pool).await.ok();
+                .execute(&pool)
+                .await
+                .ok();
+            sqlx::query("DROP TABLE _inv_repair")
+                .execute(&pool)
+                .await
+                .ok();
             sqlx::query("CREATE INDEX IF NOT EXISTS idx_invoices_status ON invoices(status)")
-                .execute(&pool).await.ok();
+                .execute(&pool)
+                .await
+                .ok();
             sqlx::query("CREATE INDEX IF NOT EXISTS idx_invoices_memo ON invoices(memo_code)")
-                .execute(&pool).await.ok();
+                .execute(&pool)
+                .await
+                .ok();
             sqlx::query("CREATE INDEX IF NOT EXISTS idx_invoices_orchard_receiver ON invoices(orchard_receiver_hex)")
                 .execute(&pool).await.ok();
             tracing::info!("invoices FK repair (products_old) complete");
         }
     }
-    sqlx::query("DROP TABLE IF EXISTS _inv_repair").execute(&pool).await.ok();
+    sqlx::query("DROP TABLE IF EXISTS _inv_repair")
+        .execute(&pool)
+        .await
+        .ok();
 
     // Repair FK references in webhook_deliveries/fee_ledger that may have been
     // auto-rewritten by SQLite during RENAME TABLE. Check for all possible
@@ -374,17 +482,23 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
     // SQLite pool pragmas are per-connection, so legacy_alter_table may not have
     // been active on the connection that ran the rename.
     let wd_schema: Option<String> = sqlx::query_scalar(
-        "SELECT sql FROM sqlite_master WHERE type='table' AND name='webhook_deliveries'"
-    ).fetch_optional(&pool).await.ok().flatten();
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='webhook_deliveries'",
+    )
+    .fetch_optional(&pool)
+    .await
+    .ok()
+    .flatten();
     if let Some(ref schema) = wd_schema {
         if schema.contains("invoices_old") || schema.contains("_inv_repair") {
             tracing::info!("Repairing webhook_deliveries FK references...");
             sqlx::query("ALTER TABLE webhook_deliveries RENAME TO _wd_repair")
-                .execute(&pool).await.ok();
+                .execute(&pool)
+                .await
+                .ok();
             sqlx::query(
                 "CREATE TABLE IF NOT EXISTS webhook_deliveries (
                     id TEXT PRIMARY KEY,
-                    invoice_id TEXT NOT NULL REFERENCES invoices(id),
+                    invoice_id TEXT REFERENCES invoices(id),
                     url TEXT NOT NULL,
                     payload TEXT NOT NULL,
                     status TEXT NOT NULL DEFAULT 'pending'
@@ -392,48 +506,104 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
                     attempts INTEGER NOT NULL DEFAULT 0,
                     last_attempt_at TEXT,
                     next_retry_at TEXT,
+                    event_type TEXT,
+                    merchant_id TEXT REFERENCES merchants(id),
+                    response_status INTEGER,
+                    response_error TEXT,
                     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-                )"
-            ).execute(&pool).await.ok();
-            sqlx::query("INSERT OR IGNORE INTO webhook_deliveries SELECT * FROM _wd_repair")
-                .execute(&pool).await.ok();
-            sqlx::query("DROP TABLE _wd_repair").execute(&pool).await.ok();
+                )",
+            )
+            .execute(&pool)
+            .await
+            .ok();
+            sqlx::query(
+                "INSERT OR IGNORE INTO webhook_deliveries (
+                    id, invoice_id, url, payload, status, attempts, last_attempt_at, next_retry_at, created_at
+                 )
+                 SELECT
+                    id, invoice_id, url, payload, status, attempts, last_attempt_at, next_retry_at, created_at
+                 FROM _wd_repair",
+            )
+                .execute(&pool)
+                .await
+                .ok();
+            sqlx::query("DROP TABLE _wd_repair")
+                .execute(&pool)
+                .await
+                .ok();
             tracing::info!("webhook_deliveries FK repair complete");
         }
     }
-    sqlx::query("DROP TABLE IF EXISTS _wd_repair").execute(&pool).await.ok();
+    sqlx::query("DROP TABLE IF EXISTS _wd_repair")
+        .execute(&pool)
+        .await
+        .ok();
 
     let fl_schema: Option<String> = sqlx::query_scalar(
-        "SELECT sql FROM sqlite_master WHERE type='table' AND name='fee_ledger'"
-    ).fetch_optional(&pool).await.ok().flatten();
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='fee_ledger'",
+    )
+    .fetch_optional(&pool)
+    .await
+    .ok()
+    .flatten();
     if let Some(ref schema) = fl_schema {
         if schema.contains("invoices_old") || schema.contains("_inv_repair") {
             tracing::info!("Repairing fee_ledger FK references...");
             sqlx::query("ALTER TABLE fee_ledger RENAME TO _fl_repair")
-                .execute(&pool).await.ok();
+                .execute(&pool)
+                .await
+                .ok();
             sqlx::query(
                 "CREATE TABLE IF NOT EXISTS fee_ledger (
                     id TEXT PRIMARY KEY,
                     invoice_id TEXT NOT NULL REFERENCES invoices(id),
                     merchant_id TEXT NOT NULL REFERENCES merchants(id),
                     fee_amount_zec REAL NOT NULL,
+                    fee_amount_zatoshis INTEGER NOT NULL DEFAULT 0,
                     auto_collected INTEGER NOT NULL DEFAULT 0,
                     collected_at TEXT,
                     billing_cycle_id TEXT,
                     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-                )"
-            ).execute(&pool).await.ok();
-            sqlx::query("INSERT OR IGNORE INTO fee_ledger SELECT * FROM _fl_repair")
-                .execute(&pool).await.ok();
-            sqlx::query("DROP TABLE _fl_repair").execute(&pool).await.ok();
+                )",
+            )
+            .execute(&pool)
+            .await
+            .ok();
+            sqlx::query(
+                "INSERT OR IGNORE INTO fee_ledger (
+                    id, invoice_id, merchant_id, fee_amount_zec, fee_amount_zatoshis,
+                    auto_collected, collected_at, billing_cycle_id, created_at
+                 )
+                 SELECT
+                    id, invoice_id, merchant_id, fee_amount_zec,
+                    ROUND(fee_amount_zec * 100000000.0),
+                    auto_collected, collected_at, billing_cycle_id, created_at
+                 FROM _fl_repair",
+            )
+            .execute(&pool)
+            .await
+            .ok();
+            sqlx::query("DROP TABLE _fl_repair")
+                .execute(&pool)
+                .await
+                .ok();
             tracing::info!("fee_ledger FK repair complete");
         }
     }
-    sqlx::query("DROP TABLE IF EXISTS _fl_repair").execute(&pool).await.ok();
+    sqlx::query("DROP TABLE IF EXISTS _fl_repair")
+        .execute(&pool)
+        .await
+        .ok();
 
     // Re-enable FK enforcement and restore default alter-table behavior
-    sqlx::query("PRAGMA legacy_alter_table = OFF").execute(&pool).await.ok();
-    sqlx::query("PRAGMA foreign_keys = ON").execute(&pool).await.ok();
+    sqlx::query("PRAGMA legacy_alter_table = OFF")
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&pool)
+        .await
+        .ok();
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS recovery_tokens (
@@ -442,7 +612,7 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
             token_hash TEXT NOT NULL,
             expires_at TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-        )"
+        )",
     )
     .execute(&pool)
     .await
@@ -465,22 +635,43 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
             invoice_id TEXT NOT NULL REFERENCES invoices(id),
             merchant_id TEXT NOT NULL REFERENCES merchants(id),
             fee_amount_zec REAL NOT NULL,
+            fee_amount_zatoshis INTEGER NOT NULL DEFAULT 0,
             auto_collected INTEGER NOT NULL DEFAULT 0,
             collected_at TEXT,
             billing_cycle_id TEXT,
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-        )"
+        )",
     )
     .execute(&pool)
     .await
     .ok();
 
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_fee_ledger_merchant ON fee_ledger(merchant_id)")
-        .execute(&pool).await.ok();
+        .execute(&pool)
+        .await
+        .ok();
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_fee_ledger_cycle ON fee_ledger(billing_cycle_id)")
-        .execute(&pool).await.ok();
-    sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS idx_fee_ledger_invoice ON fee_ledger(invoice_id)")
-        .execute(&pool).await.ok();
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_fee_ledger_invoice ON fee_ledger(invoice_id)",
+    )
+    .execute(&pool)
+    .await
+    .ok();
+    sqlx::query("ALTER TABLE fee_ledger ADD COLUMN fee_amount_zatoshis INTEGER NOT NULL DEFAULT 0")
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query(
+        "UPDATE fee_ledger
+         SET fee_amount_zatoshis = ROUND(fee_amount_zec * 100000000.0)
+         WHERE fee_amount_zatoshis = 0 AND fee_amount_zec > 0",
+    )
+    .execute(&pool)
+    .await
+    .ok();
 
     // Billing cycles
     sqlx::query(
@@ -492,6 +683,9 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
             total_fees_zec REAL NOT NULL DEFAULT 0.0,
             auto_collected_zec REAL NOT NULL DEFAULT 0.0,
             outstanding_zec REAL NOT NULL DEFAULT 0.0,
+            total_fees_zatoshis INTEGER NOT NULL DEFAULT 0,
+            auto_collected_zatoshis INTEGER NOT NULL DEFAULT 0,
+            outstanding_zatoshis INTEGER NOT NULL DEFAULT 0,
             settlement_invoice_id TEXT,
             status TEXT NOT NULL DEFAULT 'open'
                 CHECK (status IN ('open', 'invoiced', 'paid', 'past_due', 'suspended', 'carried_over')),
@@ -503,20 +697,49 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
     .await
     .ok();
 
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_billing_cycles_merchant ON billing_cycles(merchant_id)")
-        .execute(&pool).await.ok();
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_billing_cycles_merchant ON billing_cycles(merchant_id)",
+    )
+    .execute(&pool)
+    .await
+    .ok();
+    for sql in &[
+        "ALTER TABLE billing_cycles ADD COLUMN total_fees_zatoshis INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE billing_cycles ADD COLUMN auto_collected_zatoshis INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE billing_cycles ADD COLUMN outstanding_zatoshis INTEGER NOT NULL DEFAULT 0",
+    ] {
+        sqlx::query(sql).execute(&pool).await.ok();
+    }
+    sqlx::query(
+        "UPDATE billing_cycles
+         SET total_fees_zatoshis = ROUND(total_fees_zec * 100000000.0),
+             auto_collected_zatoshis = ROUND(auto_collected_zec * 100000000.0),
+             outstanding_zatoshis = ROUND(outstanding_zec * 100000000.0)
+         WHERE total_fees_zatoshis = 0
+           AND auto_collected_zatoshis = 0
+           AND outstanding_zatoshis = 0
+           AND (total_fees_zec > 0 OR auto_collected_zec > 0 OR outstanding_zec > 0)",
+    )
+    .execute(&pool)
+    .await
+    .ok();
 
     // Migrate billing_cycles CHECK to include 'carried_over' for existing databases
     let bc_needs_migrate: bool = sqlx::query_scalar::<_, i32>(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='billing_cycles'
-         AND sql LIKE '%CHECK%' AND sql NOT LIKE '%carried_over%'"
+         AND sql LIKE '%CHECK%' AND sql NOT LIKE '%carried_over%'",
     )
-    .fetch_one(&pool).await.unwrap_or(0) > 0;
+    .fetch_one(&pool)
+    .await
+    .unwrap_or(0)
+        > 0;
 
     if bc_needs_migrate {
         tracing::info!("Migrating billing_cycles table (adding carried_over status)...");
         sqlx::query("ALTER TABLE billing_cycles RENAME TO _bc_migrate")
-            .execute(&pool).await.ok();
+            .execute(&pool)
+            .await
+            .ok();
         sqlx::query(
             "CREATE TABLE billing_cycles (
                 id TEXT PRIMARY KEY,
@@ -526,6 +749,9 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
                 total_fees_zec REAL NOT NULL DEFAULT 0.0,
                 auto_collected_zec REAL NOT NULL DEFAULT 0.0,
                 outstanding_zec REAL NOT NULL DEFAULT 0.0,
+                total_fees_zatoshis INTEGER NOT NULL DEFAULT 0,
+                auto_collected_zatoshis INTEGER NOT NULL DEFAULT 0,
+                outstanding_zatoshis INTEGER NOT NULL DEFAULT 0,
                 settlement_invoice_id TEXT,
                 status TEXT NOT NULL DEFAULT 'open'
                     CHECK (status IN ('open', 'invoiced', 'paid', 'past_due', 'suspended', 'carried_over')),
@@ -533,11 +759,35 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
                 created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
             )"
         ).execute(&pool).await.ok();
-        sqlx::query("INSERT INTO billing_cycles SELECT * FROM _bc_migrate")
-            .execute(&pool).await.ok();
-        sqlx::query("DROP TABLE _bc_migrate").execute(&pool).await.ok();
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_billing_cycles_merchant ON billing_cycles(merchant_id)")
-            .execute(&pool).await.ok();
+        sqlx::query(
+            "INSERT INTO billing_cycles (
+                id, merchant_id, period_start, period_end,
+                total_fees_zec, auto_collected_zec, outstanding_zec,
+                total_fees_zatoshis, auto_collected_zatoshis, outstanding_zatoshis,
+                settlement_invoice_id, status, grace_until, created_at
+             )
+             SELECT
+                id, merchant_id, period_start, period_end,
+                total_fees_zec, auto_collected_zec, outstanding_zec,
+                ROUND(total_fees_zec * 100000000.0),
+                ROUND(auto_collected_zec * 100000000.0),
+                ROUND(outstanding_zec * 100000000.0),
+                settlement_invoice_id, status, grace_until, created_at
+             FROM _bc_migrate",
+        )
+        .execute(&pool)
+        .await
+        .ok();
+        sqlx::query("DROP TABLE _bc_migrate")
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_billing_cycles_merchant ON billing_cycles(merchant_id)",
+        )
+        .execute(&pool)
+        .await
+        .ok();
         tracing::info!("billing_cycles migration complete");
     }
 
@@ -550,14 +800,16 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
             unit_amount REAL NOT NULL,
             active INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-        )"
+        )",
     )
     .execute(&pool)
     .await
     .ok();
 
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_prices_product ON prices(product_id)")
-        .execute(&pool).await.ok();
+        .execute(&pool)
+        .await
+        .ok();
 
     // Optional ticketing metadata on prices (safe additive columns)
     for sql in &[
@@ -574,7 +826,7 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
                 p.id, COALESCE(p.currency, 'EUR'), COALESCE(p.price_eur, 0)
          FROM products p
          WHERE NOT EXISTS (SELECT 1 FROM prices pr WHERE pr.product_id = p.id)
-         AND (p.price_eur IS NOT NULL AND p.price_eur > 0)"
+         AND (p.price_eur IS NOT NULL AND p.price_eur > 0)",
     )
     .execute(&pool)
     .await
@@ -592,9 +844,13 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
 
     // Invoice schema additions for multi-currency pricing
     sqlx::query("ALTER TABLE invoices ADD COLUMN amount REAL")
-        .execute(&pool).await.ok();
+        .execute(&pool)
+        .await
+        .ok();
     sqlx::query("ALTER TABLE invoices ADD COLUMN price_id TEXT")
-        .execute(&pool).await.ok();
+        .execute(&pool)
+        .await
+        .ok();
 
     // Backfill amount from existing data
     sqlx::query(
@@ -602,7 +858,7 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
             WHEN currency = 'USD' THEN COALESCE(price_usd, price_eur)
             ELSE price_eur
          END
-         WHERE amount IS NULL"
+         WHERE amount IS NULL",
     )
     .execute(&pool)
     .await
@@ -613,7 +869,7 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
         "CREATE TABLE IF NOT EXISTS scanner_state (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
-        )"
+        )",
     )
     .execute(&pool)
     .await
@@ -630,7 +886,7 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
             status TEXT NOT NULL CHECK (status IN ('verified', 'rejected')),
             reason TEXT,
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-        )"
+        )",
     )
     .execute(&pool)
     .await
@@ -640,7 +896,32 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
         .execute(&pool).await.ok();
 
     sqlx::query("ALTER TABLE x402_verifications ADD COLUMN protocol TEXT NOT NULL DEFAULT 'x402'")
-        .execute(&pool).await.ok();
+        .execute(&pool)
+        .await
+        .ok();
+
+    sqlx::query(
+        "DELETE FROM x402_verifications
+         WHERE status = 'verified'
+           AND rowid NOT IN (
+               SELECT MIN(rowid)
+               FROM x402_verifications
+               WHERE status = 'verified'
+               GROUP BY merchant_id, txid, protocol
+           )",
+    )
+    .execute(&pool)
+    .await
+    .ok();
+
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_x402_verified_once
+         ON x402_verifications(merchant_id, txid, protocol)
+         WHERE status = 'verified'",
+    )
+    .execute(&pool)
+    .await
+    .ok();
 
     // Agent sessions table (agentic prepaid credit)
     sqlx::query(
@@ -664,8 +945,12 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
     .await
     .ok();
 
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_agent_sessions_token ON agent_sessions(bearer_token)")
-        .execute(&pool).await.ok();
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_agent_sessions_token ON agent_sessions(bearer_token)",
+    )
+    .execute(&pool)
+    .await
+    .ok();
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_agent_sessions_merchant ON agent_sessions(merchant_id, status)")
         .execute(&pool).await.ok();
 
@@ -679,7 +964,7 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
             status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'used', 'expired')),
             expires_at TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-        )"
+        )",
     )
     .execute(&pool)
     .await
@@ -701,16 +986,22 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
             active INTEGER NOT NULL DEFAULT 1,
             total_created INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-        )"
+        )",
     )
     .execute(&pool)
     .await
     .ok();
 
     sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS idx_payment_links_slug ON payment_links(slug)")
-        .execute(&pool).await.ok();
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_payment_links_merchant ON payment_links(merchant_id)")
-        .execute(&pool).await.ok();
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_payment_links_merchant ON payment_links(merchant_id)",
+    )
+    .execute(&pool)
+    .await
+    .ok();
 
     // Price type columns (one_time vs recurring)
     for sql in &[
@@ -734,16 +1025,18 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
             status TEXT NOT NULL DEFAULT 'active'
                 CHECK (status IN ('draft', 'active', 'cancelled', 'past')),
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-        )"
+        )",
     )
     .execute(&pool)
     .await
     .ok();
 
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_events_merchant_created ON events(merchant_id, created_at)")
-        .execute(&pool)
-        .await
-        .ok();
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_events_merchant_created ON events(merchant_id, created_at)",
+    )
+    .execute(&pool)
+    .await
+    .ok();
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_events_status ON events(status)")
         .execute(&pool)
         .await
@@ -762,7 +1055,7 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
                 CHECK (status IN ('valid', 'used', 'void')),
             used_at TEXT,
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-        )"
+        )",
     )
     .execute(&pool)
     .await
@@ -790,7 +1083,7 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
             cancel_at_period_end INTEGER NOT NULL DEFAULT 0,
             canceled_at TEXT,
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-        )"
+        )",
     )
     .execute(&pool)
     .await
@@ -798,27 +1091,44 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
 
     // Migration: add label column for existing databases
     sqlx::query("ALTER TABLE subscriptions ADD COLUMN label TEXT")
-        .execute(&pool).await.ok();
+        .execute(&pool)
+        .await
+        .ok();
 
     // Subscription lifecycle: link invoices to subscriptions
     sqlx::query("ALTER TABLE invoices ADD COLUMN subscription_id TEXT")
-        .execute(&pool).await.ok();
+        .execute(&pool)
+        .await
+        .ok();
     sqlx::query("ALTER TABLE subscriptions ADD COLUMN current_invoice_id TEXT")
-        .execute(&pool).await.ok();
+        .execute(&pool)
+        .await
+        .ok();
 
     // Add 'draft' to invoice status CHECK (for subscription pre-invoicing)
     let needs_draft: bool = sqlx::query_scalar::<_, i32>(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='invoices'
-         AND sql LIKE '%CHECK%' AND sql NOT LIKE '%draft%'"
+         AND sql LIKE '%CHECK%' AND sql NOT LIKE '%draft%'",
     )
-    .fetch_one(&pool).await.unwrap_or(0) > 0;
+    .fetch_one(&pool)
+    .await
+    .unwrap_or(0)
+        > 0;
 
     if needs_draft {
         tracing::info!("Migrating invoices table (adding draft status)...");
-        sqlx::query("PRAGMA foreign_keys = OFF").execute(&pool).await.ok();
-        sqlx::query("PRAGMA legacy_alter_table = ON").execute(&pool).await.ok();
+        sqlx::query("PRAGMA foreign_keys = OFF")
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("PRAGMA legacy_alter_table = ON")
+            .execute(&pool)
+            .await
+            .ok();
         sqlx::query("ALTER TABLE invoices RENAME TO _inv_draft_migrate")
-            .execute(&pool).await.ok();
+            .execute(&pool)
+            .await
+            .ok();
         sqlx::query(
             "CREATE TABLE invoices (
                 id TEXT PRIMARY KEY,
@@ -862,20 +1172,39 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
                 confirmed_at, refunded_at, refund_txid, expires_at, purge_after, created_at,
                 diversifier_index, orchard_receiver_hex, price_zatoshis, received_zatoshis,
                 amount, price_id, subscription_id
-             FROM _inv_draft_migrate"
-        ).execute(&pool).await.ok();
-        sqlx::query("DROP TABLE _inv_draft_migrate").execute(&pool).await.ok();
+             FROM _inv_draft_migrate",
+        )
+        .execute(&pool)
+        .await
+        .ok();
+        sqlx::query("DROP TABLE _inv_draft_migrate")
+            .execute(&pool)
+            .await
+            .ok();
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_invoices_status ON invoices(status)")
-            .execute(&pool).await.ok();
+            .execute(&pool)
+            .await
+            .ok();
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_invoices_memo ON invoices(memo_code)")
-            .execute(&pool).await.ok();
+            .execute(&pool)
+            .await
+            .ok();
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_invoices_orchard_receiver ON invoices(orchard_receiver_hex)")
             .execute(&pool).await.ok();
-        sqlx::query("PRAGMA legacy_alter_table = OFF").execute(&pool).await.ok();
-        sqlx::query("PRAGMA foreign_keys = ON").execute(&pool).await.ok();
+        sqlx::query("PRAGMA legacy_alter_table = OFF")
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("PRAGMA foreign_keys = ON")
+            .execute(&pool)
+            .await
+            .ok();
         tracing::info!("Invoices table migration (draft status) complete");
     }
-    sqlx::query("DROP TABLE IF EXISTS _inv_draft_migrate").execute(&pool).await.ok();
+    sqlx::query("DROP TABLE IF EXISTS _inv_draft_migrate")
+        .execute(&pool)
+        .await
+        .ok();
 
     // Belt-and-suspenders: ensure subscription columns exist even if earlier
     // ALTER TABLEs failed silently due to pool-connection pragma issues
@@ -886,20 +1215,33 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
         ("subscriptions", "current_invoice_id"),
         ("subscriptions", "label"),
     ] {
-        let exists: bool = sqlx::query_scalar::<_, i32>(
-            &format!("SELECT COUNT(*) FROM pragma_table_info('{}') WHERE name = '{}'", table, col)
-        ).fetch_one(&pool).await.unwrap_or(0) > 0;
+        let exists: bool = sqlx::query_scalar::<_, i32>(&format!(
+            "SELECT COUNT(*) FROM pragma_table_info('{}') WHERE name = '{}'",
+            table, col
+        ))
+        .fetch_one(&pool)
+        .await
+        .unwrap_or(0)
+            > 0;
         if !exists {
             tracing::info!("Adding missing column {}.{}", table, col);
             sqlx::query(&format!("ALTER TABLE {} ADD COLUMN {} TEXT", table, col))
-                .execute(&pool).await.ok();
+                .execute(&pool)
+                .await
+                .ok();
         }
     }
 
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_subscriptions_merchant ON subscriptions(merchant_id)")
-        .execute(&pool).await.ok();
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_subscriptions_merchant ON subscriptions(merchant_id)",
+    )
+    .execute(&pool)
+    .await
+    .ok();
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_subscriptions_status ON subscriptions(status)")
-        .execute(&pool).await.ok();
+        .execute(&pool)
+        .await
+        .ok();
 
     // Webhook delivery enrichment: queryable event_type, merchant_id, response tracking
     for sql in &[
@@ -911,11 +1253,85 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
         sqlx::query(sql).execute(&pool).await.ok();
     }
 
+    let webhook_schema: Option<String> = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='webhook_deliveries'",
+    )
+    .fetch_optional(&pool)
+    .await
+    .ok()
+    .flatten();
+    if webhook_schema
+        .as_deref()
+        .map(|schema| schema.contains("invoice_id TEXT NOT NULL"))
+        .unwrap_or(false)
+    {
+        tracing::info!("Migrating webhook_deliveries for nullable invoice_id...");
+        sqlx::query("ALTER TABLE webhook_deliveries RENAME TO _webhook_deliveries_migrate")
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query(
+            "CREATE TABLE webhook_deliveries (
+                id TEXT PRIMARY KEY,
+                invoice_id TEXT REFERENCES invoices(id),
+                url TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending', 'delivered', 'failed')),
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_attempt_at TEXT,
+                next_retry_at TEXT,
+                event_type TEXT,
+                merchant_id TEXT REFERENCES merchants(id),
+                response_status INTEGER,
+                response_error TEXT,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            )",
+        )
+        .execute(&pool)
+        .await
+        .ok();
+        sqlx::query(
+            "INSERT INTO webhook_deliveries (
+                id, invoice_id, url, payload, status, attempts, last_attempt_at, next_retry_at,
+                event_type, merchant_id, response_status, response_error, created_at
+             )
+             SELECT
+                wd.id, wd.invoice_id, wd.url, wd.payload, wd.status, wd.attempts, wd.last_attempt_at, wd.next_retry_at,
+                wd.event_type, COALESCE(wd.merchant_id, i.merchant_id), wd.response_status, wd.response_error, wd.created_at
+             FROM _webhook_deliveries_migrate wd
+             LEFT JOIN invoices i ON wd.invoice_id = i.id",
+        )
+        .execute(&pool)
+        .await
+        .ok();
+        sqlx::query("DROP TABLE _webhook_deliveries_migrate")
+            .execute(&pool)
+            .await
+            .ok();
+    }
+    sqlx::query(
+        "UPDATE webhook_deliveries
+         SET merchant_id = (
+             SELECT i.merchant_id FROM invoices i WHERE i.id = webhook_deliveries.invoice_id
+         )
+         WHERE merchant_id IS NULL AND invoice_id IS NOT NULL",
+    )
+    .execute(&pool)
+    .await
+    .ok();
+
     // Recovery email encryption: add blind-index column
     sqlx::query("ALTER TABLE merchants ADD COLUMN recovery_email_hash TEXT")
-        .execute(&pool).await.ok();
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_merchants_email_hash ON merchants(recovery_email_hash)")
-        .execute(&pool).await.ok();
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_merchants_email_hash ON merchants(recovery_email_hash)",
+    )
+    .execute(&pool)
+    .await
+    .ok();
 
     // Luma integration: merchant API key, event/price linking, invoice PII + registration state
     for sql in &[
@@ -933,7 +1349,9 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
         sqlx::query(sql).execute(&pool).await.ok();
     }
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_events_luma ON events(luma_event_id)")
-        .execute(&pool).await.ok();
+        .execute(&pool)
+        .await
+        .ok();
 
     // Donation infrastructure: extend payment_links and invoices
     for sql in &[
@@ -951,16 +1369,19 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
     // SQLite requires table recreation to change column constraints.
     let needs_pl_migrate: bool = sqlx::query_scalar::<_, i32>(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='payment_links'
-         AND sql LIKE '%price_id TEXT NOT NULL%'"
+         AND sql LIKE '%price_id TEXT NOT NULL%'",
     )
     .fetch_one(&pool)
     .await
-    .unwrap_or(0) > 0;
+    .unwrap_or(0)
+        > 0;
 
     if needs_pl_migrate {
         tracing::info!("Migrating payment_links (making price_id nullable for donation mode)...");
         sqlx::query("ALTER TABLE payment_links RENAME TO payment_links_old")
-            .execute(&pool).await.ok();
+            .execute(&pool)
+            .await
+            .ok();
         sqlx::query(
             "CREATE TABLE payment_links (
                 id TEXT PRIMARY KEY,
@@ -976,41 +1397,275 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
                 donation_config TEXT,
                 total_raised INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-            )"
-        ).execute(&pool).await.ok();
+            )",
+        )
+        .execute(&pool)
+        .await
+        .ok();
         sqlx::query(
             "INSERT INTO payment_links SELECT
                 id, merchant_id, price_id, slug, name, success_url, metadata,
                 active, total_created, mode, donation_config, total_raised, created_at
-             FROM payment_links_old"
-        ).execute(&pool).await.ok();
-        sqlx::query("DROP TABLE payment_links_old").execute(&pool).await.ok();
-        sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS idx_payment_links_slug ON payment_links(slug)")
-            .execute(&pool).await.ok();
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_payment_links_merchant ON payment_links(merchant_id)")
-            .execute(&pool).await.ok();
+             FROM payment_links_old",
+        )
+        .execute(&pool)
+        .await
+        .ok();
+        sqlx::query("DROP TABLE payment_links_old")
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_payment_links_slug ON payment_links(slug)",
+        )
+        .execute(&pool)
+        .await
+        .ok();
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_payment_links_merchant ON payment_links(merchant_id)",
+        )
+        .execute(&pool)
+        .await
+        .ok();
         tracing::info!("payment_links migration complete (price_id now nullable)");
     }
 
-    tracing::info!("Database ready (SQLite)");
+        validate_schema_state(&pool).await?;
+        tracing::info!("Database ready (SQLite)");
+        Ok(())
+    })
+    .await?;
+
     Ok(pool)
 }
 
-pub async fn get_scanner_state(pool: &SqlitePool, key: &str) -> Option<String> {
-    sqlx::query_scalar::<_, String>(
-        "SELECT value FROM scanner_state WHERE key = ?"
+async fn ensure_migration_tracking_table(pool: &SqlitePool) -> anyhow::Result<()> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS schema_migrations (
+            name TEXT PRIMARY KEY,
+            status TEXT NOT NULL CHECK (status IN ('running', 'applied', 'failed')),
+            started_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            finished_at TEXT,
+            error_message TEXT
+        )",
     )
-    .bind(key)
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten()
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+pub async fn run_tracked_migration<F, Fut>(
+    pool: &SqlitePool,
+    name: &str,
+    migration: F,
+) -> anyhow::Result<()>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<()>>,
+{
+    ensure_migration_tracking_table(pool).await?;
+
+    let existing: Option<(String, Option<String>)> =
+        sqlx::query_as("SELECT status, error_message FROM schema_migrations WHERE name = ?")
+            .bind(name)
+            .fetch_optional(pool)
+            .await?;
+
+    if let Some((status, _)) = &existing {
+        if status == "applied" {
+            tracing::info!(migration = name, "Migration already applied");
+            return Ok(());
+        }
+        if status == "running" {
+            anyhow::bail!(
+                "Migration '{}' is marked as running from a previous startup. Inspect schema_migrations and the database before restarting again.",
+                name
+            );
+        }
+    }
+
+    sqlx::query(
+        "INSERT INTO schema_migrations (name, status, started_at, finished_at, error_message)
+         VALUES (?, 'running', strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), NULL, NULL)
+         ON CONFLICT(name) DO UPDATE SET
+            status = 'running',
+            started_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+            finished_at = NULL,
+            error_message = NULL",
+    )
+    .bind(name)
+    .execute(pool)
+    .await?;
+
+    match migration().await {
+        Ok(()) => {
+            sqlx::query(
+                "UPDATE schema_migrations
+                 SET status = 'applied',
+                     finished_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+                     error_message = NULL
+                 WHERE name = ?",
+            )
+            .bind(name)
+            .execute(pool)
+            .await?;
+            tracing::info!(migration = name, "Migration applied successfully");
+            Ok(())
+        }
+        Err(error) => {
+            let error_text = error.to_string();
+            sqlx::query(
+                "UPDATE schema_migrations
+                 SET status = 'failed',
+                     finished_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+                     error_message = ?
+                 WHERE name = ?",
+            )
+            .bind(&error_text)
+            .bind(name)
+            .execute(pool)
+            .await?;
+            anyhow::bail!("Migration '{}' failed: {}", name, error_text);
+        }
+    }
+}
+
+async fn validate_schema_state(pool: &SqlitePool) -> anyhow::Result<()> {
+    let required_tables = [
+        "merchants",
+        "invoices",
+        "products",
+        "prices",
+        "webhook_deliveries",
+        "fee_ledger",
+        "billing_cycles",
+        "x402_verifications",
+        "agent_sessions",
+        "session_requests",
+        "recovery_tokens",
+    ];
+    for table in required_tables {
+        ensure_table_exists(pool, table).await?;
+    }
+
+    ensure_columns(
+        pool,
+        "merchants",
+        &[
+            "webhook_secret",
+            "dashboard_token_hash",
+            "recovery_email",
+            "name",
+            "diversifier_index",
+            "trust_tier",
+            "billing_status",
+            "billing_started_at",
+            "recovery_email_hash",
+        ],
+    )
+    .await?;
+    ensure_columns(
+        pool,
+        "invoices",
+        &[
+            "payment_address",
+            "zcash_uri",
+            "product_id",
+            "refund_address",
+            "price_usd",
+            "refunded_at",
+            "refund_txid",
+            "currency",
+            "diversifier_index",
+            "orchard_receiver_hex",
+            "price_zatoshis",
+            "received_zatoshis",
+        ],
+    )
+    .await?;
+    ensure_columns(
+        pool,
+        "webhook_deliveries",
+        &[
+            "event_type",
+            "merchant_id",
+            "response_status",
+            "response_error",
+        ],
+    )
+    .await?;
+    ensure_columns(pool, "fee_ledger", &["fee_amount_zatoshis"]).await?;
+    ensure_columns(
+        pool,
+        "billing_cycles",
+        &[
+            "total_fees_zatoshis",
+            "auto_collected_zatoshis",
+            "outstanding_zatoshis",
+        ],
+    )
+    .await?;
+    ensure_columns(pool, "x402_verifications", &["protocol"]).await?;
+
+    let webhook_sql: String = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='webhook_deliveries'",
+    )
+    .fetch_one(pool)
+    .await?;
+    if webhook_sql.contains("invoice_id TEXT NOT NULL") {
+        anyhow::bail!("webhook_deliveries.invoice_id is still NOT NULL after migration");
+    }
+
+    Ok(())
+}
+
+async fn ensure_table_exists(pool: &SqlitePool, table: &str) -> anyhow::Result<()> {
+    let exists: Option<String> =
+        sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type='table' AND name = ?")
+            .bind(table)
+            .fetch_optional(pool)
+            .await?;
+
+    if exists.is_none() {
+        anyhow::bail!("Required table '{}' is missing after migrations", table);
+    }
+
+    Ok(())
+}
+
+async fn ensure_columns(pool: &SqlitePool, table: &str, required: &[&str]) -> anyhow::Result<()> {
+    let pragma = format!("PRAGMA table_info({})", table);
+    let rows: Vec<(i64, String, String, i64, Option<String>, i64)> =
+        sqlx::query_as(&pragma).fetch_all(pool).await?;
+    let existing: std::collections::HashSet<String> = rows.into_iter().map(|row| row.1).collect();
+
+    for column in required {
+        if !existing.contains(*column) {
+            anyhow::bail!(
+                "Required column '{}.{}' is missing after migrations",
+                table,
+                column
+            );
+        }
+    }
+
+    Ok(())
+}
+
+pub async fn get_scanner_state(pool: &SqlitePool, key: &str) -> Option<String> {
+    sqlx::query_scalar::<_, String>("SELECT value FROM scanner_state WHERE key = ?")
+        .bind(key)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
 }
 
 pub async fn set_scanner_state(pool: &SqlitePool, key: &str, value: &str) -> anyhow::Result<()> {
     sqlx::query(
         "INSERT INTO scanner_state (key, value) VALUES (?, ?)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
     )
     .bind(key)
     .bind(value)
@@ -1034,30 +1689,42 @@ pub async fn run_data_purge(pool: &SqlitePool, purge_days: i64) -> anyhow::Resul
 
     // Expired session deposit requests
     let _ = sqlx::query(
-        "DELETE FROM session_requests WHERE expires_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
-    ).execute(pool).await;
+        "DELETE FROM session_requests WHERE expires_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
+    )
+    .execute(pool)
+    .await;
 
     // Expired dashboard login sessions
     let _ = sqlx::query(
-        "DELETE FROM sessions WHERE expires_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
-    ).execute(pool).await;
+        "DELETE FROM sessions WHERE expires_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
+    )
+    .execute(pool)
+    .await;
 
     // Expired recovery tokens
     let tokens = sqlx::query(
-        "DELETE FROM recovery_tokens WHERE expires_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
-    ).execute(pool).await?;
+        "DELETE FROM recovery_tokens WHERE expires_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
+    )
+    .execute(pool)
+    .await?;
 
     // Old delivered/failed webhook deliveries
     let webhooks = sqlx::query(
         "DELETE FROM webhook_deliveries WHERE status IN ('delivered', 'failed')
-         AND created_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?)"
-    ).bind(&cutoff).execute(pool).await?;
+         AND created_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?)",
+    )
+    .bind(&cutoff)
+    .execute(pool)
+    .await?;
 
     let tickets = sqlx::query(
         "DELETE FROM tickets
          WHERE status = 'void'
-         AND created_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?)"
-    ).bind(&cutoff).execute(pool).await?;
+         AND created_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?)",
+    )
+    .bind(&cutoff)
+    .execute(pool)
+    .await?;
 
     let total = agent_sessions_purged
         + tokens.rows_affected()
@@ -1078,7 +1745,10 @@ pub async fn run_data_purge(pool: &SqlitePool, purge_days: i64) -> anyhow::Resul
 /// Encrypt any plaintext recovery emails and backfill blind-index hashes.
 /// Called once at startup when ENCRYPTION_KEY is set.
 /// Plaintext emails are identified by containing '@'.
-pub async fn migrate_encrypt_recovery_emails(pool: &SqlitePool, encryption_key: &str) -> anyhow::Result<()> {
+pub async fn migrate_encrypt_recovery_emails(
+    pool: &SqlitePool,
+    encryption_key: &str,
+) -> anyhow::Result<()> {
     // Backfill hashes for rows that have a recovery_email but no hash
     let rows: Vec<(String, String)> = sqlx::query_as(
         "SELECT id, recovery_email FROM merchants WHERE recovery_email IS NOT NULL AND recovery_email != '' AND (recovery_email_hash IS NULL OR recovery_email_hash = '')"
@@ -1090,7 +1760,10 @@ pub async fn migrate_encrypt_recovery_emails(pool: &SqlitePool, encryption_key: 
         return Ok(());
     }
 
-    tracing::info!(count = rows.len(), "Migrating recovery emails (encrypt + blind index)");
+    tracing::info!(
+        count = rows.len(),
+        "Migrating recovery emails (encrypt + blind index)"
+    );
     for (id, email_raw) in &rows {
         let plaintext = if email_raw.contains('@') {
             email_raw.clone()
@@ -1108,12 +1781,14 @@ pub async fn migrate_encrypt_recovery_emails(pool: &SqlitePool, encryption_key: 
             email_raw.clone()
         };
 
-        sqlx::query("UPDATE merchants SET recovery_email = ?, recovery_email_hash = ? WHERE id = ?")
-            .bind(&stored)
-            .bind(&hash)
-            .bind(id)
-            .execute(pool)
-            .await?;
+        sqlx::query(
+            "UPDATE merchants SET recovery_email = ?, recovery_email_hash = ? WHERE id = ?",
+        )
+        .bind(&stored)
+        .bind(&hash)
+        .bind(id)
+        .execute(pool)
+        .await?;
     }
     tracing::info!("Recovery email encryption migration complete");
     Ok(())
@@ -1122,7 +1797,10 @@ pub async fn migrate_encrypt_recovery_emails(pool: &SqlitePool, encryption_key: 
 /// Re-hash blind indices from plain SHA-256 to HMAC-SHA256 keyed with ENCRYPTION_KEY.
 /// Detects old-format hashes by length (SHA-256 = 64 hex chars) and re-computes them.
 /// Safe to run multiple times — skips rows that already have HMAC hashes.
-pub async fn migrate_blind_index_to_hmac(pool: &SqlitePool, encryption_key: &str) -> anyhow::Result<()> {
+pub async fn migrate_blind_index_to_hmac(
+    pool: &SqlitePool,
+    encryption_key: &str,
+) -> anyhow::Result<()> {
     if encryption_key.is_empty() {
         return Ok(());
     }
@@ -1130,7 +1808,7 @@ pub async fn migrate_blind_index_to_hmac(pool: &SqlitePool, encryption_key: &str
     let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
         "SELECT id, recovery_email, recovery_email_hash FROM merchants
          WHERE recovery_email IS NOT NULL AND recovery_email != ''
-         AND recovery_email_hash IS NOT NULL AND recovery_email_hash != ''"
+         AND recovery_email_hash IS NOT NULL AND recovery_email_hash != ''",
     )
     .fetch_all(pool)
     .await?;
@@ -1165,13 +1843,16 @@ pub async fn migrate_blind_index_to_hmac(pool: &SqlitePool, encryption_key: &str
 
 /// Encrypt any plaintext webhook secrets in the database. Called once at startup when
 /// ENCRYPTION_KEY is set. Plaintext secrets are identified by their "whsec_" prefix.
-pub async fn migrate_encrypt_webhook_secrets(pool: &SqlitePool, encryption_key: &str) -> anyhow::Result<()> {
+pub async fn migrate_encrypt_webhook_secrets(
+    pool: &SqlitePool,
+    encryption_key: &str,
+) -> anyhow::Result<()> {
     if encryption_key.is_empty() {
         return Ok(());
     }
 
     let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT id, webhook_secret FROM merchants WHERE webhook_secret LIKE 'whsec_%'"
+        "SELECT id, webhook_secret FROM merchants WHERE webhook_secret LIKE 'whsec_%'",
     )
     .fetch_all(pool)
     .await?;
@@ -1180,7 +1861,10 @@ pub async fn migrate_encrypt_webhook_secrets(pool: &SqlitePool, encryption_key: 
         return Ok(());
     }
 
-    tracing::info!(count = rows.len(), "Encrypting plaintext webhook secrets at rest");
+    tracing::info!(
+        count = rows.len(),
+        "Encrypting plaintext webhook secrets at rest"
+    );
     for (id, secret) in &rows {
         let encrypted = crate::crypto::encrypt(secret, encryption_key)?;
         sqlx::query("UPDATE merchants SET webhook_secret = ? WHERE id = ?")
@@ -1210,7 +1894,10 @@ pub async fn migrate_encrypt_ufvks(pool: &SqlitePool, encryption_key: &str) -> a
         return Ok(());
     }
 
-    tracing::info!(count = rows.len(), "Encrypting plaintext viewing keys at rest");
+    tracing::info!(
+        count = rows.len(),
+        "Encrypting plaintext viewing keys at rest"
+    );
     for (id, key) in &rows {
         let encrypted = crate::crypto::encrypt(key, encryption_key)?;
         sqlx::query("UPDATE merchants SET ufvk = ? WHERE id = ?")
@@ -1227,11 +1914,9 @@ pub async fn migrate_encrypt_ufvks(pool: &SqlitePool, encryption_key: &str) -> a
 /// Decrypts each merchant's viewing key, and if it's still a UFVK (uview/uviewtest),
 /// derives the UIVK and re-encrypts it. Idempotent: keys already stored as UIVK are skipped.
 pub async fn migrate_ufvk_to_uivk(pool: &SqlitePool, encryption_key: &str) -> anyhow::Result<()> {
-    let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT id, ufvk FROM merchants"
-    )
-    .fetch_all(pool)
-    .await?;
+    let rows: Vec<(String, String)> = sqlx::query_as("SELECT id, ufvk FROM merchants")
+        .fetch_all(pool)
+        .await?;
 
     if rows.is_empty() {
         return Ok(());

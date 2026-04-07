@@ -54,23 +54,23 @@ pub async fn fetch_raw_txs_batch(
     let mut results = Vec::with_capacity(txids.len());
 
     for chunk in txids.chunks(BATCH_SIZE) {
-        let futures: Vec<_> = chunk.iter().map(|txid| {
-            let http = http.clone();
-            let url = format!("{}/api/tx/{}/raw", api_url, txid);
-            let txid = txid.clone();
-            async move {
-                let resp: Result<serde_json::Value, _> = async {
-                    Ok(http.get(&url).send().await?.json().await?)
-                }.await;
+        let futures: Vec<_> = chunk
+            .iter()
+            .map(|txid| {
+                let http = http.clone();
+                let url = format!("{}/api/tx/{}/raw", api_url, txid);
+                let txid = txid.clone();
+                async move {
+                    let resp: Result<serde_json::Value, _> =
+                        async { Ok(http.get(&url).send().await?.json().await?) }.await;
 
-                match resp {
-                    Ok(val) => val["hex"]
-                        .as_str()
-                        .map(|hex| (txid, hex.to_string())),
-                    Err::<_, anyhow::Error>(_) => None,
+                    match resp {
+                        Ok(val) => val["hex"].as_str().map(|hex| (txid, hex.to_string())),
+                        Err::<_, anyhow::Error>(_) => None,
+                    }
                 }
-            }
-        }).collect();
+            })
+            .collect();
 
         let batch_results = join_all(futures).await;
         results.extend(batch_results.into_iter().flatten());

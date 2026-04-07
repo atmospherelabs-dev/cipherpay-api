@@ -19,15 +19,22 @@ pub async fn list_events(
 ) -> HttpResponse {
     let merchant = match resolve_session(&req, &pool).await {
         Some(m) => m,
-        None => return HttpResponse::Unauthorized().json(serde_json::json!({"error": "Not authenticated"})),
+        None => {
+            return HttpResponse::Unauthorized()
+                .json(serde_json::json!({"error": "Not authenticated"}))
+        }
     };
 
     let api_key = match get_luma_key(pool.get_ref(), &merchant.id, &config.encryption_key).await {
         Ok(Some(k)) => k,
-        Ok(None) => return HttpResponse::BadRequest().json(serde_json::json!({"error": "Luma API key not configured"})),
+        Ok(None) => {
+            return HttpResponse::BadRequest()
+                .json(serde_json::json!({"error": "Luma API key not configured"}))
+        }
         Err(e) => {
             tracing::error!(error = %e, "Failed to decrypt Luma API key");
-            return HttpResponse::InternalServerError().json(serde_json::json!({"error": "Internal error"}));
+            return HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": "Internal error"}));
         }
     };
 
@@ -37,18 +44,20 @@ pub async fn list_events(
         Ok(e) => e,
         Err(e) => {
             tracing::error!(error = %e, "Failed to list Luma events");
-            return HttpResponse::BadGateway().json(serde_json::json!({"error": format!("Luma API error: {}", e)}));
+            return HttpResponse::BadGateway()
+                .json(serde_json::json!({"error": format!("Luma API error: {}", e)}));
         }
     };
 
-    let already_imported: std::collections::HashSet<String> =
-        sqlx::query_scalar::<_, String>("SELECT luma_event_id FROM events WHERE merchant_id = ? AND luma_event_id IS NOT NULL")
-            .bind(&merchant.id)
-            .fetch_all(pool.get_ref())
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .collect();
+    let already_imported: std::collections::HashSet<String> = sqlx::query_scalar::<_, String>(
+        "SELECT luma_event_id FROM events WHERE merchant_id = ? AND luma_event_id IS NOT NULL",
+    )
+    .bind(&merchant.id)
+    .fetch_all(pool.get_ref())
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .collect();
 
     let now = chrono::Utc::now().naive_utc();
 
@@ -100,29 +109,36 @@ pub async fn import_event(
 ) -> HttpResponse {
     let merchant = match resolve_session(&req, &pool).await {
         Some(m) => m,
-        None => return HttpResponse::Unauthorized().json(serde_json::json!({"error": "Not authenticated"})),
+        None => {
+            return HttpResponse::Unauthorized()
+                .json(serde_json::json!({"error": "Not authenticated"}))
+        }
     };
 
     let api_key = match get_luma_key(pool.get_ref(), &merchant.id, &config.encryption_key).await {
         Ok(Some(k)) => k,
-        Ok(None) => return HttpResponse::BadRequest().json(serde_json::json!({"error": "Luma API key not configured"})),
+        Ok(None) => {
+            return HttpResponse::BadRequest()
+                .json(serde_json::json!({"error": "Luma API key not configured"}))
+        }
         Err(e) => {
             tracing::error!(error = %e, "Failed to decrypt Luma API key");
-            return HttpResponse::InternalServerError().json(serde_json::json!({"error": "Internal error"}));
+            return HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": "Internal error"}));
         }
     };
 
-    let existing: Option<(String,)> = sqlx::query_as(
-        "SELECT id FROM events WHERE merchant_id = ? AND luma_event_id = ?",
-    )
-    .bind(&merchant.id)
-    .bind(&body.luma_event_id)
-    .fetch_optional(pool.get_ref())
-    .await
-    .unwrap_or(None);
+    let existing: Option<(String,)> =
+        sqlx::query_as("SELECT id FROM events WHERE merchant_id = ? AND luma_event_id = ?")
+            .bind(&merchant.id)
+            .bind(&body.luma_event_id)
+            .fetch_optional(pool.get_ref())
+            .await
+            .unwrap_or(None);
 
     if existing.is_some() {
-        return HttpResponse::Conflict().json(serde_json::json!({"error": "Event already imported"}));
+        return HttpResponse::Conflict()
+            .json(serde_json::json!({"error": "Event already imported"}));
     }
 
     let http = reqwest::Client::new();
@@ -131,13 +147,17 @@ pub async fn import_event(
         Ok(e) => e,
         Err(e) => {
             tracing::error!(error = %e, "Failed to fetch Luma events for import");
-            return HttpResponse::BadGateway().json(serde_json::json!({"error": format!("Luma API error: {}", e)}));
+            return HttpResponse::BadGateway()
+                .json(serde_json::json!({"error": format!("Luma API error: {}", e)}));
         }
     };
 
     let luma_event = match events.into_iter().find(|e| e.api_id == body.luma_event_id) {
         Some(e) => e,
-        None => return HttpResponse::NotFound().json(serde_json::json!({"error": "Luma event not found"})),
+        None => {
+            return HttpResponse::NotFound()
+                .json(serde_json::json!({"error": "Luma event not found"}))
+        }
     };
 
     let ticket_types = crate::luma::list_ticket_types(&http, &api_key, &body.luma_event_id)
@@ -150,7 +170,8 @@ pub async fn import_event(
         }));
     }
 
-    let location = luma_event.geo_address_json
+    let location = luma_event
+        .geo_address_json
         .as_ref()
         .and_then(|g| g.get("full_address"))
         .and_then(|v| v.as_str())
@@ -158,22 +179,31 @@ pub async fn import_event(
 
     let luma_url = luma_event.url.clone();
 
-    let prices: Vec<crate::events::CreateEventPrice> = ticket_types.iter().map(|tt| {
-        let (currency, amount) = tt.price.as_ref()
-            .map(|p| {
-                let c = p.currency.clone().unwrap_or_else(|| "USD".into()).to_uppercase();
-                let a = p.amount.unwrap_or(0.0);
-                (c, a)
-            })
-            .unwrap_or_else(|| ("USD".into(), 0.0));
+    let prices: Vec<crate::events::CreateEventPrice> = ticket_types
+        .iter()
+        .map(|tt| {
+            let (currency, amount) = tt
+                .price
+                .as_ref()
+                .map(|p| {
+                    let c = p
+                        .currency
+                        .clone()
+                        .unwrap_or_else(|| "USD".into())
+                        .to_uppercase();
+                    let a = p.amount.unwrap_or(0.0);
+                    (c, a)
+                })
+                .unwrap_or_else(|| ("USD".into(), 0.0));
 
-        crate::events::CreateEventPrice {
-            currency,
-            unit_amount: if amount > 0.0 { amount } else { 0.01 },
-            label: tt.name.clone(),
-            max_quantity: tt.max_capacity,
-        }
-    }).collect();
+            crate::events::CreateEventPrice {
+                currency,
+                unit_amount: if amount > 0.0 { amount } else { 0.01 },
+                label: tt.name.clone(),
+                max_quantity: tt.max_capacity,
+            }
+        })
+        .collect();
 
     let event_date = luma_event.start_at.as_deref().and_then(normalize_luma_date);
 
@@ -186,12 +216,17 @@ pub async fn import_event(
     };
 
     let event = match crate::events::create_event_with_product_and_prices(
-        pool.get_ref(), &merchant.id, &create_req,
-    ).await {
+        pool.get_ref(),
+        &merchant.id,
+        &create_req,
+    )
+    .await
+    {
         Ok(e) => e,
         Err(e) => {
             tracing::error!(error = %e, "Failed to create event from Luma import");
-            return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Failed to create event: {}", e)}));
+            return HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": format!("Failed to create event: {}", e)}));
         }
     };
 
@@ -214,7 +249,10 @@ pub async fn import_event(
     .unwrap_or_default();
 
     for (price_id, label) in &price_rows {
-        if let Some(tt) = ticket_types.iter().find(|tt| tt.name.as_deref() == label.as_deref()) {
+        if let Some(tt) = ticket_types
+            .iter()
+            .find(|tt| tt.name.as_deref() == label.as_deref())
+        {
             sqlx::query("UPDATE prices SET luma_ticket_type_id = ? WHERE id = ?")
                 .bind(&tt.api_id)
                 .bind(price_id)
@@ -233,10 +271,7 @@ pub async fn import_event(
 }
 
 /// GET /api/invoices/{id}/luma-pass -- public endpoint for confirmation page polling
-pub async fn luma_pass(
-    pool: web::Data<SqlitePool>,
-    path: web::Path<String>,
-) -> HttpResponse {
+pub async fn luma_pass(pool: web::Data<SqlitePool>, path: web::Path<String>) -> HttpResponse {
     let invoice_id = path.into_inner();
 
     let row: Option<(Option<String>, Option<String>)> = sqlx::query_as(
@@ -249,7 +284,9 @@ pub async fn luma_pass(
 
     let (status, guest_data) = match row {
         Some(r) => r,
-        None => return HttpResponse::NotFound().json(serde_json::json!({"error": "Invoice not found"})),
+        None => {
+            return HttpResponse::NotFound().json(serde_json::json!({"error": "Invoice not found"}))
+        }
     };
 
     let status = status.unwrap_or_else(|| "none".into());
@@ -261,22 +298,26 @@ pub async fn luma_pass(
     }
 
     // Map "retry" to "pending" for the frontend — the buyer sees it as still processing
-    let public_status = if status == "retry" { "pending".to_string() } else { status };
+    let public_status = if status == "retry" {
+        "pending".to_string()
+    } else {
+        status
+    };
 
-    let guest: Option<serde_json::Value> = guest_data
-        .and_then(|d| serde_json::from_str(&d).ok());
+    let guest: Option<serde_json::Value> = guest_data.and_then(|d| serde_json::from_str(&d).ok());
 
     // Also fetch event metadata for display
-    let event_meta: Option<(String, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT e.title, e.event_date, e.event_location, e.luma_event_url
+    let event_meta: Option<(String, Option<String>, Option<String>, Option<String>)> =
+        sqlx::query_as(
+            "SELECT e.title, e.event_date, e.event_location, e.luma_event_url
          FROM invoices i
          JOIN events e ON e.product_id = i.product_id
          WHERE i.id = ?",
-    )
-    .bind(&invoice_id)
-    .fetch_optional(pool.get_ref())
-    .await
-    .unwrap_or(None);
+        )
+        .bind(&invoice_id)
+        .fetch_optional(pool.get_ref())
+        .await
+        .unwrap_or(None);
 
     let price_label: Option<String> = sqlx::query_scalar(
         "SELECT p.label FROM invoices i JOIN prices p ON p.id = i.price_id WHERE i.id = ?",
@@ -313,15 +354,22 @@ pub async fn sync_event(
 
     let merchant = match resolve_session(&req, &pool).await {
         Some(m) => m,
-        None => return HttpResponse::Unauthorized().json(serde_json::json!({"error": "Not authenticated"})),
+        None => {
+            return HttpResponse::Unauthorized()
+                .json(serde_json::json!({"error": "Not authenticated"}))
+        }
     };
 
     let api_key = match get_luma_key(pool.get_ref(), &merchant.id, &config.encryption_key).await {
         Ok(Some(k)) => k,
-        Ok(None) => return HttpResponse::BadRequest().json(serde_json::json!({"error": "Luma API key not configured"})),
+        Ok(None) => {
+            return HttpResponse::BadRequest()
+                .json(serde_json::json!({"error": "Luma API key not configured"}))
+        }
         Err(e) => {
             tracing::error!(error = %e, "Failed to decrypt Luma API key");
-            return HttpResponse::InternalServerError().json(serde_json::json!({"error": "Internal error"}));
+            return HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": "Internal error"}));
         }
     };
 
@@ -337,12 +385,17 @@ pub async fn sync_event(
 
     let (_, luma_event_id, product_id) = match row {
         Some(r) => r,
-        None => return HttpResponse::NotFound().json(serde_json::json!({"error": "Event not found"})),
+        None => {
+            return HttpResponse::NotFound().json(serde_json::json!({"error": "Event not found"}))
+        }
     };
 
     let luma_event_id = match luma_event_id {
         Some(id) if !id.is_empty() => id,
-        _ => return HttpResponse::BadRequest().json(serde_json::json!({"error": "Event is not linked to Luma"})),
+        _ => {
+            return HttpResponse::BadRequest()
+                .json(serde_json::json!({"error": "Event is not linked to Luma"}))
+        }
     };
 
     let http = reqwest::Client::new();
@@ -352,7 +405,8 @@ pub async fn sync_event(
         Ok(e) => e,
         Err(e) => {
             tracing::error!(error = %e, "Luma sync: failed to fetch events");
-            return HttpResponse::BadGateway().json(serde_json::json!({"error": format!("Luma API error: {}", e)}));
+            return HttpResponse::BadGateway()
+                .json(serde_json::json!({"error": format!("Luma API error: {}", e)}));
         }
     };
 
@@ -364,13 +418,16 @@ pub async fn sync_event(
         None => {
             tracing::info!(event_id = %event_id, "Luma event no longer exists, cancelling locally");
             match crate::events::archive_event(pool.get_ref(), &merchant.id, &event_id).await {
-                Ok(_) => return HttpResponse::Ok().json(serde_json::json!({
-                    "cancelled": true,
-                    "reason": "Event no longer exists on Luma",
-                })),
+                Ok(_) => {
+                    return HttpResponse::Ok().json(serde_json::json!({
+                        "cancelled": true,
+                        "reason": "Event no longer exists on Luma",
+                    }))
+                }
                 Err(e) => {
                     tracing::error!(error = %e, "Failed to cancel event after Luma removal");
-                    return HttpResponse::InternalServerError().json(serde_json::json!({"error": "Failed to cancel event"}));
+                    return HttpResponse::InternalServerError()
+                        .json(serde_json::json!({"error": "Failed to cancel event"}));
                 }
             }
         }
@@ -382,11 +439,13 @@ pub async fn sync_event(
         if let Some(dt) = parse_event_datetime(start) {
             if dt < now {
                 tracing::info!(event_id = %event_id, "Luma event date has passed, marking as past");
-                sqlx::query("UPDATE events SET status = 'past' WHERE id = ? AND status != 'cancelled'")
-                    .bind(&event_id)
-                    .execute(pool.get_ref())
-                    .await
-                    .ok();
+                sqlx::query(
+                    "UPDATE events SET status = 'past' WHERE id = ? AND status != 'cancelled'",
+                )
+                .bind(&event_id)
+                .execute(pool.get_ref())
+                .await
+                .ok();
                 sqlx::query("UPDATE products SET active = 0 WHERE id = ?")
                     .bind(&product_id)
                     .execute(pool.get_ref())
@@ -405,7 +464,8 @@ pub async fn sync_event(
         .unwrap_or_default();
 
     // Update event metadata
-    let location = luma_event.geo_address_json
+    let location = luma_event
+        .geo_address_json
         .as_ref()
         .and_then(|g| g.get("full_address"))
         .and_then(|v| v.as_str())
@@ -446,9 +506,15 @@ pub async fn sync_event(
     let mut added_count: u32 = 0;
 
     for tt in &ticket_types {
-        let (currency, amount) = tt.price.as_ref()
+        let (currency, amount) = tt
+            .price
+            .as_ref()
             .map(|p| {
-                let c = p.currency.clone().unwrap_or_else(|| "USD".into()).to_uppercase();
+                let c = p
+                    .currency
+                    .clone()
+                    .unwrap_or_else(|| "USD".into())
+                    .to_uppercase();
                 let a = p.amount.unwrap_or(0.0);
                 (c, a)
             })
@@ -457,13 +523,14 @@ pub async fn sync_event(
         let unit_amount = if amount > 0.0 { amount } else { 0.01 };
 
         // Try to match by luma_ticket_type_id first, then by label
-        let matched = existing_prices.iter().find(|(_, _, luma_id)| {
-            luma_id.as_deref() == Some(&tt.api_id)
-        }).or_else(|| {
-            existing_prices.iter().find(|(_, label, _)| {
-                label.as_deref() == tt.name.as_deref()
-            })
-        });
+        let matched = existing_prices
+            .iter()
+            .find(|(_, _, luma_id)| luma_id.as_deref() == Some(&tt.api_id))
+            .or_else(|| {
+                existing_prices
+                    .iter()
+                    .find(|(_, label, _)| label.as_deref() == tt.name.as_deref())
+            });
 
         if let Some((price_id, _, _)) = matched {
             sqlx::query(
@@ -524,14 +591,16 @@ pub async fn sync_event(
     }))
 }
 
-async fn get_luma_key(pool: &SqlitePool, merchant_id: &str, encryption_key: &str) -> anyhow::Result<Option<String>> {
-    let raw: Option<String> = sqlx::query_scalar(
-        "SELECT luma_api_key FROM merchants WHERE id = ?",
-    )
-    .bind(merchant_id)
-    .fetch_optional(pool)
-    .await?
-    .flatten();
+async fn get_luma_key(
+    pool: &SqlitePool,
+    merchant_id: &str,
+    encryption_key: &str,
+) -> anyhow::Result<Option<String>> {
+    let raw: Option<String> = sqlx::query_scalar("SELECT luma_api_key FROM merchants WHERE id = ?")
+        .bind(merchant_id)
+        .fetch_optional(pool)
+        .await?
+        .flatten();
 
     match raw {
         Some(encrypted) if !encrypted.is_empty() => {

@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use super::Invoice;
+use std::collections::HashMap;
 
 /// Pre-built index for O(1) invoice matching by Orchard receiver address.
 pub struct InvoiceIndex<'a> {
@@ -15,7 +15,10 @@ impl<'a> InvoiceIndex<'a> {
                 by_address.insert(addr.as_str(), inv);
             }
         }
-        Self { by_address, invoices }
+        Self {
+            by_address,
+            invoices,
+        }
     }
 
     /// O(1) address lookup, then linear memo fallback for legacy invoices.
@@ -30,10 +33,7 @@ impl<'a> InvoiceIndex<'a> {
 
 /// Fallback matching: find a pending invoice whose memo_code matches the decrypted memo text.
 /// Only used for old invoices created before diversified addresses were enabled.
-fn find_by_memo<'a>(
-    invoices: &'a [Invoice],
-    memo_text: &str,
-) -> Option<&'a Invoice> {
+fn find_by_memo<'a>(invoices: &'a [Invoice], memo_text: &str) -> Option<&'a Invoice> {
     let memo_trimmed = memo_text.trim();
     if memo_trimmed.is_empty() {
         return None;
@@ -43,7 +43,9 @@ fn find_by_memo<'a>(
         return Some(inv);
     }
 
-    invoices.iter().find(|i| memo_trimmed.contains(&i.memo_code))
+    invoices
+        .iter()
+        .find(|i| memo_trimmed.contains(&i.memo_code))
 }
 
 /// Convenience wrapper that builds an index inline — use InvoiceIndex::build
@@ -54,9 +56,10 @@ pub fn find_matching_invoice<'a>(
     memo_text: &str,
 ) -> Option<&'a Invoice> {
     // For single-call sites, delegate to linear scan (index overhead not worth it)
-    if let Some(inv) = invoices.iter().find(|i| {
-        i.orchard_receiver_hex.as_deref() == Some(recipient_hex)
-    }) {
+    if let Some(inv) = invoices
+        .iter()
+        .find(|i| i.orchard_receiver_hex.as_deref() == Some(recipient_hex))
+    {
         return Some(inv);
     }
     find_by_memo(invoices, memo_text)

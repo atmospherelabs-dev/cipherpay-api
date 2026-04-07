@@ -71,7 +71,11 @@ pub async fn create_ticket(
                 return Ok(Some(existing));
             }
             // No ticket for this invoice — likely a code collision; retry
-            tracing::warn!(invoice_id, attempt, "Ticket insert ignored but no existing ticket found, retrying with new code");
+            tracing::warn!(
+                invoice_id,
+                attempt,
+                "Ticket insert ignored but no existing ticket found, retrying with new code"
+            );
             continue;
         }
 
@@ -92,7 +96,10 @@ pub async fn get_ticket(pool: &SqlitePool, id: &str) -> anyhow::Result<Option<Ti
     Ok(row)
 }
 
-pub async fn get_ticket_by_invoice(pool: &SqlitePool, invoice_id: &str) -> anyhow::Result<Option<Ticket>> {
+pub async fn get_ticket_by_invoice(
+    pool: &SqlitePool,
+    invoice_id: &str,
+) -> anyhow::Result<Option<Ticket>> {
     let row = sqlx::query_as::<_, Ticket>(
         "SELECT id, invoice_id, product_id, price_id, merchant_id, code, status, used_at, created_at
          FROM tickets WHERE invoice_id = ?"
@@ -114,12 +121,16 @@ pub async fn get_ticket_by_code(pool: &SqlitePool, code: &str) -> anyhow::Result
     Ok(row)
 }
 
-pub async fn scan_ticket(pool: &SqlitePool, code: &str, merchant_id: &str) -> anyhow::Result<Option<(Ticket, bool)>> {
+pub async fn scan_ticket(
+    pool: &SqlitePool,
+    code: &str,
+    merchant_id: &str,
+) -> anyhow::Result<Option<(Ticket, bool)>> {
     let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let update = sqlx::query(
         "UPDATE tickets
          SET status = 'used', used_at = ?
-         WHERE code = ? AND merchant_id = ? AND status = 'valid'"
+         WHERE code = ? AND merchant_id = ? AND status = 'valid'",
     )
     .bind(&now)
     .bind(code)
@@ -134,11 +145,15 @@ pub async fn scan_ticket(pool: &SqlitePool, code: &str, merchant_id: &str) -> an
     }
 }
 
-pub async fn void_ticket(pool: &SqlitePool, ticket_id: &str, merchant_id: &str) -> anyhow::Result<bool> {
+pub async fn void_ticket(
+    pool: &SqlitePool,
+    ticket_id: &str,
+    merchant_id: &str,
+) -> anyhow::Result<bool> {
     let result = sqlx::query(
         "UPDATE tickets
          SET status = 'void'
-         WHERE id = ? AND merchant_id = ? AND status != 'used'"
+         WHERE id = ? AND merchant_id = ? AND status != 'used'",
     )
     .bind(ticket_id)
     .bind(merchant_id)
@@ -148,7 +163,10 @@ pub async fn void_ticket(pool: &SqlitePool, ticket_id: &str, merchant_id: &str) 
     Ok(result.rows_affected() > 0)
 }
 
-pub async fn list_tickets_for_merchant(pool: &SqlitePool, merchant_id: &str) -> anyhow::Result<Vec<TicketListItem>> {
+pub async fn list_tickets_for_merchant(
+    pool: &SqlitePool,
+    merchant_id: &str,
+) -> anyhow::Result<Vec<TicketListItem>> {
     let rows = sqlx::query_as::<_, TicketListItem>(
         "SELECT
             t.id, t.invoice_id, t.code, t.status, t.used_at, t.created_at,
@@ -160,7 +178,7 @@ pub async fn list_tickets_for_merchant(pool: &SqlitePool, merchant_id: &str) -> 
          LEFT JOIN prices pr ON pr.id = t.price_id
          LEFT JOIN events e ON e.product_id = t.product_id
          WHERE t.merchant_id = ?
-         ORDER BY t.created_at DESC"
+         ORDER BY t.created_at DESC",
     )
     .bind(merchant_id)
     .fetch_all(pool)

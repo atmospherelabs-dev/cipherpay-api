@@ -37,7 +37,10 @@ pub async fn run(ws_url: String, service_key: String, tx: mpsc::Sender<MempoolPu
 
                 use futures::SinkExt;
                 let sub = serde_json::json!({"subscribe": "raw_mempool"});
-                if let Err(e) = stream.send(tungstenite::Message::Text(sub.to_string().into())).await {
+                if let Err(e) = stream
+                    .send(tungstenite::Message::Text(sub.to_string().into()))
+                    .await
+                {
                     tracing::warn!(error = %e, "[WS] Failed to send subscribe");
                     continue;
                 }
@@ -81,9 +84,7 @@ async fn connect(
     url: &str,
     service_key: &str,
 ) -> Result<
-    tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     String,
 > {
     use tungstenite::client::IntoClientRequest;
@@ -94,7 +95,9 @@ async fn connect(
 
     request.headers_mut().insert(
         "X-Service-Key",
-        service_key.parse().map_err(|e| format!("Invalid service key header: {}", e))?,
+        service_key
+            .parse()
+            .map_err(|e| format!("Invalid service key header: {}", e))?,
     );
 
     let (stream, _resp) = tokio_tungstenite::connect_async(request)

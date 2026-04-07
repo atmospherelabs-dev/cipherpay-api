@@ -2,8 +2,8 @@ use actix_web::{web, HttpRequest, HttpResponse};
 use sqlx::SqlitePool;
 
 use crate::config::Config;
-use crate::invoices::{self, CreateInvoiceRequest};
 use crate::invoices::pricing::PriceService;
+use crate::invoices::{self, CreateInvoiceRequest};
 use crate::validation;
 
 pub async fn create(
@@ -27,7 +27,9 @@ pub async fn create(
     };
 
     if config.fee_enabled() {
-        if let Ok(status) = crate::billing::get_merchant_billing_status(pool.get_ref(), &merchant.id).await {
+        if let Ok(status) =
+            crate::billing::get_merchant_billing_status(pool.get_ref(), &merchant.id).await
+        {
             if status == "past_due" || status == "suspended" {
                 return HttpResponse::PaymentRequired().json(serde_json::json!({
                     "error": "Merchant account has outstanding fees",
@@ -79,10 +81,7 @@ pub async fn create(
 
 /// Public invoice GET: returns only checkout-safe fields.
 /// Shipping info is NEVER exposed to unauthenticated callers.
-pub async fn get(
-    pool: web::Data<SqlitePool>,
-    path: web::Path<String>,
-) -> HttpResponse {
+pub async fn get(pool: web::Data<SqlitePool>, path: web::Path<String>) -> HttpResponse {
     let id_or_memo = path.into_inner();
 
     let invoice = match invoices::get_invoice(pool.get_ref(), &id_or_memo).await {
@@ -102,12 +101,16 @@ pub async fn get(
     match invoice {
         Some(inv) => {
             let received_zec = invoices::zatoshis_to_zec(inv.received_zatoshis);
-            let overpaid = inv.received_zatoshis > inv.price_zatoshis + 1000 && inv.price_zatoshis > 0;
+            let overpaid =
+                inv.received_zatoshis > inv.price_zatoshis + 1000 && inv.price_zatoshis > 0;
 
-            let merchant_origin = get_merchant_webhook_origin(pool.get_ref(), &inv.merchant_id).await;
+            let merchant_origin =
+                get_merchant_webhook_origin(pool.get_ref(), &inv.merchant_id).await;
 
             let is_event = if let Some(ref pid) = inv.product_id {
-                crate::events::is_product_backed_by_event(pool.get_ref(), pid).await.unwrap_or(false)
+                crate::events::is_product_backed_by_event(pool.get_ref(), pid)
+                    .await
+                    .unwrap_or(false)
             } else {
                 false
             };
@@ -129,7 +132,7 @@ pub async fn get(
             let donation_meta = if inv.is_donation == 1 {
                 if let Some(ref link_id) = inv.payment_link_id {
                     let row: Option<(Option<String>, String)> = sqlx::query_as(
-                        "SELECT donation_config, slug FROM payment_links WHERE id = ?"
+                        "SELECT donation_config, slug FROM payment_links WHERE id = ?",
                     )
                     .bind(link_id)
                     .fetch_optional(pool.get_ref())
@@ -198,16 +201,17 @@ pub async fn get(
 
 /// Extract the origin (scheme+host+port) from a merchant's webhook URL.
 async fn get_merchant_webhook_origin(pool: &SqlitePool, merchant_id: &str) -> Option<String> {
-    let row: Option<(Option<String>,)> = sqlx::query_as(
-        "SELECT webhook_url FROM merchants WHERE id = ?"
-    )
-    .bind(merchant_id)
-    .fetch_optional(pool)
-    .await
-    .ok()?;
+    let row: Option<(Option<String>,)> =
+        sqlx::query_as("SELECT webhook_url FROM merchants WHERE id = ?")
+            .bind(merchant_id)
+            .fetch_optional(pool)
+            .await
+            .ok()?;
 
     let webhook_url = row?.0?;
-    url::Url::parse(&webhook_url).ok().map(|u| u.origin().ascii_serialization())
+    url::Url::parse(&webhook_url)
+        .ok()
+        .map(|u| u.origin().ascii_serialization())
 }
 
 /// Resolve the merchant from the request:
@@ -221,10 +225,7 @@ async fn resolve_merchant(
 ) -> Option<crate::merchants::Merchant> {
     if let Some(auth) = req.headers().get("Authorization") {
         if let Ok(auth_str) = auth.to_str() {
-            let key = auth_str
-                .strip_prefix("Bearer ")
-                .unwrap_or(auth_str)
-                .trim();
+            let key = auth_str.strip_prefix("Bearer ").unwrap_or(auth_str).trim();
 
             if key.starts_with("cpay_sk_") || key.starts_with("cpay_") {
                 return crate::merchants::authenticate(pool, key, &config.encryption_key)
@@ -289,15 +290,12 @@ pub async fn finalize(
         None
     };
 
-    match invoices::finalize_invoice(
-        pool.get_ref(),
-        &invoice_id,
-        &rates,
-        fee_config.as_ref(),
-    ).await {
+    match invoices::finalize_invoice(pool.get_ref(), &invoice_id, &rates, fee_config.as_ref()).await
+    {
         Ok(inv) => {
             let received_zec = invoices::zatoshis_to_zec(inv.received_zatoshis);
-            let overpaid = inv.received_zatoshis > inv.price_zatoshis + 1000 && inv.price_zatoshis > 0;
+            let overpaid =
+                inv.received_zatoshis > inv.price_zatoshis + 1000 && inv.price_zatoshis > 0;
 
             HttpResponse::Ok().json(serde_json::json!({
                 "id": inv.id,
@@ -324,11 +322,15 @@ pub async fn finalize(
             let msg = e.to_string();
             if msg.contains("not found") {
                 HttpResponse::NotFound().json(serde_json::json!({ "error": msg }))
-            } else if msg.contains("draft or expired") || msg.contains("already detected") || msg.contains("period has ended") {
+            } else if msg.contains("draft or expired")
+                || msg.contains("already detected")
+                || msg.contains("period has ended")
+            {
                 HttpResponse::Conflict().json(serde_json::json!({ "error": msg }))
             } else {
                 tracing::error!(error = %e, "Failed to finalize invoice");
-                HttpResponse::InternalServerError().json(serde_json::json!({ "error": "Failed to finalize invoice" }))
+                HttpResponse::InternalServerError()
+                    .json(serde_json::json!({ "error": "Failed to finalize invoice" }))
             }
         }
     }
@@ -346,7 +348,10 @@ fn validate_invoice_request(req: &CreateInvoiceRequest) -> Result<(), validation
         }
     }
     if req.amount < 0.0 {
-        return Err(validation::ValidationError::invalid("amount", "must be non-negative"));
+        return Err(validation::ValidationError::invalid(
+            "amount",
+            "must be non-negative",
+        ));
     }
     Ok(())
 }

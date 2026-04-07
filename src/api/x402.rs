@@ -17,7 +17,9 @@ pub struct VerifyRequest {
     pub protocol: String,
 }
 
-fn default_protocol() -> String { "x402".to_string() }
+fn default_protocol() -> String {
+    "x402".to_string()
+}
 
 #[derive(Debug, Serialize)]
 struct VerifyResponse {
@@ -60,52 +62,125 @@ pub async fn verify(
         }
     };
 
+    if config.fee_enabled() {
+        if let Ok(status) =
+            crate::billing::get_merchant_billing_status(pool.get_ref(), &merchant.id).await
+        {
+            if merchant_billing_blocked(&status) {
+                return HttpResponse::PaymentRequired().json(serde_json::json!({
+                    "error": "Merchant account has outstanding fees",
+                    "billing_status": status,
+                }));
+            }
+        }
+    }
+
     if body.txid.len() != 64 || !body.txid.chars().all(|c| c.is_ascii_hexdigit()) {
         return HttpResponse::BadRequest().json(serde_json::json!({
             "error": "Invalid txid format — expected 64 hex characters"
         }));
     }
 
-    if body.expected_amount_zec <= 0.0 {
+    if !body.expected_amount_zec.is_finite() || body.expected_amount_zec <= 0.0 {
         return HttpResponse::BadRequest().json(serde_json::json!({
             "error": "expected_amount_zec must be positive"
         }));
     }
 
-    let previously_verified = was_previously_verified(&pool, &merchant.id, &body.txid).await;
-
-    let protocol = if body.protocol == "mpp" { "mpp" } else { "x402" };
-
-    let raw_hex = match mempool::fetch_raw_tx(&http_client, &config.cipherscan_api_url, &body.txid).await {
-        Ok(hex) => hex,
-        Err(e) => {
-            tracing::warn!(txid = %body.txid, error = %e, "x402: failed to fetch raw tx");
-            let resp = build_rejected(&pool, &merchant.id, &body.txid, 0, previously_verified, "Transaction not found", protocol).await;
-            return HttpResponse::Ok().json(resp);
-        }
+    let protocol = if body.protocol == "mpp" {
+        "mpp"
+    } else {
+        "x402"
     };
+
+    if let Some(received_zatoshis) =
+        get_existing_verified(pool.get_ref(), &merchant.id, &body.txid, protocol).await
+    {
+        return HttpResponse::Ok().json(VerifyResponse {
+            valid: true,
+            received_zec: received_zatoshis as f64 / 100_000_000.0,
+            received_zatoshis,
+            previously_verified: true,
+            reason: None,
+        });
+    }
+
+    let previously_verified = false;
+
+    let raw_hex =
+        match mempool::fetch_raw_tx(&http_client, &config.cipherscan_api_url, &body.txid).await {
+            Ok(hex) => hex,
+            Err(e) => {
+                tracing::warn!(txid = %body.txid, error = %e, "x402: failed to fetch raw tx");
+                let resp = build_rejected(
+                    &pool,
+                    &merchant.id,
+                    &body.txid,
+                    0,
+                    previously_verified,
+                    "Transaction not found",
+                    protocol,
+                )
+                .await;
+                return HttpResponse::Ok().json(resp);
+            }
+        };
 
     let outputs = match decrypt::try_decrypt_all_outputs_ivk(&raw_hex, &merchant.ufvk) {
         Ok(o) => o,
         Err(e) => {
             tracing::warn!(txid = %body.txid, error = %e, "x402: decryption error");
-            let resp = build_rejected(&pool, &merchant.id, &body.txid, 0, previously_verified, "Decryption failed", protocol).await;
+            let resp = build_rejected(
+                &pool,
+                &merchant.id,
+                &body.txid,
+                0,
+                previously_verified,
+                "Decryption failed",
+                protocol,
+            )
+            .await;
             return HttpResponse::Ok().json(resp);
         }
     };
 
     if outputs.is_empty() {
-        let resp = build_rejected(&pool, &merchant.id, &body.txid, 0, previously_verified, "No outputs addressed to this merchant", protocol).await;
+        let resp = build_rejected(
+            &pool,
+            &merchant.id,
+            &body.txid,
+            0,
+            previously_verified,
+            "No outputs addressed to this merchant",
+            protocol,
+        )
+        .await;
         return HttpResponse::Ok().json(resp);
     }
 
     let total_zatoshis: u64 = outputs.iter().map(|o| o.amount_zatoshis).sum();
     let total_zec = total_zatoshis as f64 / 100_000_000.0;
-    let expected_zatoshis = (body.expected_amount_zec * 100_000_000.0) as u64;
+    let expected_zatoshis = match zec_to_zatoshis(body.expected_amount_zec) {
+        Some(amount) => amount,
+        None => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "expected_amount_zec must be representable in zatoshis"
+            }));
+        }
+    };
     let min_acceptable = (expected_zatoshis as f64 * SLIPPAGE_TOLERANCE) as u64;
 
     if total_zatoshis >= min_acceptable {
-        log_verification(&pool, &merchant.id, &body.txid, total_zatoshis, "verified", None, protocol).await;
+        log_verification(
+            &pool,
+            &merchant.id,
+            &body.txid,
+            total_zatoshis,
+            "verified",
+            None,
+            protocol,
+        )
+        .await;
 
         HttpResponse::Ok().json(VerifyResponse {
             valid: true,
@@ -119,7 +194,16 @@ pub async fn verify(
             "Insufficient amount: received {} ZEC, expected {} ZEC",
             total_zec, body.expected_amount_zec
         );
-        log_verification(&pool, &merchant.id, &body.txid, total_zatoshis, "rejected", Some(&reason), protocol).await;
+        log_verification(
+            &pool,
+            &merchant.id,
+            &body.txid,
+            total_zatoshis,
+            "rejected",
+            Some(&reason),
+            protocol,
+        )
+        .await;
 
         HttpResponse::Ok().json(VerifyResponse {
             valid: false,
@@ -170,18 +254,21 @@ pub async fn history(
 
     match rows {
         Ok(rows) => {
-            let items: Vec<_> = rows.into_iter().map(|r| {
-                serde_json::json!({
-                    "id": r.0,
-                    "txid": r.1,
-                    "amount_zatoshis": r.2,
-                    "amount_zec": r.3,
-                    "status": r.4,
-                    "reason": r.5,
-                    "created_at": r.6,
-                    "protocol": r.7,
+            let items: Vec<_> = rows
+                .into_iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "id": r.0,
+                        "txid": r.1,
+                        "amount_zatoshis": r.2,
+                        "amount_zec": r.3,
+                        "status": r.4,
+                        "reason": r.5,
+                        "created_at": r.6,
+                        "protocol": r.7,
+                    })
                 })
-            }).collect();
+                .collect();
             HttpResponse::Ok().json(serde_json::json!({ "verifications": items }))
         }
         Err(e) => {
@@ -214,7 +301,11 @@ fn extract_api_key(req: &HttpRequest) -> Option<String> {
     let header = req.headers().get("Authorization")?;
     let value = header.to_str().ok()?;
     let key = value.strip_prefix("Bearer ").unwrap_or(value).trim();
-    if key.is_empty() { None } else { Some(key.to_string()) }
+    if key.is_empty() {
+        None
+    } else {
+        Some(key.to_string())
+    }
 }
 
 async fn build_rejected(
@@ -226,7 +317,16 @@ async fn build_rejected(
     reason: &str,
     protocol: &str,
 ) -> VerifyResponse {
-    log_verification(pool, merchant_id, txid, zatoshis, "rejected", Some(reason), protocol).await;
+    log_verification(
+        pool,
+        merchant_id,
+        txid,
+        zatoshis,
+        "rejected",
+        Some(reason),
+        protocol,
+    )
+    .await;
     VerifyResponse {
         valid: false,
         received_zec: zatoshis as f64 / 100_000_000.0,
@@ -236,15 +336,26 @@ async fn build_rejected(
     }
 }
 
-async fn was_previously_verified(pool: &SqlitePool, merchant_id: &str, txid: &str) -> bool {
-    sqlx::query_scalar::<_, i32>(
-        "SELECT COUNT(*) FROM x402_verifications WHERE merchant_id = ? AND txid = ? AND status = 'verified'"
+async fn get_existing_verified(
+    pool: &SqlitePool,
+    merchant_id: &str,
+    txid: &str,
+    protocol: &str,
+) -> Option<u64> {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT amount_zatoshis FROM x402_verifications
+         WHERE merchant_id = ? AND txid = ? AND protocol = ? AND status = 'verified'
+         ORDER BY created_at DESC
+         LIMIT 1",
     )
     .bind(merchant_id)
     .bind(txid)
-    .fetch_one(pool)
+    .bind(protocol)
+    .fetch_optional(pool)
     .await
-    .unwrap_or(0) > 0
+    .ok()
+    .flatten()
+    .map(|amount| amount.max(0) as u64)
 }
 
 async fn log_verification(
@@ -258,23 +369,44 @@ async fn log_verification(
 ) {
     let id = Uuid::new_v4().to_string();
     let amount_zec = amount_zatoshis as f64 / 100_000_000.0;
-
-    let result = sqlx::query(
+    let insert_sql = if status == "verified" {
+        "INSERT OR IGNORE INTO x402_verifications (id, merchant_id, txid, amount_zatoshis, amount_zec, status, reason, protocol)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+    } else {
         "INSERT INTO x402_verifications (id, merchant_id, txid, amount_zatoshis, amount_zec, status, reason, protocol)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-    )
-    .bind(&id)
-    .bind(merchant_id)
-    .bind(txid)
-    .bind(amount_zatoshis as i64)
-    .bind(amount_zec)
-    .bind(status)
-    .bind(reason)
-    .bind(protocol)
-    .execute(pool)
-    .await;
+    };
+
+    let result = sqlx::query(insert_sql)
+        .bind(&id)
+        .bind(merchant_id)
+        .bind(txid)
+        .bind(amount_zatoshis as i64)
+        .bind(amount_zec)
+        .bind(status)
+        .bind(reason)
+        .bind(protocol)
+        .execute(pool)
+        .await;
 
     if let Err(e) = result {
         tracing::warn!(error = %e, "Failed to log x402 verification");
     }
+}
+
+fn merchant_billing_blocked(status: &str) -> bool {
+    status == "past_due" || status == "suspended"
+}
+
+fn zec_to_zatoshis(amount_zec: f64) -> Option<u64> {
+    if !amount_zec.is_finite() || amount_zec < 0.0 {
+        return None;
+    }
+
+    let scaled = (amount_zec * 100_000_000.0).round();
+    if scaled < 0.0 || scaled > u64::MAX as f64 {
+        return None;
+    }
+
+    Some(scaled as u64)
 }

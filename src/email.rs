@@ -1,12 +1,19 @@
 use crate::config::Config;
 
 pub async fn send_recovery_email(config: &Config, to: &str, token: &str) -> anyhow::Result<()> {
-    let from = config.smtp_from.as_deref()
+    let from = config
+        .smtp_from
+        .as_deref()
         .ok_or_else(|| anyhow::anyhow!("SMTP_FROM not configured"))?;
-    let api_key = config.smtp_pass.as_deref()
+    let api_key = config
+        .smtp_pass
+        .as_deref()
         .ok_or_else(|| anyhow::anyhow!("SMTP_PASS (Resend API key) not configured"))?;
 
-    let frontend_url = config.frontend_url.as_deref().unwrap_or("http://localhost:3000");
+    let frontend_url = config
+        .frontend_url
+        .as_deref()
+        .unwrap_or("http://localhost:3000");
     let recovery_link = format!("{}/dashboard/recover/confirm?token={}", frontend_url, token);
 
     let body = format!(

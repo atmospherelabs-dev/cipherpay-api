@@ -47,7 +47,11 @@ pub fn validate_optional_length(
     Ok(())
 }
 
-pub fn validate_url_protocol(field: &str, url: &str, allow_http: bool) -> Result<(), ValidationError> {
+pub fn validate_url_protocol(
+    field: &str,
+    url: &str,
+    allow_http: bool,
+) -> Result<(), ValidationError> {
     if url.starts_with("https://") {
         return Ok(());
     }
@@ -62,15 +66,16 @@ pub fn validate_url_protocol(field: &str, url: &str, allow_http: bool) -> Result
     Err(ValidationError::invalid(field, msg))
 }
 
-const ALLOWED_IMAGE_POSITIONS: &[&str] = &[
-    "center top", "center center", "center bottom",
-];
+const ALLOWED_IMAGE_POSITIONS: &[&str] = &["center top", "center center", "center bottom"];
 
 pub fn validate_image_position(field: &str, value: &str) -> Result<(), ValidationError> {
     if ALLOWED_IMAGE_POSITIONS.contains(&value) {
         Ok(())
     } else {
-        Err(ValidationError::invalid(field, "must be one of: center top, center center, center bottom"))
+        Err(ValidationError::invalid(
+            field,
+            "must be one of: center top, center center, center bottom",
+        ))
     }
 }
 
@@ -105,14 +110,20 @@ pub fn validate_webhook_url(
 
     if is_testnet {
         if !url_str.starts_with("https://") && !url_str.starts_with("http://") {
-            return Err(ValidationError::invalid(field, "must start with http:// or https://"));
+            return Err(ValidationError::invalid(
+                field,
+                "must start with http:// or https://",
+            ));
         }
     } else if !url_str.starts_with("https://") {
-        return Err(ValidationError::invalid(field, "must start with https:// in production"));
+        return Err(ValidationError::invalid(
+            field,
+            "must start with https:// in production",
+        ));
     }
 
-    let parsed = url::Url::parse(url_str)
-        .map_err(|_| ValidationError::invalid(field, "invalid URL"))?;
+    let parsed =
+        url::Url::parse(url_str).map_err(|_| ValidationError::invalid(field, "invalid URL"))?;
 
     let host = match parsed.host_str() {
         Some(h) => h.to_string(),
@@ -120,11 +131,17 @@ pub fn validate_webhook_url(
     };
 
     if parsed.username() != "" || parsed.password().is_some() {
-        return Err(ValidationError::invalid(field, "URL must not contain credentials"));
+        return Err(ValidationError::invalid(
+            field,
+            "URL must not contain credentials",
+        ));
     }
 
     if is_private_host(&host) {
-        return Err(ValidationError::invalid(field, "internal/private addresses are not allowed"));
+        return Err(ValidationError::invalid(
+            field,
+            "internal/private addresses are not allowed",
+        ));
     }
 
     Ok(())
@@ -163,7 +180,6 @@ pub fn validate_viewing_key_network(
     }
     Ok(())
 }
-
 
 pub fn validate_zcash_address(field: &str, addr: &str) -> Result<(), ValidationError> {
     validate_length(field, addr, 500)?;

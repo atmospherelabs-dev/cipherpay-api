@@ -38,7 +38,9 @@ pub async fn create(
                     billing_interval: body.billing_interval.clone(),
                     interval_count: body.interval_count,
                 },
-            ).await {
+            )
+            .await
+            {
                 Ok(p) => p,
                 Err(e) => {
                     tracing::error!(error = %e, "Failed to create default price");
@@ -48,7 +50,9 @@ pub async fn create(
                 }
             };
 
-            if let Err(e) = products::set_default_price(pool.get_ref(), &product.id, &price.id).await {
+            if let Err(e) =
+                products::set_default_price(pool.get_ref(), &product.id, &price.id).await
+            {
                 tracing::error!(error = %e, "Failed to set default price on product");
                 return HttpResponse::InternalServerError().json(serde_json::json!({
                     "error": "Failed to set default price"
@@ -57,13 +61,16 @@ pub async fn create(
 
             let product = match products::get_product(pool.get_ref(), &product.id).await {
                 Ok(Some(p)) => p,
-                _ => return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": "Product not found after price creation"
-                })),
+                _ => {
+                    return HttpResponse::InternalServerError().json(serde_json::json!({
+                        "error": "Product not found after price creation"
+                    }))
+                }
             };
 
             let prices = crate::prices::list_prices_for_product(pool.get_ref(), &product.id)
-                .await.unwrap_or_default();
+                .await
+                .unwrap_or_default();
 
             HttpResponse::Created().json(serde_json::json!({
                 "id": product.id,
@@ -87,10 +94,7 @@ pub async fn create(
     }
 }
 
-pub async fn list(
-    req: HttpRequest,
-    pool: web::Data<SqlitePool>,
-) -> HttpResponse {
+pub async fn list(req: HttpRequest, pool: web::Data<SqlitePool>) -> HttpResponse {
     let merchant = match super::auth::resolve_session(&req, &pool).await {
         Some(m) => m,
         None => {
@@ -105,7 +109,8 @@ pub async fn list(
             let mut result = Vec::new();
             for product in &product_list {
                 let prices = crate::prices::list_prices_for_product(pool.get_ref(), &product.id)
-                    .await.unwrap_or_default();
+                    .await
+                    .unwrap_or_default();
                 result.push(serde_json::json!({
                     "id": product.id,
                     "merchant_id": product.merchant_id,
@@ -169,7 +174,8 @@ pub async fn update(
     match products::update_product(pool.get_ref(), &product_id, &merchant.id, &body).await {
         Ok(Some(product)) => {
             let prices = crate::prices::list_prices_for_product(pool.get_ref(), &product.id)
-                .await.unwrap_or_default();
+                .await
+                .unwrap_or_default();
 
             HttpResponse::Ok().json(serde_json::json!({
                 "id": product.id,
@@ -234,11 +240,9 @@ pub async fn deactivate(
         Ok(products::DeleteOutcome::Archived) => {
             HttpResponse::Ok().json(serde_json::json!({ "status": "archived" }))
         }
-        Ok(products::DeleteOutcome::NotFound) => {
-            HttpResponse::NotFound().json(serde_json::json!({
-                "error": "Product not found"
-            }))
-        }
+        Ok(products::DeleteOutcome::NotFound) => HttpResponse::NotFound().json(serde_json::json!({
+            "error": "Product not found"
+        })),
         Err(e) => {
             tracing::error!(error = %e, "Failed to delete product");
             HttpResponse::InternalServerError().json(serde_json::json!({
@@ -249,10 +253,7 @@ pub async fn deactivate(
 }
 
 /// Public endpoint: get product details for buyers (only active products)
-pub async fn get_public(
-    pool: web::Data<SqlitePool>,
-    path: web::Path<String>,
-) -> HttpResponse {
+pub async fn get_public(pool: web::Data<SqlitePool>, path: web::Path<String>) -> HttpResponse {
     let id_or_slug = path.into_inner();
 
     // Try by ID first, then fall back to slug lookup
@@ -314,10 +315,16 @@ fn validate_product_create(req: &CreateProductRequest) -> Result<(), validation:
         validation::validate_length("description", desc, 2000)?;
     }
     if req.unit_amount <= 0.0 {
-        return Err(validation::ValidationError::invalid("unit_amount", "must be greater than 0"));
+        return Err(validation::ValidationError::invalid(
+            "unit_amount",
+            "must be greater than 0",
+        ));
     }
     if req.unit_amount > 1_000_000.0 {
-        return Err(validation::ValidationError::invalid("unit_amount", "exceeds maximum of 1000000"));
+        return Err(validation::ValidationError::invalid(
+            "unit_amount",
+            "exceeds maximum of 1000000",
+        ));
     }
     Ok(())
 }
@@ -325,7 +332,10 @@ fn validate_product_create(req: &CreateProductRequest) -> Result<(), validation:
 fn validate_product_update(req: &UpdateProductRequest) -> Result<(), validation::ValidationError> {
     if let Some(ref name) = req.name {
         if name.is_empty() {
-            return Err(validation::ValidationError::invalid("name", "must not be empty"));
+            return Err(validation::ValidationError::invalid(
+                "name",
+                "must not be empty",
+            ));
         }
         validation::validate_length("name", name, 200)?;
     }

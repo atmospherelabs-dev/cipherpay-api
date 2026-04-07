@@ -1,5 +1,5 @@
-use actix_web::{web, HttpRequest, HttpResponse};
 use actix_web::cookie::{Cookie, SameSite};
+use actix_web::{web, HttpRequest, HttpResponse};
 use chrono::{Duration, Utc};
 use serde::Deserialize;
 use sqlx::SqlitePool;
@@ -24,7 +24,13 @@ pub async fn create_session(
     config: web::Data<Config>,
     body: web::Json<CreateSessionRequest>,
 ) -> HttpResponse {
-    let merchant = match merchants::authenticate_dashboard(pool.get_ref(), &body.token, &config.encryption_key).await {
+    let merchant = match merchants::authenticate_dashboard(
+        pool.get_ref(),
+        &body.token,
+        &config.encryption_key,
+    )
+    .await
+    {
         Ok(Some(m)) => m,
         Ok(None) => {
             return HttpResponse::Unauthorized().json(serde_json::json!({
@@ -44,14 +50,13 @@ pub async fn create_session(
         .format("%Y-%m-%dT%H:%M:%SZ")
         .to_string();
 
-    if let Err(e) = sqlx::query(
-        "INSERT INTO sessions (id, merchant_id, expires_at) VALUES (?, ?, ?)"
-    )
-    .bind(&session_id)
-    .bind(&merchant.id)
-    .bind(&expires_at)
-    .execute(pool.get_ref())
-    .await
+    if let Err(e) =
+        sqlx::query("INSERT INTO sessions (id, merchant_id, expires_at) VALUES (?, ?, ?)")
+            .bind(&session_id)
+            .bind(&merchant.id)
+            .bind(&expires_at)
+            .execute(pool.get_ref())
+            .await
     {
         tracing::error!(error = %e, "Failed to create session");
         return HttpResponse::InternalServerError().json(serde_json::json!({
@@ -61,12 +66,10 @@ pub async fn create_session(
 
     let cookie = build_session_cookie(&session_id, &config, false);
 
-    HttpResponse::Ok()
-        .cookie(cookie)
-        .json(serde_json::json!({
-            "merchant_id": merchant.id,
-            "payment_address": merchant.payment_address,
-        }))
+    HttpResponse::Ok().cookie(cookie).json(serde_json::json!({
+        "merchant_id": merchant.id,
+        "payment_address": merchant.payment_address,
+    }))
 }
 
 /// POST /api/auth/logout -- clear the session cookie and delete the session
@@ -90,10 +93,7 @@ pub async fn logout(
 }
 
 /// GET /api/merchants/me -- get current merchant info from session cookie
-pub async fn me(
-    req: HttpRequest,
-    pool: web::Data<SqlitePool>,
-) -> HttpResponse {
+pub async fn me(req: HttpRequest, pool: web::Data<SqlitePool>) -> HttpResponse {
     let merchant = match resolve_session(&req, &pool).await {
         Some(m) => m,
         None => {
@@ -113,13 +113,13 @@ pub async fn me(
         "***".to_string()
     };
 
-
     let masked_email = merchant.recovery_email.as_deref().map(|email| {
         if let Some(at) = email.find('@') {
             let local = &email[..at];
             let domain = &email[at..];
             let visible = if local.len() <= 2 { local.len() } else { 2 };
-            format!("{}{}{}",
+            format!(
+                "{}{}{}",
                 &local[..visible],
                 "*".repeat(local.len().saturating_sub(visible)),
                 domain
@@ -129,17 +129,16 @@ pub async fn me(
         }
     });
 
-    let has_luma_key: bool = sqlx::query_scalar::<_, Option<String>>(
-        "SELECT luma_api_key FROM merchants WHERE id = ?",
-    )
-    .bind(&merchant.id)
-    .fetch_optional(pool.get_ref())
-    .await
-    .ok()
-    .flatten()
-    .flatten()
-    .map(|k| !k.is_empty())
-    .unwrap_or(false);
+    let has_luma_key: bool =
+        sqlx::query_scalar::<_, Option<String>>("SELECT luma_api_key FROM merchants WHERE id = ?")
+            .bind(&merchant.id)
+            .fetch_optional(pool.get_ref())
+            .await
+            .ok()
+            .flatten()
+            .flatten()
+            .map(|k| !k.is_empty())
+            .unwrap_or(false);
 
     HttpResponse::Ok().json(serde_json::json!({
         "id": merchant.id,
@@ -156,10 +155,7 @@ pub async fn me(
 }
 
 /// GET /api/merchants/me/invoices -- list invoices for the authenticated merchant
-pub async fn my_invoices(
-    req: HttpRequest,
-    pool: web::Data<SqlitePool>,
-) -> HttpResponse {
+pub async fn my_invoices(req: HttpRequest, pool: web::Data<SqlitePool>) -> HttpResponse {
     let merchant = match resolve_session(&req, &pool).await {
         Some(m) => m,
         None => {
@@ -181,7 +177,7 @@ pub async fn my_invoices(
          price_zatoshis, received_zatoshis,
          payment_link_id, is_donation, campaign_counted
          FROM invoices WHERE merchant_id = ?
-         ORDER BY created_at DESC LIMIT 100"
+         ORDER BY created_at DESC LIMIT 100",
     )
     .bind(&merchant.id)
     .fetch_all(pool.get_ref())
@@ -305,37 +301,64 @@ pub async fn my_webhooks(
 
     let total: i64 = if let Some(ref status) = query.status {
         sqlx::query_scalar::<_, i64>(&count_sql)
-            .bind(&merchant.id).bind(status)
-            .fetch_one(pool.get_ref()).await.unwrap_or(0)
+            .bind(&merchant.id)
+            .bind(status)
+            .fetch_one(pool.get_ref())
+            .await
+            .unwrap_or(0)
     } else {
         sqlx::query_scalar::<_, i64>(&count_sql)
             .bind(&merchant.id)
-            .fetch_one(pool.get_ref()).await.unwrap_or(0)
+            .fetch_one(pool.get_ref())
+            .await
+            .unwrap_or(0)
     };
 
-    let rows: Vec<(String, String, Option<String>, String, Option<i32>, Option<String>, i32, String, Option<String>)> = if let Some(ref status) = query.status {
+    let rows: Vec<(
+        String,
+        String,
+        Option<String>,
+        String,
+        Option<i32>,
+        Option<String>,
+        i32,
+        String,
+        Option<String>,
+    )> = if let Some(ref status) = query.status {
         sqlx::query_as(&list_sql)
-            .bind(&merchant.id).bind(status).bind(limit).bind(offset)
-            .fetch_all(pool.get_ref()).await.unwrap_or_default()
+            .bind(&merchant.id)
+            .bind(status)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(pool.get_ref())
+            .await
+            .unwrap_or_default()
     } else {
         sqlx::query_as(&list_sql)
-            .bind(&merchant.id).bind(limit).bind(offset)
-            .fetch_all(pool.get_ref()).await.unwrap_or_default()
+            .bind(&merchant.id)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(pool.get_ref())
+            .await
+            .unwrap_or_default()
     };
 
-    let deliveries: Vec<serde_json::Value> = rows.iter().map(|r| {
-        serde_json::json!({
-            "id": r.0,
-            "invoice_id": r.1,
-            "event_type": r.2,
-            "status": r.3,
-            "response_status": r.4,
-            "response_error": r.5,
-            "attempts": r.6,
-            "created_at": r.7,
-            "last_attempt_at": r.8,
+    let deliveries: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "id": r.0,
+                "invoice_id": r.1,
+                "event_type": r.2,
+                "status": r.3,
+                "response_status": r.4,
+                "response_error": r.5,
+                "attempts": r.6,
+                "created_at": r.7,
+                "last_attempt_at": r.8,
+            })
         })
-    }).collect();
+        .collect();
 
     HttpResponse::Ok().json(serde_json::json!({
         "deliveries": deliveries,
@@ -359,13 +382,12 @@ pub fn extract_session_id(req: &HttpRequest) -> Option<String> {
 }
 
 /// Resolve a merchant from the session cookie
-pub async fn resolve_session(
-    req: &HttpRequest,
-    pool: &SqlitePool,
-) -> Option<merchants::Merchant> {
+pub async fn resolve_session(req: &HttpRequest, pool: &SqlitePool) -> Option<merchants::Merchant> {
     let session_id = extract_session_id(req)?;
     let config = req.app_data::<web::Data<crate::config::Config>>()?;
-    merchants::get_by_session(pool, &session_id, &config.encryption_key).await.ok()?
+    merchants::get_by_session(pool, &session_id, &config.encryption_key)
+        .await
+        .ok()?
 }
 
 /// Resolve a merchant from either API key (Bearer token) or session cookie.
@@ -379,7 +401,9 @@ pub async fn resolve_merchant_or_session(
         if let Ok(auth_str) = auth.to_str() {
             let key = auth_str.strip_prefix("Bearer ").unwrap_or(auth_str).trim();
             if key.starts_with("cpay_sk_") || key.starts_with("cpay_") {
-                return merchants::authenticate(pool, key, &config.encryption_key).await.ok()?;
+                return merchants::authenticate(pool, key, &config.encryption_key)
+                    .await
+                    .ok()?;
             }
         }
     }
@@ -390,7 +414,10 @@ pub async fn resolve_merchant_or_session(
 fn build_session_cookie<'a>(value: &str, config: &Config, clear: bool) -> Cookie<'a> {
     let has_domain = config.cookie_domain.is_some();
     let is_deployed = has_domain
-        || config.frontend_url.as_deref().map_or(false, |u| u.starts_with("https"));
+        || config
+            .frontend_url
+            .as_deref()
+            .map_or(false, |u| u.starts_with("https"));
     let use_secure = !config.is_testnet() || is_deployed;
 
     // __Host- cookies require the Secure flag; fall back to legacy name on local HTTP
@@ -470,7 +497,11 @@ pub async fn update_me(
 
     if let Some(ref url) = body.webhook_url {
         sqlx::query("UPDATE merchants SET webhook_url = ? WHERE id = ?")
-            .bind(if url.is_empty() { None } else { Some(url.as_str()) })
+            .bind(if url.is_empty() {
+                None
+            } else {
+                Some(url.as_str())
+            })
             .bind(&merchant.id)
             .execute(pool.get_ref())
             .await
@@ -493,18 +524,21 @@ pub async fn update_me(
                     Ok(enc) => enc,
                     Err(e) => {
                         tracing::error!(error = %e, "Failed to encrypt recovery email");
-                        return HttpResponse::InternalServerError().json(serde_json::json!({"error": "Internal error"}));
+                        return HttpResponse::InternalServerError()
+                            .json(serde_json::json!({"error": "Internal error"}));
                     }
                 }
             };
             let hash = crate::crypto::blind_index(email, &config.encryption_key);
-            sqlx::query("UPDATE merchants SET recovery_email = ?, recovery_email_hash = ? WHERE id = ?")
-                .bind(&encrypted)
-                .bind(&hash)
-                .bind(&merchant.id)
-                .execute(pool.get_ref())
-                .await
-                .ok();
+            sqlx::query(
+                "UPDATE merchants SET recovery_email = ?, recovery_email_hash = ? WHERE id = ?",
+            )
+            .bind(&encrypted)
+            .bind(&hash)
+            .bind(&merchant.id)
+            .execute(pool.get_ref())
+            .await
+            .ok();
         }
         tracing::info!(merchant_id = %merchant.id, "Recovery email updated");
     }
@@ -524,7 +558,8 @@ pub async fn update_me(
                     Ok(enc) => enc,
                     Err(e) => {
                         tracing::error!(error = %e, "Failed to encrypt Luma API key");
-                        return HttpResponse::InternalServerError().json(serde_json::json!({"error": "Internal error"}));
+                        return HttpResponse::InternalServerError()
+                            .json(serde_json::json!({"error": "Internal error"}));
                     }
                 }
             };
@@ -542,20 +577,21 @@ pub async fn update_me(
 }
 
 /// POST /api/merchants/me/regenerate-api-key
-pub async fn regenerate_api_key(
-    req: HttpRequest,
-    pool: web::Data<SqlitePool>,
-) -> HttpResponse {
+pub async fn regenerate_api_key(req: HttpRequest, pool: web::Data<SqlitePool>) -> HttpResponse {
     let merchant = match resolve_session(&req, &pool).await {
         Some(m) => m,
-        None => return HttpResponse::Unauthorized().json(serde_json::json!({ "error": "Not authenticated" })),
+        None => {
+            return HttpResponse::Unauthorized()
+                .json(serde_json::json!({ "error": "Not authenticated" }))
+        }
     };
 
     match merchants::regenerate_api_key(pool.get_ref(), &merchant.id).await {
         Ok(new_key) => HttpResponse::Ok().json(serde_json::json!({ "api_key": new_key })),
         Err(e) => {
             tracing::error!(error = %e, "Failed to regenerate API key");
-            HttpResponse::InternalServerError().json(serde_json::json!({ "error": "Failed to regenerate" }))
+            HttpResponse::InternalServerError()
+                .json(serde_json::json!({ "error": "Failed to regenerate" }))
         }
     }
 }
@@ -567,14 +603,20 @@ pub async fn regenerate_dashboard_token(
 ) -> HttpResponse {
     let merchant = match resolve_session(&req, &pool).await {
         Some(m) => m,
-        None => return HttpResponse::Unauthorized().json(serde_json::json!({ "error": "Not authenticated" })),
+        None => {
+            return HttpResponse::Unauthorized()
+                .json(serde_json::json!({ "error": "Not authenticated" }))
+        }
     };
 
     match merchants::regenerate_dashboard_token(pool.get_ref(), &merchant.id).await {
-        Ok(new_token) => HttpResponse::Ok().json(serde_json::json!({ "dashboard_token": new_token })),
+        Ok(new_token) => {
+            HttpResponse::Ok().json(serde_json::json!({ "dashboard_token": new_token }))
+        }
         Err(e) => {
             tracing::error!(error = %e, "Failed to regenerate dashboard token");
-            HttpResponse::InternalServerError().json(serde_json::json!({ "error": "Failed to regenerate" }))
+            HttpResponse::InternalServerError()
+                .json(serde_json::json!({ "error": "Failed to regenerate" }))
         }
     }
 }
@@ -587,14 +629,22 @@ pub async fn regenerate_webhook_secret(
 ) -> HttpResponse {
     let merchant = match resolve_session(&req, &pool).await {
         Some(m) => m,
-        None => return HttpResponse::Unauthorized().json(serde_json::json!({ "error": "Not authenticated" })),
+        None => {
+            return HttpResponse::Unauthorized()
+                .json(serde_json::json!({ "error": "Not authenticated" }))
+        }
     };
 
-    match merchants::regenerate_webhook_secret(pool.get_ref(), &merchant.id, &config.encryption_key).await {
-        Ok(new_secret) => HttpResponse::Ok().json(serde_json::json!({ "webhook_secret": new_secret })),
+    match merchants::regenerate_webhook_secret(pool.get_ref(), &merchant.id, &config.encryption_key)
+        .await
+    {
+        Ok(new_secret) => {
+            HttpResponse::Ok().json(serde_json::json!({ "webhook_secret": new_secret }))
+        }
         Err(e) => {
             tracing::error!(error = %e, "Failed to regenerate webhook secret");
-            HttpResponse::InternalServerError().json(serde_json::json!({ "error": "Failed to regenerate" }))
+            HttpResponse::InternalServerError()
+                .json(serde_json::json!({ "error": "Failed to regenerate" }))
         }
     }
 }
@@ -624,10 +674,13 @@ pub async fn recover(
     let start = std::time::Instant::now();
 
     let result: Result<(), ()> = async {
-        let merchant = match merchants::find_by_email(pool.get_ref(), &body.email, &config.encryption_key).await {
-            Ok(Some(m)) => m,
-            _ => return Err(()),
-        };
+        let merchant =
+            match merchants::find_by_email(pool.get_ref(), &body.email, &config.encryption_key)
+                .await
+            {
+                Ok(Some(m)) => m,
+                _ => return Err(()),
+            };
 
         let token = merchants::create_recovery_token(pool.get_ref(), &merchant.id)
             .await
@@ -638,7 +691,8 @@ pub async fn recover(
             .map_err(|e| tracing::error!(error = %e, "Failed to send recovery email"))?;
 
         Ok(())
-    }.await;
+    }
+    .await;
 
     // Constant-time: always wait at least 2 seconds to prevent timing side-channel
     let elapsed = start.elapsed();
@@ -667,12 +721,10 @@ pub async fn recover_confirm(
     body: web::Json<RecoverConfirmRequest>,
 ) -> HttpResponse {
     match merchants::confirm_recovery_token(pool.get_ref(), &body.token).await {
-        Ok(Some(new_dashboard_token)) => {
-            HttpResponse::Ok().json(serde_json::json!({
-                "dashboard_token": new_dashboard_token,
-                "message": "Account recovered. Save your new dashboard token."
-            }))
-        }
+        Ok(Some(new_dashboard_token)) => HttpResponse::Ok().json(serde_json::json!({
+            "dashboard_token": new_dashboard_token,
+            "message": "Account recovered. Save your new dashboard token."
+        })),
         Ok(None) => {
             tracing::warn!("Recovery confirm failed: token not found or expired");
             HttpResponse::BadRequest().json(serde_json::json!({

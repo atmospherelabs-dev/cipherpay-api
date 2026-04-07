@@ -130,10 +130,14 @@ pub async fn list_events(http: &reqwest::Client, api_key: &str) -> Result<Vec<Lu
         return Err(anyhow!("Luma list-events failed ({}): {}", status, body));
     }
 
-    let data: ListEventsResponse = resp.json().await
+    let data: ListEventsResponse = resp
+        .json()
+        .await
         .map_err(|e| anyhow!("Failed to parse Luma events response: {}", e))?;
 
-    let events = data.entries.unwrap_or_default()
+    let events = data
+        .entries
+        .unwrap_or_default()
         .into_iter()
         .filter_map(|entry| {
             let ev = entry.event?;
@@ -169,13 +173,21 @@ pub async fn list_ticket_types(
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(anyhow!("Luma list-ticket-types failed ({}): {}", status, body));
+        return Err(anyhow!(
+            "Luma list-ticket-types failed ({}): {}",
+            status,
+            body
+        ));
     }
 
-    let data: ListTicketTypesResponse = resp.json().await
+    let data: ListTicketTypesResponse = resp
+        .json()
+        .await
         .map_err(|e| anyhow!("Failed to parse Luma ticket types: {}", e))?;
 
-    let types = data.ticket_types.unwrap_or_default()
+    let types = data
+        .ticket_types
+        .unwrap_or_default()
         .into_iter()
         .filter_map(|tt| {
             Some(LumaTicketType {
@@ -229,10 +241,13 @@ pub async fn add_guest(
     }
 
     // v1 API returns {} on success; extract guest data if present, otherwise treat as success
-    let data: AddGuestsResponseWrapper = resp.json().await
+    let data: AddGuestsResponseWrapper = resp
+        .json()
+        .await
         .map_err(|e| anyhow!("Failed to parse Luma add-guests response: {}", e))?;
 
-    let guest = data.entries
+    let guest = data
+        .entries
         .and_then(|e| e.into_iter().next())
         .and_then(|e| e.guest);
 
@@ -262,10 +277,13 @@ pub async fn get_guest(
         return Err(anyhow!("Luma get-guest failed ({}): {}", status, body));
     }
 
-    let data: GetGuestResponseWrapper = resp.json().await
+    let data: GetGuestResponseWrapper = resp
+        .json()
+        .await
         .map_err(|e| anyhow!("Failed to parse Luma get-guest response: {}", e))?;
 
-    let guest = data.entries
+    let guest = data
+        .entries
         .and_then(|e| e.into_iter().next())
         .and_then(|e| e.guest);
 

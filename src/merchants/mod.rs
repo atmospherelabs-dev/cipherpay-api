@@ -82,12 +82,11 @@ pub async fn create_merchant(
     let payment_address = derived.ua_string;
 
     // Reject if this viewing key is already registered (same UIVK = same derived address)
-    let existing: Option<(String,)> = sqlx::query_as(
-        "SELECT id FROM merchants WHERE payment_address = ?"
-    )
-    .bind(&payment_address)
-    .fetch_optional(pool)
-    .await?;
+    let existing: Option<(String,)> =
+        sqlx::query_as("SELECT id FROM merchants WHERE payment_address = ?")
+            .bind(&payment_address)
+            .fetch_optional(pool)
+            .await?;
 
     if existing.is_some() {
         anyhow::bail!("A merchant with this viewing key is already registered");
@@ -155,48 +154,75 @@ pub async fn create_merchant(
     })
 }
 
-type MerchantRow = (String, String, String, String, String, String, Option<String>, String, Option<String>, String, i64);
+type MerchantRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    String,
+    Option<String>,
+    String,
+    i64,
+);
 
 const MERCHANT_COLS: &str = "id, name, api_key_hash, dashboard_token_hash, ufvk, payment_address, webhook_url, webhook_secret, recovery_email, created_at, diversifier_index";
 
 fn row_to_merchant(r: MerchantRow, encryption_key: &str) -> Merchant {
-    let ufvk = crate::crypto::decrypt_or_plaintext(&r.4, encryption_key)
-        .unwrap_or_else(|e| {
-            tracing::error!(error = %e, "Failed to decrypt UFVK, using raw value");
-            r.4.clone()
-        });
+    let ufvk = crate::crypto::decrypt_or_plaintext(&r.4, encryption_key).unwrap_or_else(|e| {
+        tracing::error!(error = %e, "Failed to decrypt UFVK, using raw value");
+        r.4.clone()
+    });
     let webhook_secret = crate::crypto::decrypt_webhook_secret(&r.7, encryption_key)
         .unwrap_or_else(|e| {
             tracing::error!(error = %e, "Failed to decrypt webhook secret, using raw value");
             r.7.clone()
         });
-    let recovery_email = r.8.as_deref()
-        .map(|e| crate::crypto::decrypt_email(e, encryption_key).unwrap_or_else(|err| {
+    let recovery_email = r.8.as_deref().map(|e| {
+        crate::crypto::decrypt_email(e, encryption_key).unwrap_or_else(|err| {
             tracing::error!(error = %err, "Failed to decrypt recovery email");
             e.to_string()
-        }));
+        })
+    });
     Merchant {
-        id: r.0, name: r.1, api_key_hash: r.2, dashboard_token_hash: r.3,
-        ufvk, payment_address: r.5, webhook_url: r.6,
-        webhook_secret, recovery_email, created_at: r.9,
+        id: r.0,
+        name: r.1,
+        api_key_hash: r.2,
+        dashboard_token_hash: r.3,
+        ufvk,
+        payment_address: r.5,
+        webhook_url: r.6,
+        webhook_secret,
+        recovery_email,
+        created_at: r.9,
         diversifier_index: r.10,
     }
 }
 
-pub async fn get_all_merchants(pool: &SqlitePool, encryption_key: &str) -> anyhow::Result<Vec<Merchant>> {
-    let rows = sqlx::query_as::<_, MerchantRow>(
-        &format!("SELECT {MERCHANT_COLS} FROM merchants")
-    )
-    .fetch_all(pool)
-    .await?;
+pub async fn get_all_merchants(
+    pool: &SqlitePool,
+    encryption_key: &str,
+) -> anyhow::Result<Vec<Merchant>> {
+    let rows = sqlx::query_as::<_, MerchantRow>(&format!("SELECT {MERCHANT_COLS} FROM merchants"))
+        .fetch_all(pool)
+        .await?;
 
-    Ok(rows.into_iter().map(|r| row_to_merchant(r, encryption_key)).collect())
+    Ok(rows
+        .into_iter()
+        .map(|r| row_to_merchant(r, encryption_key))
+        .collect())
 }
 
-pub async fn get_merchant_by_id(pool: &SqlitePool, id: &str, encryption_key: &str) -> anyhow::Result<Option<Merchant>> {
-    let row = sqlx::query_as::<_, MerchantRow>(
-        &format!("SELECT {MERCHANT_COLS} FROM merchants WHERE id = ?")
-    )
+pub async fn get_merchant_by_id(
+    pool: &SqlitePool,
+    id: &str,
+    encryption_key: &str,
+) -> anyhow::Result<Option<Merchant>> {
+    let row = sqlx::query_as::<_, MerchantRow>(&format!(
+        "SELECT {MERCHANT_COLS} FROM merchants WHERE id = ?"
+    ))
     .bind(id)
     .fetch_optional(pool)
     .await?;
@@ -204,12 +230,16 @@ pub async fn get_merchant_by_id(pool: &SqlitePool, id: &str, encryption_key: &st
     Ok(row.map(|r| row_to_merchant(r, encryption_key)))
 }
 
-pub async fn authenticate(pool: &SqlitePool, api_key: &str, encryption_key: &str) -> anyhow::Result<Option<Merchant>> {
+pub async fn authenticate(
+    pool: &SqlitePool,
+    api_key: &str,
+    encryption_key: &str,
+) -> anyhow::Result<Option<Merchant>> {
     let key_hash = hash_key(api_key);
 
-    let row = sqlx::query_as::<_, MerchantRow>(
-        &format!("SELECT {MERCHANT_COLS} FROM merchants WHERE api_key_hash = ?")
-    )
+    let row = sqlx::query_as::<_, MerchantRow>(&format!(
+        "SELECT {MERCHANT_COLS} FROM merchants WHERE api_key_hash = ?"
+    ))
     .bind(&key_hash)
     .fetch_optional(pool)
     .await?;
@@ -217,12 +247,16 @@ pub async fn authenticate(pool: &SqlitePool, api_key: &str, encryption_key: &str
     Ok(row.map(|r| row_to_merchant(r, encryption_key)))
 }
 
-pub async fn authenticate_dashboard(pool: &SqlitePool, token: &str, encryption_key: &str) -> anyhow::Result<Option<Merchant>> {
+pub async fn authenticate_dashboard(
+    pool: &SqlitePool,
+    token: &str,
+    encryption_key: &str,
+) -> anyhow::Result<Option<Merchant>> {
     let token_hash = hash_key(token);
 
-    let row = sqlx::query_as::<_, MerchantRow>(
-        &format!("SELECT {MERCHANT_COLS} FROM merchants WHERE dashboard_token_hash = ?")
-    )
+    let row = sqlx::query_as::<_, MerchantRow>(&format!(
+        "SELECT {MERCHANT_COLS} FROM merchants WHERE dashboard_token_hash = ?"
+    ))
     .bind(&token_hash)
     .fetch_optional(pool)
     .await?;
@@ -230,15 +264,20 @@ pub async fn authenticate_dashboard(pool: &SqlitePool, token: &str, encryption_k
     Ok(row.map(|r| row_to_merchant(r, encryption_key)))
 }
 
-pub async fn get_by_session(pool: &SqlitePool, session_id: &str, encryption_key: &str) -> anyhow::Result<Option<Merchant>> {
-    let cols = MERCHANT_COLS.replace("id,", "m.id,").replace(", ", ", m.").replacen("m.id", "m.id", 1);
-    let row = sqlx::query_as::<_, MerchantRow>(
-        &format!(
-            "SELECT {} FROM merchants m JOIN sessions s ON s.merchant_id = m.id
+pub async fn get_by_session(
+    pool: &SqlitePool,
+    session_id: &str,
+    encryption_key: &str,
+) -> anyhow::Result<Option<Merchant>> {
+    let cols = MERCHANT_COLS
+        .replace("id,", "m.id,")
+        .replace(", ", ", m.")
+        .replacen("m.id", "m.id", 1);
+    let row = sqlx::query_as::<_, MerchantRow>(&format!(
+        "SELECT {} FROM merchants m JOIN sessions s ON s.merchant_id = m.id
              WHERE s.id = ? AND s.expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
-            cols
-        )
-    )
+        cols
+    ))
     .bind(session_id)
     .fetch_optional(pool)
     .await?;
@@ -258,7 +297,10 @@ pub async fn regenerate_api_key(pool: &SqlitePool, merchant_id: &str) -> anyhow:
     Ok(new_key)
 }
 
-pub async fn regenerate_dashboard_token(pool: &SqlitePool, merchant_id: &str) -> anyhow::Result<String> {
+pub async fn regenerate_dashboard_token(
+    pool: &SqlitePool,
+    merchant_id: &str,
+) -> anyhow::Result<String> {
     let new_token = generate_dashboard_token();
     let new_hash = hash_key(&new_token);
     sqlx::query("UPDATE merchants SET dashboard_token_hash = ? WHERE id = ?")
@@ -277,11 +319,18 @@ pub async fn regenerate_dashboard_token(pool: &SqlitePool, merchant_id: &str) ->
         .execute(pool)
         .await;
 
-    tracing::info!(merchant_id, "Dashboard token regenerated, all sessions invalidated");
+    tracing::info!(
+        merchant_id,
+        "Dashboard token regenerated, all sessions invalidated"
+    );
     Ok(new_token)
 }
 
-pub async fn regenerate_webhook_secret(pool: &SqlitePool, merchant_id: &str, encryption_key: &str) -> anyhow::Result<String> {
+pub async fn regenerate_webhook_secret(
+    pool: &SqlitePool,
+    merchant_id: &str,
+    encryption_key: &str,
+) -> anyhow::Result<String> {
     let new_secret = generate_webhook_secret();
     let stored = if encryption_key.is_empty() {
         new_secret.clone()
@@ -310,11 +359,15 @@ pub async fn next_diversifier_index(pool: &SqlitePool, merchant_id: &str) -> any
     Ok(row.0 as u32)
 }
 
-pub async fn find_by_email(pool: &SqlitePool, email: &str, encryption_key: &str) -> anyhow::Result<Option<Merchant>> {
+pub async fn find_by_email(
+    pool: &SqlitePool,
+    email: &str,
+    encryption_key: &str,
+) -> anyhow::Result<Option<Merchant>> {
     let email_hash = crate::crypto::blind_index(email, encryption_key);
-    let row = sqlx::query_as::<_, MerchantRow>(
-        &format!("SELECT {MERCHANT_COLS} FROM merchants WHERE recovery_email_hash = ?")
-    )
+    let row = sqlx::query_as::<_, MerchantRow>(&format!(
+        "SELECT {MERCHANT_COLS} FROM merchants WHERE recovery_email_hash = ?"
+    ))
     .bind(&email_hash)
     .fetch_optional(pool)
     .await?;
@@ -336,7 +389,7 @@ pub async fn create_recovery_token(pool: &SqlitePool, merchant_id: &str) -> anyh
         .await?;
 
     sqlx::query(
-        "INSERT INTO recovery_tokens (id, merchant_id, token_hash, expires_at) VALUES (?, ?, ?, ?)"
+        "INSERT INTO recovery_tokens (id, merchant_id, token_hash, expires_at) VALUES (?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(merchant_id)
@@ -352,7 +405,7 @@ pub async fn create_recovery_token(pool: &SqlitePool, merchant_id: &str) -> anyh
 pub async fn has_outstanding_balance(pool: &SqlitePool, merchant_id: &str) -> anyhow::Result<bool> {
     let row: Option<(f64,)> = sqlx::query_as(
         "SELECT COALESCE(SUM(outstanding_zec), 0.0) FROM billing_cycles
-         WHERE merchant_id = ? AND outstanding_zec > 0.0001"
+         WHERE merchant_id = ? AND outstanding_zec > 0.0001",
     )
     .bind(merchant_id)
     .fetch_optional(pool)
@@ -365,51 +418,85 @@ pub async fn delete_merchant(pool: &SqlitePool, merchant_id: &str) -> anyhow::Re
     // Disable FK enforcement during cascade delete — we manage the order explicitly,
     // and stale FK schemas from past table-repair migrations can cause spurious errors.
     let mut conn = pool.acquire().await?;
-    sqlx::query("PRAGMA foreign_keys = OFF").execute(&mut *conn).await?;
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&mut *conn)
+        .await?;
 
     sqlx::query("DELETE FROM sessions WHERE merchant_id = ?")
-        .bind(merchant_id).execute(&mut *conn).await?;
+        .bind(merchant_id)
+        .execute(&mut *conn)
+        .await?;
     let _ = sqlx::query("DELETE FROM agent_sessions WHERE merchant_id = ?")
-        .bind(merchant_id).execute(&mut *conn).await;
+        .bind(merchant_id)
+        .execute(&mut *conn)
+        .await;
     sqlx::query("DELETE FROM recovery_tokens WHERE merchant_id = ?")
-        .bind(merchant_id).execute(&mut *conn).await?;
+        .bind(merchant_id)
+        .execute(&mut *conn)
+        .await?;
     sqlx::query("DELETE FROM fee_ledger WHERE merchant_id = ?")
-        .bind(merchant_id).execute(&mut *conn).await?;
+        .bind(merchant_id)
+        .execute(&mut *conn)
+        .await?;
     sqlx::query(
         "DELETE FROM webhook_deliveries WHERE invoice_id IN (SELECT id FROM invoices WHERE merchant_id = ?)"
     ).bind(merchant_id).execute(&mut *conn).await?;
     sqlx::query("DELETE FROM tickets WHERE merchant_id = ?")
-        .bind(merchant_id).execute(&mut *conn).await?;
+        .bind(merchant_id)
+        .execute(&mut *conn)
+        .await?;
     let _ = sqlx::query("DELETE FROM payment_links WHERE merchant_id = ?")
-        .bind(merchant_id).execute(&mut *conn).await;
+        .bind(merchant_id)
+        .execute(&mut *conn)
+        .await;
     sqlx::query("DELETE FROM billing_cycles WHERE merchant_id = ?")
-        .bind(merchant_id).execute(&mut *conn).await?;
+        .bind(merchant_id)
+        .execute(&mut *conn)
+        .await?;
     sqlx::query("DELETE FROM subscriptions WHERE merchant_id = ?")
-        .bind(merchant_id).execute(&mut *conn).await?;
+        .bind(merchant_id)
+        .execute(&mut *conn)
+        .await?;
     sqlx::query("DELETE FROM invoices WHERE merchant_id = ?")
-        .bind(merchant_id).execute(&mut *conn).await?;
+        .bind(merchant_id)
+        .execute(&mut *conn)
+        .await?;
     sqlx::query("DELETE FROM events WHERE merchant_id = ?")
-        .bind(merchant_id).execute(&mut *conn).await?;
+        .bind(merchant_id)
+        .execute(&mut *conn)
+        .await?;
     sqlx::query(
-        "DELETE FROM prices WHERE product_id IN (SELECT id FROM products WHERE merchant_id = ?)"
-    ).bind(merchant_id).execute(&mut *conn).await?;
+        "DELETE FROM prices WHERE product_id IN (SELECT id FROM products WHERE merchant_id = ?)",
+    )
+    .bind(merchant_id)
+    .execute(&mut *conn)
+    .await?;
     sqlx::query("DELETE FROM products WHERE merchant_id = ?")
-        .bind(merchant_id).execute(&mut *conn).await?;
+        .bind(merchant_id)
+        .execute(&mut *conn)
+        .await?;
     sqlx::query("DELETE FROM merchants WHERE id = ?")
-        .bind(merchant_id).execute(&mut *conn).await?;
+        .bind(merchant_id)
+        .execute(&mut *conn)
+        .await?;
 
-    sqlx::query("PRAGMA foreign_keys = ON").execute(&mut *conn).await?;
+    sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&mut *conn)
+        .await?;
 
     tracing::info!(merchant_id, "Merchant account deleted");
     Ok(())
 }
 
-pub async fn confirm_recovery_token(pool: &SqlitePool, token: &str) -> anyhow::Result<Option<String>> {
+pub async fn confirm_recovery_token(
+    pool: &SqlitePool,
+    token: &str,
+) -> anyhow::Result<Option<String>> {
     let token_hash = hash_key(token);
 
     let row = sqlx::query_as::<_, (String, String)>(
         "SELECT id, merchant_id FROM recovery_tokens
-         WHERE token_hash = ? AND expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
+         WHERE token_hash = ? AND expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
     )
     .bind(&token_hash)
     .fetch_optional(pool)
@@ -419,7 +506,8 @@ pub async fn confirm_recovery_token(pool: &SqlitePool, token: &str) -> anyhow::R
         Some(r) => r,
         None => {
             let total: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM recovery_tokens")
-                .fetch_one(pool).await?;
+                .fetch_one(pool)
+                .await?;
             tracing::warn!(
                 token_hash_prefix = &token_hash[..8],
                 total_tokens_in_db = total.0,

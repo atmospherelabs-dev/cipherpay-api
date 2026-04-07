@@ -18,7 +18,9 @@ pub struct Price {
     pub created_at: String,
 }
 
-fn default_price_type() -> String { "one_time".to_string() }
+fn default_price_type() -> String {
+    "one_time".to_string()
+}
 
 const VALID_PRICE_TYPES: &[&str] = &["one_time", "recurring"];
 const VALID_INTERVALS: &[&str] = &["day", "week", "month", "year"];
@@ -46,7 +48,9 @@ pub struct UpdatePriceRequest {
     pub interval_count: Option<i32>,
 }
 
-pub const SUPPORTED_CURRENCIES: &[&str] = &["EUR", "USD", "BRL", "GBP", "CAD", "JPY", "MXN", "ARS", "NGN", "CHF", "INR"];
+pub const SUPPORTED_CURRENCIES: &[&str] = &[
+    "EUR", "USD", "BRL", "GBP", "CAD", "JPY", "MXN", "ARS", "NGN", "CHF", "INR",
+];
 const MAX_UNIT_AMOUNT: f64 = 1_000_000.0;
 
 fn generate_price_id() -> String {
@@ -60,7 +64,11 @@ pub async fn create_price(
 ) -> anyhow::Result<Price> {
     let currency = req.currency.to_uppercase();
     if !SUPPORTED_CURRENCIES.contains(&currency.as_str()) {
-        anyhow::bail!("Unsupported currency: {}. Supported: {}", currency, SUPPORTED_CURRENCIES.join(", "));
+        anyhow::bail!(
+            "Unsupported currency: {}. Supported: {}",
+            currency,
+            SUPPORTED_CURRENCIES.join(", ")
+        );
     }
     if req.unit_amount <= 0.0 {
         anyhow::bail!("unit_amount must be > 0");
@@ -94,7 +102,9 @@ pub async fn create_price(
         anyhow::bail!("price_type must be one_time or recurring");
     }
     let (billing_interval, interval_count) = if price_type == "recurring" {
-        let interval = req.billing_interval.as_deref()
+        let interval = req
+            .billing_interval
+            .as_deref()
             .ok_or_else(|| anyhow::anyhow!("billing_interval required for recurring prices"))?;
         if !VALID_INTERVALS.contains(&interval) {
             anyhow::bail!("billing_interval must be day, week, month, or year");
@@ -134,8 +144,14 @@ pub async fn create_price(
 
 const PRICE_COLS: &str = "id, product_id, currency, unit_amount, label, max_quantity, price_type, billing_interval, interval_count, active, created_at";
 
-pub async fn list_prices_for_product(pool: &SqlitePool, product_id: &str) -> anyhow::Result<Vec<Price>> {
-    let q = format!("SELECT {} FROM prices WHERE product_id = ? ORDER BY currency ASC", PRICE_COLS);
+pub async fn list_prices_for_product(
+    pool: &SqlitePool,
+    product_id: &str,
+) -> anyhow::Result<Vec<Price>> {
+    let q = format!(
+        "SELECT {} FROM prices WHERE product_id = ? ORDER BY currency ASC",
+        PRICE_COLS
+    );
     let rows = sqlx::query_as::<_, Price>(&q)
         .bind(product_id)
         .fetch_all(pool)
@@ -157,7 +173,10 @@ pub async fn get_price_by_product_currency(
     product_id: &str,
     currency: &str,
 ) -> anyhow::Result<Option<Price>> {
-    let q = format!("SELECT {} FROM prices WHERE product_id = ? AND currency = ? AND active = 1", PRICE_COLS);
+    let q = format!(
+        "SELECT {} FROM prices WHERE product_id = ? AND currency = ? AND active = 1",
+        PRICE_COLS
+    );
     let row = sqlx::query_as::<_, Price>(&q)
         .bind(product_id)
         .bind(currency)
@@ -204,7 +223,8 @@ pub async fn update_price(
             }
             if c != price.currency {
                 let existing = get_price_by_product_currency(pool, &price.product_id, &c).await?;
-                let is_event_backed = crate::events::is_product_backed_by_event(pool, &price.product_id).await?;
+                let is_event_backed =
+                    crate::events::is_product_backed_by_event(pool, &price.product_id).await?;
                 if existing.is_some() && !is_event_backed {
                     anyhow::bail!("An active price for {} already exists on this product. Deactivate it first.", c);
                 }
@@ -222,7 +242,9 @@ pub async fn update_price(
         anyhow::bail!("price_type must be one_time or recurring");
     }
     let (billing_interval, interval_count) = if price_type == "recurring" {
-        let interval = req.billing_interval.as_deref()
+        let interval = req
+            .billing_interval
+            .as_deref()
             .or(price.billing_interval.as_deref())
             .ok_or_else(|| anyhow::anyhow!("billing_interval required for recurring prices"))?;
         if !VALID_INTERVALS.contains(&interval) {
@@ -277,15 +299,16 @@ pub async fn deactivate_price(
         _ => return Ok(false),
     };
 
-    let active_count: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM prices WHERE product_id = ? AND active = 1"
-    )
-    .bind(&price.product_id)
-    .fetch_one(pool)
-    .await?;
+    let active_count: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM prices WHERE product_id = ? AND active = 1")
+            .bind(&price.product_id)
+            .fetch_one(pool)
+            .await?;
 
     if active_count.0 <= 1 {
-        anyhow::bail!("Cannot remove the last active price. A product must have at least one price.");
+        anyhow::bail!(
+            "Cannot remove the last active price. A product must have at least one price."
+        );
     }
 
     // If this price is the product's default, reassign to another active price before deactivating

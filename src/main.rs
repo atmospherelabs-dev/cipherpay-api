@@ -21,7 +21,7 @@ mod webhooks;
 
 use actix_cors::Cors;
 use actix_governor::{Governor, GovernorConfigBuilder};
-use actix_web::{web, App, HttpServer, middleware};
+use actix_web::{middleware, web, App, HttpServer};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -37,13 +37,44 @@ async fn main() -> anyhow::Result<()> {
     let config = config::Config::from_env()?;
     config.validate()?;
     let pool = db::create_pool(&config.database_url).await?;
-    db::migrate_encrypt_ufvks(&pool, &config.encryption_key).await?;
-    db::migrate_ufvk_to_uivk(&pool, &config.encryption_key).await?;
-    db::migrate_encrypt_webhook_secrets(&pool, &config.encryption_key).await?;
-    db::migrate_encrypt_recovery_emails(&pool, &config.encryption_key).await?;
-    db::migrate_blind_index_to_hmac(&pool, &config.encryption_key).await?;
+    if config.encryption_key.is_empty() {
+        tracing::info!("ENCRYPTION_KEY not set; running legacy data migrations without tracking");
+        db::migrate_encrypt_ufvks(&pool, &config.encryption_key).await?;
+        db::migrate_ufvk_to_uivk(&pool, &config.encryption_key).await?;
+        db::migrate_encrypt_webhook_secrets(&pool, &config.encryption_key).await?;
+        db::migrate_encrypt_recovery_emails(&pool, &config.encryption_key).await?;
+        db::migrate_blind_index_to_hmac(&pool, &config.encryption_key).await?;
+    } else {
+        db::run_tracked_migration(&pool, "data_encrypt_ufvks_v2026_04_07", || async {
+            db::migrate_encrypt_ufvks(&pool, &config.encryption_key).await
+        })
+        .await?;
+        db::run_tracked_migration(&pool, "data_ufvk_to_uivk_v2026_04_07", || async {
+            db::migrate_ufvk_to_uivk(&pool, &config.encryption_key).await
+        })
+        .await?;
+        db::run_tracked_migration(
+            &pool,
+            "data_encrypt_webhook_secrets_v2026_04_07",
+            || async { db::migrate_encrypt_webhook_secrets(&pool, &config.encryption_key).await },
+        )
+        .await?;
+        db::run_tracked_migration(
+            &pool,
+            "data_encrypt_recovery_emails_v2026_04_07",
+            || async { db::migrate_encrypt_recovery_emails(&pool, &config.encryption_key).await },
+        )
+        .await?;
+        db::run_tracked_migration(&pool, "data_blind_index_to_hmac_v2026_04_07", || async {
+            db::migrate_blind_index_to_hmac(&pool, &config.encryption_key).await
+        })
+        .await?;
+    }
     let mut default_headers = reqwest::header::HeaderMap::new();
-    default_headers.insert("User-Agent", reqwest::header::HeaderValue::from_static("CipherPay/1.0"));
+    default_headers.insert(
+        "User-Agent",
+        reqwest::header::HeaderValue::from_static("CipherPay/1.0"),
+    );
     if let Some(ref key) = config.cipherscan_service_key {
         if let Ok(val) = reqwest::header::HeaderValue::from_str(key) {
             default_headers.insert("X-Service-Key", val);
@@ -54,10 +85,8 @@ async fn main() -> anyhow::Result<()> {
         .default_headers(default_headers)
         .build()?;
 
-    let price_service = invoices::pricing::PriceService::new(
-        &config.coingecko_api_url,
-        config.price_cache_secs,
-    );
+    let price_service =
+        invoices::pricing::PriceService::new(&config.coingecko_api_url, config.price_cache_secs);
 
     tracing::info!(
         network = %config.network,
@@ -126,7 +155,14 @@ async fn main() -> anyhow::Result<()> {
                     Ok(r) => (r.zec_eur, r.zec_usd),
                     Err(_) => (0.0, 0.0),
                 };
-                if let Err(e) = billing::process_billing_cycles(&billing_pool, &billing_config, zec_eur, zec_usd).await {
+                if let Err(e) = billing::process_billing_cycles(
+                    &billing_pool,
+                    &billing_config,
+                    zec_eur,
+                    zec_usd,
+                )
+                .await
+                {
                     tracing::error!(error = %e, "Billing cycle processing error");
                 }
             }
@@ -142,30 +178,42 @@ async fn main() -> anyhow::Result<()> {
         loop {
             interval.tick().await;
             // Build merchant UFVK map for draft invoice address derivation
-            let merchants = match crate::merchants::get_all_merchants(&sub_pool, &sub_config.encryption_key).await {
+            let merchants = match crate::merchants::get_all_merchants(
+                &sub_pool,
+                &sub_config.encryption_key,
+            )
+            .await
+            {
                 Ok(m) => m,
                 Err(e) => {
                     tracing::error!(error = %e, "Subscription engine: failed to load merchants");
                     continue;
                 }
             };
-            let ufvk_map: std::collections::HashMap<String, String> = merchants
-                .into_iter()
-                .map(|m| (m.id, m.ufvk))
-                .collect();
+            let ufvk_map: std::collections::HashMap<String, String> =
+                merchants.into_iter().map(|m| (m.id, m.ufvk)).collect();
 
             let fee_config = if sub_config.fee_enabled() {
-                sub_config.fee_address.as_ref().map(|addr| crate::invoices::FeeConfig {
-                    fee_address: addr.clone(),
-                    fee_rate: sub_config.fee_rate,
-                })
+                sub_config
+                    .fee_address
+                    .as_ref()
+                    .map(|addr| crate::invoices::FeeConfig {
+                        fee_address: addr.clone(),
+                        fee_rate: sub_config.fee_rate,
+                    })
             } else {
                 None
             };
 
             if let Err(e) = subscriptions::process_renewals(
-                &sub_pool, &sub_http, &sub_config.encryption_key, &ufvk_map, fee_config.as_ref(),
-            ).await {
+                &sub_pool,
+                &sub_http,
+                &sub_config.encryption_key,
+                &ufvk_map,
+                fee_config.as_ref(),
+            )
+            .await
+            {
                 tracing::error!(error = %e, "Subscription renewal error");
             }
         }
@@ -202,13 +250,20 @@ async fn main() -> anyhow::Result<()> {
         App::new()
             .wrap(cors)
             .wrap(Governor::new(&rate_limit))
-            .wrap(middleware::DefaultHeaders::new()
-                .add(("X-Content-Type-Options", "nosniff"))
-                .add(("X-Frame-Options", "DENY"))
-                .add(("Referrer-Policy", "strict-origin-when-cross-origin"))
-                .add(("Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload"))
-                .add(("Permissions-Policy", "camera=(), microphone=(), geolocation=()"))
-                .add(("Cache-Control", "private, no-store"))
+            .wrap(
+                middleware::DefaultHeaders::new()
+                    .add(("X-Content-Type-Options", "nosniff"))
+                    .add(("X-Frame-Options", "DENY"))
+                    .add(("Referrer-Policy", "strict-origin-when-cross-origin"))
+                    .add((
+                        "Strict-Transport-Security",
+                        "max-age=63072000; includeSubDomains; preload",
+                    ))
+                    .add((
+                        "Permissions-Policy",
+                        "camera=(), microphone=(), geolocation=()",
+                    ))
+                    .add(("Cache-Control", "private, no-store")),
             )
             .app_data(web::JsonConfig::default().limit(65_536))
             .app_data(web::Data::new(pool.clone()))
@@ -217,8 +272,7 @@ async fn main() -> anyhow::Result<()> {
             .app_data(web::Data::new(http_client.clone()))
             .configure(api::configure)
             .route("/", web::get().to(serve_ui))
-            .service(web::resource("/widget/{filename}")
-                .route(web::get().to(serve_widget)))
+            .service(web::resource("/widget/{filename}").route(web::get().to(serve_widget)))
     })
     .bind(&bind_addr)?
     .run()
@@ -236,7 +290,10 @@ async fn serve_ui() -> actix_web::HttpResponse {
 async fn serve_widget(path: web::Path<String>) -> actix_web::HttpResponse {
     let filename = path.into_inner();
     let (content, content_type) = match filename.as_str() {
-        "cipherpay.js" => (include_str!("../widget/cipherpay.js"), "application/javascript"),
+        "cipherpay.js" => (
+            include_str!("../widget/cipherpay.js"),
+            "application/javascript",
+        ),
         "cipherpay.css" => (include_str!("../widget/cipherpay.css"), "text/css"),
         _ => return actix_web::HttpResponse::NotFound().finish(),
     };

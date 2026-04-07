@@ -109,13 +109,15 @@ fn slugify(name: &str) -> String {
         .join("-")
 }
 
-pub async fn is_product_backed_by_event(pool: &SqlitePool, product_id: &str) -> anyhow::Result<bool> {
-    let exists: Option<(i64,)> = sqlx::query_as(
-        "SELECT 1 FROM events WHERE product_id = ? LIMIT 1"
-    )
-    .bind(product_id)
-    .fetch_optional(pool)
-    .await?;
+pub async fn is_product_backed_by_event(
+    pool: &SqlitePool,
+    product_id: &str,
+) -> anyhow::Result<bool> {
+    let exists: Option<(i64,)> =
+        sqlx::query_as("SELECT 1 FROM events WHERE product_id = ? LIMIT 1")
+            .bind(product_id)
+            .fetch_optional(pool)
+            .await?;
 
     Ok(exists.is_some())
 }
@@ -128,17 +130,19 @@ pub async fn get_event_context_by_product(
         "SELECT title, event_date, event_location
          FROM events
          WHERE product_id = ? AND status IN ('draft', 'active', 'past')
-         LIMIT 1"
+         LIMIT 1",
     )
     .bind(product_id)
     .fetch_optional(pool)
     .await?;
 
-    Ok(row.map(|(event_title, event_date, event_location)| EventContext {
-        event_title,
-        event_date,
-        event_location,
-    }))
+    Ok(
+        row.map(|(event_title, event_date, event_location)| EventContext {
+            event_title,
+            event_date,
+            event_location,
+        }),
+    )
 }
 
 #[allow(dead_code)]
@@ -167,7 +171,8 @@ pub async fn create_event(
     .execute(pool)
     .await?;
 
-    get_event(pool, &id).await?
+    get_event(pool, &id)
+        .await?
         .ok_or_else(|| anyhow::anyhow!("Event not found after insert"))
 }
 
@@ -185,7 +190,10 @@ pub async fn get_event(pool: &SqlitePool, id: &str) -> anyhow::Result<Option<Eve
     Ok(row)
 }
 
-pub async fn list_events_for_merchant(pool: &SqlitePool, merchant_id: &str) -> anyhow::Result<Vec<EventSummary>> {
+pub async fn list_events_for_merchant(
+    pool: &SqlitePool,
+    merchant_id: &str,
+) -> anyhow::Result<Vec<EventSummary>> {
     let rows = sqlx::query_as::<_, EventSummary>(
         "SELECT
             e.id, e.product_id, e.title, e.description, e.event_date, e.event_location, e.status, e.created_at,
@@ -330,7 +338,8 @@ pub async fn create_event_with_product_and_prices(
 
     tx.commit().await?;
 
-    get_event(pool, &event_id).await?
+    get_event(pool, &event_id)
+        .await?
         .ok_or_else(|| anyhow::anyhow!("Event not found after transactional create"))
 }
 
@@ -341,13 +350,12 @@ pub async fn archive_event(
 ) -> anyhow::Result<bool> {
     let mut tx = pool.begin().await?;
 
-    let row: Option<(String, String)> = sqlx::query_as(
-        "SELECT id, product_id FROM events WHERE id = ? AND merchant_id = ?"
-    )
-    .bind(event_id)
-    .bind(merchant_id)
-    .fetch_optional(&mut *tx)
-    .await?;
+    let row: Option<(String, String)> =
+        sqlx::query_as("SELECT id, product_id FROM events WHERE id = ? AND merchant_id = ?")
+            .bind(event_id)
+            .bind(merchant_id)
+            .fetch_optional(&mut *tx)
+            .await?;
 
     let (_, product_id) = match row {
         Some(v) => v,
@@ -367,7 +375,7 @@ pub async fn archive_event(
     // Void all outstanding tickets for this event
     sqlx::query(
         "UPDATE tickets SET status = 'void'
-         WHERE product_id = ? AND merchant_id = ? AND status = 'valid'"
+         WHERE product_id = ? AND merchant_id = ? AND status = 'valid'",
     )
     .bind(&product_id)
     .bind(merchant_id)
@@ -385,7 +393,7 @@ pub async fn update_event(
     req: &UpdateEventRequest,
 ) -> anyhow::Result<Option<Event>> {
     let existing: Option<(String, String, String)> = sqlx::query_as(
-        "SELECT id, product_id, status FROM events WHERE id = ? AND merchant_id = ?"
+        "SELECT id, product_id, status FROM events WHERE id = ? AND merchant_id = ?",
     )
     .bind(event_id)
     .bind(merchant_id)
@@ -436,7 +444,7 @@ pub async fn update_event(
             description = COALESCE(?, description),
             event_date = COALESCE(?, event_date),
             event_location = COALESCE(?, event_location)
-         WHERE id = ? AND merchant_id = ?"
+         WHERE id = ? AND merchant_id = ?",
     )
     .bind(&req.title)
     .bind(&req.description)
@@ -452,7 +460,7 @@ pub async fn update_event(
             "UPDATE products SET
                 name = COALESCE(?, name),
                 description = COALESCE(?, description)
-             WHERE id = ? AND merchant_id = ?"
+             WHERE id = ? AND merchant_id = ?",
         )
         .bind(&req.title)
         .bind(&req.description)
@@ -467,9 +475,12 @@ pub async fn update_event(
     get_event(pool, event_id).await
 }
 
-pub async fn get_event_tier_stats(pool: &SqlitePool, product_id: &str) -> anyhow::Result<Vec<EventTierStat>> {
+pub async fn get_event_tier_stats(
+    pool: &SqlitePool,
+    product_id: &str,
+) -> anyhow::Result<Vec<EventTierStat>> {
     let is_luma: bool = sqlx::query_scalar::<_, Option<String>>(
-        "SELECT luma_event_id FROM events WHERE product_id = ? LIMIT 1"
+        "SELECT luma_event_id FROM events WHERE product_id = ? LIMIT 1",
     )
     .bind(product_id)
     .fetch_optional(pool)
@@ -551,7 +562,7 @@ pub async fn mark_past_events(pool: &SqlitePool) -> anyhow::Result<u64> {
          WHERE id IN (
              SELECT product_id FROM events
              WHERE status = 'active' AND event_date IS NOT NULL AND event_date < ?
-         ) AND active = 1"
+         ) AND active = 1",
     )
     .bind(&now)
     .execute(pool)
@@ -562,7 +573,7 @@ pub async fn mark_past_events(pool: &SqlitePool) -> anyhow::Result<u64> {
          SET status = 'past'
          WHERE status = 'active'
          AND event_date IS NOT NULL
-         AND event_date < ?"
+         AND event_date < ?",
     )
     .bind(&now)
     .execute(pool)
