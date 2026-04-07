@@ -219,22 +219,17 @@ pub async fn deactivate(
 }
 
 /// Public endpoint: get a price by ID for buyers
-pub async fn get_public(
-    pool: web::Data<SqlitePool>,
-    path: web::Path<String>,
-) -> HttpResponse {
+pub async fn get_public(pool: web::Data<SqlitePool>, path: web::Path<String>) -> HttpResponse {
     let price_id = path.into_inner();
 
     match prices::get_price(pool.get_ref(), &price_id).await {
-        Ok(Some(price)) if price.active == 1 => {
-            HttpResponse::Ok().json(serde_json::json!({
-                "id": price.id,
-                "product_id": price.product_id,
-                "currency": price.currency,
-                "unit_amount": price.unit_amount,
-                "label": price.label,
-            }))
-        }
+        Ok(Some(price)) if price.active == 1 => HttpResponse::Ok().json(serde_json::json!({
+            "id": price.id,
+            "product_id": price.product_id,
+            "currency": price.currency,
+            "unit_amount": price.unit_amount,
+            "label": price.label,
+        })),
         _ => HttpResponse::NotFound().json(serde_json::json!({
             "error": "Price not found"
         })),

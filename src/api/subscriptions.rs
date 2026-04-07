@@ -10,7 +10,10 @@ pub async fn create(
 ) -> HttpResponse {
     let merchant = match super::auth::resolve_merchant_or_session(&req, &pool).await {
         Some(m) => m,
-        None => return HttpResponse::Unauthorized().json(serde_json::json!({"error": "Not authenticated"})),
+        None => {
+            return HttpResponse::Unauthorized()
+                .json(serde_json::json!({"error": "Not authenticated"}))
+        }
     };
 
     match subscriptions::create_subscription(pool.get_ref(), &merchant.id, &body).await {
@@ -19,13 +22,13 @@ pub async fn create(
     }
 }
 
-pub async fn list(
-    req: HttpRequest,
-    pool: web::Data<SqlitePool>,
-) -> HttpResponse {
+pub async fn list(req: HttpRequest, pool: web::Data<SqlitePool>) -> HttpResponse {
     let merchant = match super::auth::resolve_merchant_or_session(&req, &pool).await {
         Some(m) => m,
-        None => return HttpResponse::Unauthorized().json(serde_json::json!({"error": "Not authenticated"})),
+        None => {
+            return HttpResponse::Unauthorized()
+                .json(serde_json::json!({"error": "Not authenticated"}))
+        }
     };
 
     match subscriptions::list_subscriptions(pool.get_ref(), &merchant.id).await {
@@ -50,15 +53,22 @@ pub async fn cancel(
 ) -> HttpResponse {
     let merchant = match super::auth::resolve_merchant_or_session(&req, &pool).await {
         Some(m) => m,
-        None => return HttpResponse::Unauthorized().json(serde_json::json!({"error": "Not authenticated"})),
+        None => {
+            return HttpResponse::Unauthorized()
+                .json(serde_json::json!({"error": "Not authenticated"}))
+        }
     };
 
     let sub_id = path.into_inner();
     let at_period_end = body.at_period_end.unwrap_or(false);
 
-    match subscriptions::cancel_subscription(pool.get_ref(), &sub_id, &merchant.id, at_period_end).await {
+    match subscriptions::cancel_subscription(pool.get_ref(), &sub_id, &merchant.id, at_period_end)
+        .await
+    {
         Ok(Some(sub)) => HttpResponse::Ok().json(sub),
-        Ok(None) => HttpResponse::NotFound().json(serde_json::json!({"error": "Subscription not found"})),
+        Ok(None) => {
+            HttpResponse::NotFound().json(serde_json::json!({"error": "Subscription not found"}))
+        }
         Err(e) => HttpResponse::BadRequest().json(serde_json::json!({"error": e.to_string()})),
     }
 }

@@ -37,8 +37,8 @@ pub fn decrypt(encrypted_hex: &str, key_hex: &str) -> Result<String> {
         return Err(anyhow!("ENCRYPTION_KEY must be 32 bytes (64 hex chars)"));
     }
 
-    let combined = hex::decode(encrypted_hex)
-        .map_err(|_| anyhow!("Invalid encrypted data (not hex)"))?;
+    let combined =
+        hex::decode(encrypted_hex).map_err(|_| anyhow!("Invalid encrypted data (not hex)"))?;
 
     if combined.len() < NONCE_LEN + 1 {
         return Err(anyhow!("Encrypted data too short"));
@@ -65,8 +65,10 @@ pub fn decrypt_or_plaintext(data: &str, key_hex: &str) -> Result<String> {
         return Ok(data.to_string());
     }
 
-    if data.starts_with("uview") || data.starts_with("utest")
-        || data.starts_with("uivk") || data.starts_with("uivktest")
+    if data.starts_with("uview")
+        || data.starts_with("utest")
+        || data.starts_with("uivk")
+        || data.starts_with("uivktest")
     {
         return Ok(data.to_string());
     }
@@ -100,8 +102,8 @@ pub fn blind_index(value: &str, key_hex: &str) -> String {
     use hmac::{Hmac, Mac};
     type HmacSha256 = Hmac<Sha256>;
     let key_bytes = key_hex.as_bytes();
-    let mut mac = <HmacSha256 as Mac>::new_from_slice(key_bytes)
-        .expect("HMAC accepts any key length");
+    let mut mac =
+        <HmacSha256 as Mac>::new_from_slice(key_bytes).expect("HMAC accepts any key length");
     mac.update(normalized.as_bytes());
     hex::encode(mac.finalize().into_bytes())
 }

@@ -1,13 +1,13 @@
-pub mod mempool;
 pub mod blocks;
 pub mod decrypt;
+pub mod mempool;
 pub mod ws;
 
+use sqlx::SqlitePool;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::RwLock;
-use sqlx::SqlitePool;
 
 use crate::billing;
 use crate::config::Config;
@@ -30,7 +30,8 @@ pub async fn run(config: Config, pool: SqlitePool, http: reqwest::Client) {
     let circuit_breaker = Arc::new(blocks::CircuitBreaker::new());
     let seen_txids: SeenTxids = Arc::new(RwLock::new(HashMap::new()));
 
-    let persisted_height = crate::db::get_scanner_state(&pool, "last_height").await
+    let persisted_height = crate::db::get_scanner_state(&pool, "last_height")
+        .await
         .and_then(|v| v.parse::<u64>().ok());
     if let Some(h) = persisted_height {
         tracing::info!(height = h, "Resumed scanner from persisted block height");
@@ -68,13 +69,18 @@ pub async fn run(config: Config, pool: SqlitePool, http: reqwest::Client) {
         let mut ws_receiver = ws_rx;
 
         // With WS: poll every 30s as a slow fallback. Without: use configured interval.
-        let poll_secs = if has_ws { 30 } else { mempool_config.mempool_poll_interval_secs };
-        let mut interval = tokio::time::interval(
-            std::time::Duration::from_secs(poll_secs),
-        );
+        let poll_secs = if has_ws {
+            30
+        } else {
+            mempool_config.mempool_poll_interval_secs
+        };
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(poll_secs));
 
         if has_ws {
-            tracing::info!(poll_fallback_secs = poll_secs, "Mempool: WebSocket mode + polling fallback");
+            tracing::info!(
+                poll_fallback_secs = poll_secs,
+                "Mempool: WebSocket mode + polling fallback"
+            );
         }
 
         loop {
@@ -133,9 +139,9 @@ pub async fn run(config: Config, pool: SqlitePool, http: reqwest::Client) {
 
     let block_handle = tokio::spawn(async move {
         let mut key_cache: Option<KeyCache> = None;
-        let mut interval = tokio::time::interval(
-            std::time::Duration::from_secs(block_config.block_poll_interval_secs),
-        );
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+            block_config.block_poll_interval_secs,
+        ));
         loop {
             interval.tick().await;
             let _ = invoices::expire_old_invoices(&block_pool).await;
@@ -144,7 +150,16 @@ pub async fn run(config: Config, pool: SqlitePool, http: reqwest::Client) {
                 tracing::debug!("CipherScan circuit breaker open, skipping block scan");
                 continue;
             }
-            match scan_blocks(&block_config, &block_pool, &block_http, &block_seen, &last_height, &mut key_cache).await {
+            match scan_blocks(
+                &block_config,
+                &block_pool,
+                &block_http,
+                &block_seen,
+                &last_height,
+                &mut key_cache,
+            )
+            .await
+            {
                 Ok(_) => block_cb.record_success(),
                 Err(e) => {
                     block_cb.record_failure();
@@ -156,9 +171,8 @@ pub async fn run(config: Config, pool: SqlitePool, http: reqwest::Client) {
 
     let evict_seen = seen_txids.clone();
     let evict_handle = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(
-            std::time::Duration::from_secs(SEEN_TXID_EVICT_INTERVAL),
-        );
+        let mut interval =
+            tokio::time::interval(std::time::Duration::from_secs(SEEN_TXID_EVICT_INTERVAL));
         loop {
             interval.tick().await;
             let cutoff = Instant::now() - std::time::Duration::from_secs(SEEN_TXID_TTL_SECS);
@@ -176,16 +190,19 @@ pub async fn run(config: Config, pool: SqlitePool, http: reqwest::Client) {
     let retry_pool = pool.clone();
     let retry_http = http.clone();
     let luma_retry_handle = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(
-            std::time::Duration::from_secs(60),
-        );
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
         loop {
             interval.tick().await;
             retry_due_luma_registrations(&retry_config, &retry_pool, &retry_http).await;
         }
     });
 
-    let _ = tokio::join!(mempool_handle, block_handle, evict_handle, luma_retry_handle);
+    let _ = tokio::join!(
+        mempool_handle,
+        block_handle,
+        evict_handle,
+        luma_retry_handle
+    );
 }
 
 /// Build or refresh the PIVK cache when the merchant set changes.
@@ -211,7 +228,10 @@ fn refresh_key_cache<'a>(
             }
         }
         tracing::info!(merchants = keys.len(), "PIVK cache refreshed");
-        *cache = Some(KeyCache { merchant_ids: current_ids, keys });
+        *cache = Some(KeyCache {
+            merchant_ids: current_ids,
+            keys,
+        });
     }
 
     &cache.as_ref().unwrap().keys
@@ -219,9 +239,14 @@ fn refresh_key_cache<'a>(
 
 /// Fire a payment webhook without blocking the scan loop.
 fn spawn_payment_webhook(
-    pool: &SqlitePool, http: &reqwest::Client,
-    invoice_id: &str, event: &str, txid: &str,
-    price_zatoshis: i64, received_zatoshis: i64, overpaid: bool,
+    pool: &SqlitePool,
+    http: &reqwest::Client,
+    invoice_id: &str,
+    event: &str,
+    txid: &str,
+    price_zatoshis: i64,
+    received_zatoshis: i64,
+    overpaid: bool,
     encryption_key: &str,
 ) {
     let pool = pool.clone();
@@ -232,10 +257,18 @@ fn spawn_payment_webhook(
     let enc_key = encryption_key.to_string();
     tokio::spawn(async move {
         if let Err(e) = webhooks::dispatch_payment(
-            &pool, &http, &invoice_id, &event, &txid,
-            price_zatoshis, received_zatoshis, overpaid,
+            &pool,
+            &http,
+            &invoice_id,
+            &event,
+            &txid,
+            price_zatoshis,
+            received_zatoshis,
+            overpaid,
             &enc_key,
-        ).await {
+        )
+        .await
+        {
             tracing::error!(invoice_id, event, error = %e, "Async payment webhook failed");
         }
     });
@@ -264,7 +297,10 @@ async fn scan_mempool(
 
     let new_txids: Vec<String> = {
         let seen_set = seen.read().await;
-        mempool_txids.into_iter().filter(|txid| !seen_set.contains_key(txid)).collect()
+        mempool_txids
+            .into_iter()
+            .filter(|txid| !seen_set.contains_key(txid))
+            .collect()
     };
 
     if new_txids.is_empty() {
@@ -282,7 +318,11 @@ async fn scan_mempool(
     }
 
     let raw_txs = mempool::fetch_raw_txs_batch(http, &config.cipherscan_api_url, &new_txids).await;
-    tracing::debug!(fetched = raw_txs.len(), total = new_txids.len(), "Batch fetched raw txs");
+    tracing::debug!(
+        fetched = raw_txs.len(),
+        total = new_txids.len(),
+        "Batch fetched raw txs"
+    );
 
     let invoice_index = matching::InvoiceIndex::build(&pending);
 
@@ -298,7 +338,8 @@ async fn scan_mempool(
                         tracing::debug!(txid, memo = %output.memo, amount = output.amount_zec, "Decrypted output details");
 
                         if let Some(invoice) = invoice_index.find(&recipient_hex, &output.memo) {
-                            let entry = invoice_totals.entry(invoice.id.clone())
+                            let entry = invoice_totals
+                                .entry(invoice.id.clone())
                                 .or_insert((invoice.clone(), 0));
                             entry.1 += output.amount_zatoshis as i64;
                         }
@@ -330,13 +371,31 @@ async fn scan_mempool(
                 let changed = invoices::mark_detected(pool, invoice_id, txid, new_received).await?;
                 if changed {
                     let overpaid = new_received > invoice.price_zatoshis + 1000;
-                    spawn_payment_webhook(pool, http, invoice_id, "detected", txid,
-                        invoice.price_zatoshis, new_received, overpaid, &config.encryption_key);
+                    spawn_payment_webhook(
+                        pool,
+                        http,
+                        invoice_id,
+                        "detected",
+                        txid,
+                        invoice.price_zatoshis,
+                        new_received,
+                        overpaid,
+                        &config.encryption_key,
+                    );
                 }
             } else if invoice.status == "pending" {
                 invoices::mark_underpaid(pool, invoice_id, new_received, txid).await?;
-                spawn_payment_webhook(pool, http, invoice_id, "underpaid", txid,
-                    invoice.price_zatoshis, new_received, false, &config.encryption_key);
+                spawn_payment_webhook(
+                    pool,
+                    http,
+                    invoice_id,
+                    "underpaid",
+                    txid,
+                    invoice.price_zatoshis,
+                    new_received,
+                    false,
+                    &config.encryption_key,
+                );
             }
         }
     }
@@ -380,7 +439,8 @@ async fn process_ws_mempool_tx(
                     );
 
                     if let Some(invoice) = invoice_index.find(&recipient_hex, &output.memo) {
-                        let entry = invoice_totals.entry(invoice.id.clone())
+                        let entry = invoice_totals
+                            .entry(invoice.id.clone())
                             .or_insert((invoice.clone(), 0));
                         entry.1 += output.amount_zatoshis as i64;
                     }
@@ -409,16 +469,35 @@ async fn process_ws_mempool_tx(
         let min = (invoice.price_zatoshis as f64 * decrypt::SLIPPAGE_TOLERANCE) as i64;
 
         if new_received >= min {
-            let changed = invoices::mark_detected(pool, invoice_id, &push.txid, new_received).await?;
+            let changed =
+                invoices::mark_detected(pool, invoice_id, &push.txid, new_received).await?;
             if changed {
                 let overpaid = new_received > invoice.price_zatoshis + 1000;
-                spawn_payment_webhook(pool, http, invoice_id, "detected", &push.txid,
-                    invoice.price_zatoshis, new_received, overpaid, &config.encryption_key);
+                spawn_payment_webhook(
+                    pool,
+                    http,
+                    invoice_id,
+                    "detected",
+                    &push.txid,
+                    invoice.price_zatoshis,
+                    new_received,
+                    overpaid,
+                    &config.encryption_key,
+                );
             }
         } else if invoice.status == "pending" {
             invoices::mark_underpaid(pool, invoice_id, new_received, &push.txid).await?;
-            spawn_payment_webhook(pool, http, invoice_id, "underpaid", &push.txid,
-                invoice.price_zatoshis, new_received, false, &config.encryption_key);
+            spawn_payment_webhook(
+                pool,
+                http,
+                invoice_id,
+                "underpaid",
+                &push.txid,
+                invoice.price_zatoshis,
+                new_received,
+                false,
+                &config.encryption_key,
+            );
         }
     }
 
@@ -441,17 +520,30 @@ async fn scan_blocks(
 
     // Confirm detected invoices (uses direct txid lookup, no block scanning)
     if !pending.is_empty() {
-        let detected: Vec<_> = pending.iter().filter(|i| i.status == "detected").cloned().collect();
+        let detected: Vec<_> = pending
+            .iter()
+            .filter(|i| i.status == "detected")
+            .cloned()
+            .collect();
         for invoice in &detected {
             if let Some(txid) = &invoice.detected_txid {
                 match blocks::check_tx_confirmed(http, &config.cipherscan_api_url, txid).await {
                     Ok(true) => {
                         let changed = invoices::mark_confirmed(pool, &invoice.id).await?;
                         if changed {
-                            let overpaid = invoice.received_zatoshis > invoice.price_zatoshis + 1000;
-                            spawn_payment_webhook(pool, http, &invoice.id, "confirmed", txid,
-                                invoice.price_zatoshis, invoice.received_zatoshis, overpaid,
-                                &config.encryption_key);
+                            let overpaid =
+                                invoice.received_zatoshis > invoice.price_zatoshis + 1000;
+                            spawn_payment_webhook(
+                                pool,
+                                http,
+                                &invoice.id,
+                                "confirmed",
+                                txid,
+                                invoice.price_zatoshis,
+                                invoice.received_zatoshis,
+                                overpaid,
+                                &config.encryption_key,
+                            );
                             on_invoice_confirmed(pool, http, config, invoice).await;
                         }
                     }
@@ -488,7 +580,9 @@ async fn scan_blocks(
 
         let merchants = crate::merchants::get_all_merchants(pool, &config.encryption_key).await?;
         let cached_keys = refresh_key_cache(key_cache, &merchants);
-        let block_txids = blocks::fetch_block_txids(http, &config.cipherscan_api_url, start_height, batch_end).await?;
+        let block_txids =
+            blocks::fetch_block_txids(http, &config.cipherscan_api_url, start_height, batch_end)
+                .await?;
 
         let block_invoice_index = matching::InvoiceIndex::build(&pending);
 
@@ -497,7 +591,8 @@ async fn scan_blocks(
                 continue;
             }
 
-            let raw_hex = match mempool::fetch_raw_tx(http, &config.cipherscan_api_url, txid).await {
+            let raw_hex = match mempool::fetch_raw_tx(http, &config.cipherscan_api_url, txid).await
+            {
                 Ok(hex) => hex,
                 Err(_) => continue,
             };
@@ -507,8 +602,11 @@ async fn scan_blocks(
                 if let Ok(outputs) = decrypt::try_decrypt_with_keys(&raw_hex, keys) {
                     for output in &outputs {
                         let recipient_hex = hex::encode(output.recipient_raw);
-                        if let Some(invoice) = block_invoice_index.find(&recipient_hex, &output.memo) {
-                            let entry = invoice_totals.entry(invoice.id.clone())
+                        if let Some(invoice) =
+                            block_invoice_index.find(&recipient_hex, &output.memo)
+                        {
+                            let entry = invoice_totals
+                                .entry(invoice.id.clone())
                                 .or_insert((invoice.clone(), 0));
                             entry.1 += output.amount_zatoshis as i64;
                         }
@@ -522,7 +620,12 @@ async fn scan_blocks(
                     decrypt::DUST_THRESHOLD_MIN_ZATOSHIS,
                 );
                 if *tx_total < dust_min && *tx_total < invoice.price_zatoshis {
-                    tracing::debug!(invoice_id, tx_total, dust_min, "Ignoring dust payment in block");
+                    tracing::debug!(
+                        invoice_id,
+                        tx_total,
+                        dust_min,
+                        "Ignoring dust payment in block"
+                    );
                     continue;
                 }
 
@@ -534,22 +637,43 @@ async fn scan_blocks(
 
                 let min = (invoice.price_zatoshis as f64 * decrypt::SLIPPAGE_TOLERANCE) as i64;
 
-                if new_received >= min && (invoice.status == "pending" || invoice.status == "underpaid") {
-                    let detected = invoices::mark_detected(pool, invoice_id, txid, new_received).await?;
+                if new_received >= min
+                    && (invoice.status == "pending" || invoice.status == "underpaid")
+                {
+                    let detected =
+                        invoices::mark_detected(pool, invoice_id, txid, new_received).await?;
                     if detected {
                         let confirmed = invoices::mark_confirmed(pool, invoice_id).await?;
                         if confirmed {
                             let overpaid = new_received > invoice.price_zatoshis + 1000;
-                            spawn_payment_webhook(pool, http, invoice_id, "confirmed", txid,
-                                invoice.price_zatoshis, new_received, overpaid, &config.encryption_key);
+                            spawn_payment_webhook(
+                                pool,
+                                http,
+                                invoice_id,
+                                "confirmed",
+                                txid,
+                                invoice.price_zatoshis,
+                                new_received,
+                                overpaid,
+                                &config.encryption_key,
+                            );
                             on_invoice_confirmed(pool, http, config, invoice).await;
                         }
                         try_detect_fee(pool, config, &raw_hex, invoice_id).await;
                     }
                 } else if new_received < min && invoice.status == "pending" {
                     invoices::mark_underpaid(pool, invoice_id, new_received, txid).await?;
-                    spawn_payment_webhook(pool, http, invoice_id, "underpaid", txid,
-                        invoice.price_zatoshis, new_received, false, &config.encryption_key);
+                    spawn_payment_webhook(
+                        pool,
+                        http,
+                        invoice_id,
+                        "underpaid",
+                        txid,
+                        invoice.price_zatoshis,
+                        new_received,
+                        false,
+                        &config.encryption_key,
+                    );
                 }
             }
 
@@ -559,7 +683,8 @@ async fn scan_blocks(
 
     // Always persist height progress — even when idle, keeps the scanner near chain tip
     *last_height.write().await = Some(batch_end);
-    if let Err(e) = crate::db::set_scanner_state(pool, "last_height", &batch_end.to_string()).await {
+    if let Err(e) = crate::db::set_scanner_state(pool, "last_height", &batch_end.to_string()).await
+    {
         tracing::warn!(error = %e, "Failed to persist last_height");
     }
     Ok(())
@@ -580,7 +705,7 @@ async fn on_invoice_confirmed(
             let amount_cents = (invoice.amount.unwrap_or(invoice.price_eur) * 100.0) as i64;
             // Atomic: set campaign_counted=1 only if still 0 (belt-and-suspenders idempotency)
             let marked = sqlx::query(
-                "UPDATE invoices SET campaign_counted = 1 WHERE id = ? AND campaign_counted = 0"
+                "UPDATE invoices SET campaign_counted = 1 WHERE id = ? AND campaign_counted = 0",
             )
             .bind(&invoice.id)
             .execute(pool)
@@ -588,7 +713,9 @@ async fn on_invoice_confirmed(
 
             if let Ok(r) = marked {
                 if r.rows_affected() > 0 {
-                    if let Err(e) = crate::payment_links::increment_raised(pool, link_id, amount_cents).await {
+                    if let Err(e) =
+                        crate::payment_links::increment_raised(pool, link_id, amount_cents).await
+                    {
                         tracing::error!(invoice_id = %invoice.id, error = %e, "Failed to increment campaign total_raised");
                     }
                 }
@@ -616,10 +743,14 @@ async fn on_invoice_confirmed(
                 if let Some(luma_eid) = luma_event_id {
                     // Luma path: register guest on Luma, skip create_ticket
                     handle_luma_registration(
-                        pool, http, config, invoice,
+                        pool,
+                        http,
+                        config,
+                        invoice,
                         luma_eid,
                         luma_info.as_ref().and_then(|r| r.1.as_deref()),
-                    ).await;
+                    )
+                    .await;
                 } else {
                     // Private event path: create CipherPay ticket
                     match crate::tickets::create_ticket(
@@ -628,12 +759,15 @@ async fn on_invoice_confirmed(
                         product_id,
                         invoice.price_id.as_deref(),
                         &invoice.merchant_id,
-                    ).await {
+                    )
+                    .await
+                    {
                         Ok(Some(ticket)) => {
-                            let event_ctx = crate::events::get_event_context_by_product(pool, product_id)
-                                .await
-                                .ok()
-                                .flatten();
+                            let event_ctx =
+                                crate::events::get_event_context_by_product(pool, product_id)
+                                    .await
+                                    .ok()
+                                    .flatten();
                             let payload = serde_json::json!({
                                 "invoice_id": invoice.id,
                                 "ticket_id": ticket.id,
@@ -651,8 +785,15 @@ async fn on_invoice_confirmed(
                             let inv_id = invoice.id.clone();
                             tokio::spawn(async move {
                                 if let Err(e) = webhooks::dispatch_event(
-                                    &pool, &http, &merchant_id, "ticket.created", payload, &enc_key,
-                                ).await {
+                                    &pool,
+                                    &http,
+                                    &merchant_id,
+                                    "ticket.created",
+                                    payload,
+                                    &enc_key,
+                                )
+                                .await
+                                {
                                     tracing::error!(invoice_id = %inv_id, error = %e, "Failed to dispatch ticket.created webhook");
                                 }
                             });
@@ -706,7 +847,9 @@ async fn on_invoice_confirmed(
         tracing::error!(error = %e, "Failed to ensure billing cycle");
     }
 
-    if let Err(e) = billing::create_fee_entry(pool, &invoice.id, &invoice.merchant_id, fee_amount).await {
+    if let Err(e) =
+        billing::create_fee_entry(pool, &invoice.id, &invoice.merchant_id, fee_amount).await
+    {
         tracing::error!(error = %e, "Failed to create fee entry");
     }
 }
@@ -722,14 +865,13 @@ async fn handle_luma_registration(
     luma_ticket_type_id: Option<&str>,
 ) {
     // Idempotency: skip if already registered
-    let current_status: Option<String> = sqlx::query_scalar(
-        "SELECT luma_registration_status FROM invoices WHERE id = ?"
-    )
-    .bind(&invoice.id)
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten();
+    let current_status: Option<String> =
+        sqlx::query_scalar("SELECT luma_registration_status FROM invoices WHERE id = ?")
+            .bind(&invoice.id)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten();
 
     if current_status.as_deref() == Some("registered") {
         tracing::debug!(invoice_id = %invoice.id, "Luma registration already complete, skipping");
@@ -738,13 +880,12 @@ async fn handle_luma_registration(
 
     let enc_key = &config.encryption_key;
 
-    let row: Option<(Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT attendee_name, attendee_email FROM invoices WHERE id = ?",
-    )
-    .bind(&invoice.id)
-    .fetch_optional(pool)
-    .await
-    .unwrap_or(None);
+    let row: Option<(Option<String>, Option<String>)> =
+        sqlx::query_as("SELECT attendee_name, attendee_email FROM invoices WHERE id = ?")
+            .bind(&invoice.id)
+            .fetch_optional(pool)
+            .await
+            .unwrap_or(None);
 
     let (enc_name, enc_email) = match row {
         Some(r) => r,
@@ -756,7 +897,9 @@ async fn handle_luma_registration(
 
     let email = match enc_email {
         Some(ref e) if !e.is_empty() => {
-            if enc_key.is_empty() { e.clone() } else {
+            if enc_key.is_empty() {
+                e.clone()
+            } else {
                 match crate::crypto::decrypt(e, enc_key) {
                     Ok(d) => d,
                     Err(err) => {
@@ -778,26 +921,31 @@ async fn handle_luma_registration(
         .as_ref()
         .filter(|n| !n.is_empty())
         .map(|n| {
-            if enc_key.is_empty() { Ok(n.clone()) } else { crate::crypto::decrypt(n, enc_key) }
+            if enc_key.is_empty() {
+                Ok(n.clone())
+            } else {
+                crate::crypto::decrypt(n, enc_key)
+            }
         })
         .transpose()
         .ok()
         .flatten();
 
     // Decrypt merchant's Luma API key
-    let api_key: Option<String> = sqlx::query_scalar(
-        "SELECT luma_api_key FROM merchants WHERE id = ?",
-    )
-    .bind(&invoice.merchant_id)
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten()
-    .flatten();
+    let api_key: Option<String> =
+        sqlx::query_scalar("SELECT luma_api_key FROM merchants WHERE id = ?")
+            .bind(&invoice.merchant_id)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten()
+            .flatten();
 
     let api_key = match api_key {
         Some(k) if !k.is_empty() => {
-            if enc_key.is_empty() { k } else {
+            if enc_key.is_empty() {
+                k
+            } else {
                 match crate::crypto::decrypt(&k, enc_key) {
                     Ok(d) => d,
                     Err(err) => {
@@ -816,7 +964,16 @@ async fn handle_luma_registration(
     };
 
     // Call Luma add_guest
-    match crate::luma::add_guest(http, &api_key, luma_event_id, &email, name.as_deref(), luma_ticket_type_id).await {
+    match crate::luma::add_guest(
+        http,
+        &api_key,
+        luma_event_id,
+        &email,
+        name.as_deref(),
+        luma_ticket_type_id,
+    )
+    .await
+    {
         Ok(resp) => {
             tracing::info!(
                 invoice_id = %invoice.id,
@@ -876,8 +1033,15 @@ async fn handle_luma_registration(
     let inv_id = invoice.id.clone();
     tokio::spawn(async move {
         if let Err(e) = webhooks::dispatch_event(
-            &pool, &http, &merchant_id, "luma.registered", payload, &enc_key,
-        ).await {
+            &pool,
+            &http,
+            &merchant_id,
+            "luma.registered",
+            payload,
+            &enc_key,
+        )
+        .await
+        {
             tracing::error!(invoice_id = %inv_id, error = %e, "Failed to dispatch luma.registered webhook");
         }
     });
@@ -885,30 +1049,33 @@ async fn handle_luma_registration(
 
 fn is_transient_luma_error(err: &str) -> bool {
     let lower = err.to_lowercase();
-    lower.contains("timeout") ||
-    lower.contains("timed out") ||
-    lower.contains("connection") ||
-    lower.contains("429") ||
-    lower.contains("500") ||
-    lower.contains("502") ||
-    lower.contains("503") ||
-    lower.contains("504")
+    lower.contains("timeout")
+        || lower.contains("timed out")
+        || lower.contains("connection")
+        || lower.contains("429")
+        || lower.contains("500")
+        || lower.contains("502")
+        || lower.contains("503")
+        || lower.contains("504")
 }
 
 const MAX_LUMA_RETRIES: i64 = 5;
 
 async fn schedule_luma_retry(pool: &SqlitePool, invoice_id: &str) {
-    let retry_count: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(luma_retry_count, 0) FROM invoices WHERE id = ?"
-    )
-    .bind(invoice_id)
-    .fetch_one(pool)
-    .await
-    .unwrap_or(0);
+    let retry_count: i64 =
+        sqlx::query_scalar("SELECT COALESCE(luma_retry_count, 0) FROM invoices WHERE id = ?")
+            .bind(invoice_id)
+            .fetch_one(pool)
+            .await
+            .unwrap_or(0);
 
     let new_count = retry_count + 1;
     if new_count > MAX_LUMA_RETRIES {
-        tracing::error!(invoice_id, retries = new_count, "Luma registration exceeded max retries, marking failed");
+        tracing::error!(
+            invoice_id,
+            retries = new_count,
+            "Luma registration exceeded max retries, marking failed"
+        );
         mark_luma_failed(pool, invoice_id).await;
         return;
     }
@@ -944,7 +1111,7 @@ async fn retry_due_luma_registrations(config: &Config, pool: &SqlitePool, http: 
          WHERE i.luma_registration_status = 'retry'
          AND i.luma_retry_at IS NOT NULL
          AND i.luma_retry_at <= ?
-         AND i.status IN ('detected', 'confirmed')"
+         AND i.status IN ('detected', 'confirmed')",
     )
     .bind(&now)
     .fetch_all(pool)
@@ -955,7 +1122,10 @@ async fn retry_due_luma_registrations(config: &Config, pool: &SqlitePool, http: 
         return;
     }
 
-    tracing::info!(count = rows.len(), "Processing due Luma registration retries");
+    tracing::info!(
+        count = rows.len(),
+        "Processing due Luma registration retries"
+    );
 
     for (invoice_id, product_id, price_id) in rows {
         let product_id = match product_id {
@@ -984,10 +1154,14 @@ async fn retry_due_luma_registrations(config: &Config, pool: &SqlitePool, http: 
         if let Some(luma_eid) = luma_event_id {
             tracing::info!(invoice_id = %invoice.id, attempt = "retry", "Retrying Luma registration");
             handle_luma_registration(
-                pool, http, config, &invoice,
+                pool,
+                http,
+                config,
+                &invoice,
                 luma_eid,
                 luma_info.as_ref().and_then(|r| r.1.as_deref()),
-            ).await;
+            )
+            .await;
         }
     }
 }

@@ -61,10 +61,7 @@ impl CircuitBreaker {
 }
 
 /// Gets the current chain tip height from CipherScan API.
-pub async fn get_chain_height(
-    http: &reqwest::Client,
-    api_url: &str,
-) -> anyhow::Result<u64> {
+pub async fn get_chain_height(http: &reqwest::Client, api_url: &str) -> anyhow::Result<u64> {
     let url = format!("{}/api/blockchain-info", api_url);
     let resp: BlockchainInfoResponse = http.get(&url).send().await?.json().await?;
 
@@ -78,22 +75,21 @@ async fn fetch_single_block_txids(
     http: &reqwest::Client,
     api_url: &str,
     height: u64,
-) -> Vec<String> {
+) -> anyhow::Result<Vec<String>> {
     let url = format!("{}/api/block/{}", api_url, height);
-    let resp: serde_json::Value = match http.get(&url).send().await {
-        Ok(r) => match r.json().await {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(height, error = %e, "Failed to parse block response");
-                return Vec::new();
-            }
-        },
-        Err(e) => {
-            tracing::warn!(height, error = %e, "Failed to fetch block");
-            return Vec::new();
-        }
-    };
+    let resp: serde_json::Value = http
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to fetch block {}: {}", height, e))?
+        .json()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to parse block {} response: {}", height, e))?;
 
+    extract_block_txids(&resp, height)
+}
+
+fn extract_block_txids(resp: &serde_json::Value, height: u64) -> anyhow::Result<Vec<String>> {
     let mut txids = Vec::new();
     if let Some(txs) = resp["transactions"].as_array() {
         for tx in txs {
@@ -107,8 +103,13 @@ async fn fetch_single_block_txids(
                 txids.push(txid.to_string());
             }
         }
+    } else {
+        return Err(anyhow::anyhow!(
+            "Block {} response missing transaction list",
+            height
+        ));
     }
-    txids
+    Ok(txids)
 }
 
 const BLOCK_FETCH_BATCH_SIZE: usize = 10;
@@ -124,12 +125,13 @@ pub async fn fetch_block_txids(
     let mut all_txids = Vec::new();
 
     for chunk in heights.chunks(BLOCK_FETCH_BATCH_SIZE) {
-        let futures: Vec<_> = chunk.iter()
+        let futures: Vec<_> = chunk
+            .iter()
             .map(|&h| fetch_single_block_txids(http, api_url, h))
             .collect();
         let results = futures::future::join_all(futures).await;
         for txids in results {
-            all_txids.extend(txids);
+            all_txids.extend(txids?);
         }
     }
 
@@ -150,4 +152,32 @@ pub async fn check_tx_confirmed(
         || resp["confirmations"].as_u64().map_or(false, |c| c >= 1);
 
     Ok(confirmed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_block_txids;
+
+    #[test]
+    fn extracts_txids_from_transactions_shape() {
+        let resp = serde_json::json!({
+            "transactions": [
+                {"txid": "abc"},
+                {"txid": "def"}
+            ]
+        });
+
+        let txids = extract_block_txids(&resp, 100).unwrap();
+        assert_eq!(txids, vec!["abc".to_string(), "def".to_string()]);
+    }
+
+    #[test]
+    fn errors_when_transaction_list_missing() {
+        let resp = serde_json::json!({
+            "height": 100
+        });
+
+        let err = extract_block_txids(&resp, 100).unwrap_err();
+        assert!(err.to_string().contains("missing transaction list"));
+    }
 }

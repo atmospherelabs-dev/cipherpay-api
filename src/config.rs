@@ -35,8 +35,7 @@ pub struct Config {
 impl Config {
     pub fn from_env() -> anyhow::Result<Self> {
         Ok(Self {
-            database_url: env::var("DATABASE_URL")
-                .unwrap_or_else(|_| "sqlite:cipherpay.db".into()),
+            database_url: env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:cipherpay.db".into()),
             cipherscan_api_url: env::var("CIPHERSCAN_API_URL")
                 .unwrap_or_else(|_| "https://api.testnet.cipherscan.app".into()),
             network: env::var("NETWORK").unwrap_or_else(|_| "testnet".into()),
@@ -86,7 +85,9 @@ impl Config {
                 .unwrap_or_else(|_| "30".into())
                 .parse()?,
             admin_key: env::var("ADMIN_KEY").ok().filter(|s| !s.is_empty()),
-            cipherscan_service_key: env::var("CIPHERSCAN_SERVICE_KEY").ok().filter(|s| !s.is_empty()),
+            cipherscan_service_key: env::var("CIPHERSCAN_SERVICE_KEY")
+                .ok()
+                .filter(|s| !s.is_empty()),
         })
     }
 

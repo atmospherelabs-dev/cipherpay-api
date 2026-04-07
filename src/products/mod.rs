@@ -67,7 +67,10 @@ pub async fn create_product(
 
     let slug = match &req.slug {
         Some(s) if !s.is_empty() => {
-            if !s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+            if !s
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            {
                 anyhow::bail!("slug must only contain letters, numbers, underscores, hyphens");
             }
             s.clone()
@@ -81,7 +84,10 @@ pub async fn create_product(
     }
 
     let id = Uuid::new_v4().to_string();
-    let metadata_json = req.metadata.as_ref().map(|m| serde_json::to_string(m).unwrap_or_default());
+    let metadata_json = req
+        .metadata
+        .as_ref()
+        .map(|m| serde_json::to_string(m).unwrap_or_default());
 
     sqlx::query(
         "INSERT INTO products (id, merchant_id, slug, name, description, default_price_id, metadata)
@@ -175,9 +181,17 @@ pub async fn update_product(
 
     let name = req.name.as_deref().unwrap_or(&existing.name);
     let description = req.description.as_ref().or(existing.description.as_ref());
-    let default_price_id = req.default_price_id.as_ref().or(existing.default_price_id.as_ref());
-    let active = req.active.map(|a| if a { 1 } else { 0 }).unwrap_or(existing.active);
-    let metadata_json = req.metadata.as_ref()
+    let default_price_id = req
+        .default_price_id
+        .as_ref()
+        .or(existing.default_price_id.as_ref());
+    let active = req
+        .active
+        .map(|a| if a { 1 } else { 0 })
+        .unwrap_or(existing.active);
+    let metadata_json = req
+        .metadata
+        .as_ref()
         .map(|m| serde_json::to_string(m).unwrap_or_default())
         .or(existing.metadata);
 
@@ -185,7 +199,9 @@ pub async fn update_product(
         let price = crate::prices::get_price(pool, price_id).await?;
         match price {
             Some(p) if p.product_id == id && p.active == 1 => {}
-            Some(_) => anyhow::bail!("default_price_id must reference an active price belonging to this product"),
+            Some(_) => anyhow::bail!(
+                "default_price_id must reference an active price belonging to this product"
+            ),
             None => anyhow::bail!("default_price_id references a non-existent price"),
         }
     }
@@ -221,12 +237,11 @@ pub async fn delete_product(
         None => return Ok(DeleteOutcome::NotFound),
     };
 
-    let invoice_count: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM invoices WHERE product_id = ?"
-    )
-    .bind(id)
-    .fetch_one(pool)
-    .await?;
+    let invoice_count: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM invoices WHERE product_id = ?")
+            .bind(id)
+            .fetch_one(pool)
+            .await?;
 
     if invoice_count.0 == 0 {
         sqlx::query("DELETE FROM prices WHERE product_id = ?")

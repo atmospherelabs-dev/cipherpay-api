@@ -1,7 +1,7 @@
-use std::sync::Arc;
-use tokio::sync::RwLock;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ZecRates {
@@ -75,7 +75,13 @@ impl PriceService {
             Ok(rates) => {
                 let mut cache = self.cached.write().await;
                 *cache = Some(rates.clone());
-                tracing::info!(zec_eur = rates.zec_eur, zec_usd = rates.zec_usd, zec_brl = rates.zec_brl, zec_gbp = rates.zec_gbp, "Price feed updated");
+                tracing::info!(
+                    zec_eur = rates.zec_eur,
+                    zec_usd = rates.zec_usd,
+                    zec_brl = rates.zec_brl,
+                    zec_gbp = rates.zec_gbp,
+                    "Price feed updated"
+                );
                 Ok(rates)
             }
             Err(e) => {
@@ -96,7 +102,8 @@ impl PriceService {
             self.api_url
         );
 
-        let response = self.http
+        let response = self
+            .http
             .get(&url)
             .timeout(std::time::Duration::from_secs(10))
             .send()
@@ -105,15 +112,21 @@ impl PriceService {
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            anyhow::bail!("CoinGecko returned HTTP {}: {}", status, &body[..body.len().min(200)]);
+            anyhow::bail!(
+                "CoinGecko returned HTTP {}: {}",
+                status,
+                &body[..body.len().min(200)]
+            );
         }
 
         let resp: serde_json::Value = response.json().await?;
         let zec = &resp["zcash"];
 
-        let zec_eur = zec["eur"].as_f64()
+        let zec_eur = zec["eur"]
+            .as_f64()
             .ok_or_else(|| anyhow::anyhow!("Missing ZEC/EUR rate in response: {}", resp))?;
-        let zec_usd = zec["usd"].as_f64()
+        let zec_usd = zec["usd"]
+            .as_f64()
             .ok_or_else(|| anyhow::anyhow!("Missing ZEC/USD rate in response: {}", resp))?;
 
         Ok(ZecRates {

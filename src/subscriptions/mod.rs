@@ -1,7 +1,7 @@
+use chrono::{Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, SqlitePool};
 use uuid::Uuid;
-use chrono::{Utc, Duration as ChronoDuration};
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct Subscription {
@@ -26,7 +26,11 @@ pub struct CreateSubscriptionRequest {
 
 const SUB_COLS: &str = "id, merchant_id, price_id, label, status, current_period_start, current_period_end, cancel_at_period_end, canceled_at, created_at, current_invoice_id";
 
-fn compute_period_end(start: &chrono::DateTime<Utc>, interval: &str, count: i32) -> chrono::DateTime<Utc> {
+fn compute_period_end(
+    start: &chrono::DateTime<Utc>,
+    interval: &str,
+    count: i32,
+) -> chrono::DateTime<Utc> {
     match interval {
         "day" => *start + ChronoDuration::days(count as i64),
         "week" => *start + ChronoDuration::weeks(count as i64),
@@ -41,7 +45,8 @@ pub async fn create_subscription(
     merchant_id: &str,
     req: &CreateSubscriptionRequest,
 ) -> anyhow::Result<Subscription> {
-    let price = crate::prices::get_price(pool, &req.price_id).await?
+    let price = crate::prices::get_price(pool, &req.price_id)
+        .await?
         .ok_or_else(|| anyhow::anyhow!("Price not found"))?;
 
     if price.price_type != "recurring" {
@@ -64,7 +69,8 @@ pub async fn create_subscription(
     let now = Utc::now();
     let period_start = now.format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let period_end = compute_period_end(&now, interval, count)
-        .format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
 
     let id = format!("sub_{}", Uuid::new_v4().to_string().replace('-', ""));
 
@@ -83,7 +89,8 @@ pub async fn create_subscription(
 
     tracing::info!(sub_id = %id, price_id = %req.price_id, "Subscription created");
 
-    get_subscription(pool, &id).await?
+    get_subscription(pool, &id)
+        .await?
         .ok_or_else(|| anyhow::anyhow!("Subscription not found after insert"))
 }
 
@@ -96,8 +103,14 @@ pub async fn get_subscription(pool: &SqlitePool, id: &str) -> anyhow::Result<Opt
     Ok(row)
 }
 
-pub async fn list_subscriptions(pool: &SqlitePool, merchant_id: &str) -> anyhow::Result<Vec<Subscription>> {
-    let q = format!("SELECT {} FROM subscriptions WHERE merchant_id = ? ORDER BY created_at DESC", SUB_COLS);
+pub async fn list_subscriptions(
+    pool: &SqlitePool,
+    merchant_id: &str,
+) -> anyhow::Result<Vec<Subscription>> {
+    let q = format!(
+        "SELECT {} FROM subscriptions WHERE merchant_id = ? ORDER BY created_at DESC",
+        SUB_COLS
+    );
     let rows = sqlx::query_as::<_, Subscription>(&q)
         .bind(merchant_id)
         .fetch_all(pool)
@@ -124,11 +137,13 @@ pub async fn cancel_subscription(
     let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
     if at_period_end {
-        sqlx::query("UPDATE subscriptions SET cancel_at_period_end = 1, canceled_at = ? WHERE id = ?")
-            .bind(&now)
-            .bind(sub_id)
-            .execute(pool)
-            .await?;
+        sqlx::query(
+            "UPDATE subscriptions SET cancel_at_period_end = 1, canceled_at = ? WHERE id = ?",
+        )
+        .bind(&now)
+        .bind(sub_id)
+        .execute(pool)
+        .await?;
     } else {
         sqlx::query("UPDATE subscriptions SET status = 'canceled', canceled_at = ? WHERE id = ?")
             .bind(&now)
@@ -162,36 +177,47 @@ pub async fn process_renewals(
     // 1. Cancel subscriptions marked for end-of-period cancellation
     let canceled = sqlx::query(
         "UPDATE subscriptions SET status = 'canceled'
-         WHERE cancel_at_period_end = 1 AND current_period_end <= ? AND status = 'active'"
+         WHERE cancel_at_period_end = 1 AND current_period_end <= ? AND status = 'active'",
     )
     .bind(&now_str)
     .execute(pool)
     .await?;
 
     if canceled.rows_affected() > 0 {
-        tracing::info!(count = canceled.rows_affected(), "Subscriptions canceled at period end");
+        tracing::info!(
+            count = canceled.rows_affected(),
+            "Subscriptions canceled at period end"
+        );
         // Fire webhooks for canceled subscriptions
         let q = format!(
             "SELECT {} FROM subscriptions WHERE status = 'canceled' AND cancel_at_period_end = 1",
             SUB_COLS
         );
         let canceled_subs: Vec<Subscription> = sqlx::query_as::<_, Subscription>(&q)
-            .fetch_all(pool).await?;
+            .fetch_all(pool)
+            .await?;
         for sub in &canceled_subs {
             let payload = serde_json::json!({
                 "subscription_id": sub.id,
                 "price_id": sub.price_id,
             });
             let _ = crate::webhooks::dispatch_event(
-                pool, http, &sub.merchant_id, "subscription.canceled", payload, encryption_key,
-            ).await;
+                pool,
+                http,
+                &sub.merchant_id,
+                "subscription.canceled",
+                payload,
+                encryption_key,
+            )
+            .await;
         }
         actions += canceled.rows_affected() as u32;
     }
 
     // 2. Generate draft invoices for active subscriptions approaching period end
     let notice_threshold = (Utc::now() + ChronoDuration::days(RENEWAL_NOTICE_DAYS))
-        .format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
 
     let q = format!(
         "SELECT {} FROM subscriptions WHERE status = 'active' AND current_period_end <= ? AND cancel_at_period_end = 0",
@@ -206,11 +232,18 @@ pub async fn process_renewals(
         // Check if a draft/pending invoice already exists for this period
         if let Some(ref inv_id) = sub.current_invoice_id {
             if !inv_id.is_empty() {
-                let existing: Option<(String,)> = sqlx::query_as(
-                    "SELECT status FROM invoices WHERE id = ?"
-                ).bind(inv_id).fetch_optional(pool).await?;
+                let existing: Option<(String,)> =
+                    sqlx::query_as("SELECT status FROM invoices WHERE id = ?")
+                        .bind(inv_id)
+                        .fetch_optional(pool)
+                        .await?;
                 match existing {
-                    Some((ref status,)) if status == "draft" || status == "pending" || status == "underpaid" || status == "detected" => {
+                    Some((ref status,))
+                        if status == "draft"
+                            || status == "pending"
+                            || status == "underpaid"
+                            || status == "detected" =>
+                    {
                         continue; // invoice already in progress
                     }
                     Some((ref status,)) if status == "confirmed" => {
@@ -226,7 +259,9 @@ pub async fn process_renewals(
             _ => {
                 tracing::warn!(sub_id = %sub.id, "Subscription price inactive, marking past_due");
                 sqlx::query("UPDATE subscriptions SET status = 'past_due' WHERE id = ?")
-                    .bind(&sub.id).execute(pool).await?;
+                    .bind(&sub.id)
+                    .execute(pool)
+                    .await?;
                 actions += 1;
                 continue;
             }
@@ -254,7 +289,9 @@ pub async fn process_renewals(
             Some(&price.id),
             &sub.current_period_end,
             fee_config,
-        ).await {
+        )
+        .await
+        {
             Ok(invoice) => {
                 sqlx::query("UPDATE subscriptions SET current_invoice_id = ? WHERE id = ?")
                     .bind(&invoice.id)
@@ -270,8 +307,14 @@ pub async fn process_renewals(
                     "due_date": sub.current_period_end,
                 });
                 let _ = crate::webhooks::dispatch_event(
-                    pool, http, &sub.merchant_id, "invoice.created", payload, encryption_key,
-                ).await;
+                    pool,
+                    http,
+                    &sub.merchant_id,
+                    "invoice.created",
+                    payload,
+                    encryption_key,
+                )
+                .await;
 
                 tracing::info!(sub_id = %sub.id, invoice_id = %invoice.id, "Draft invoice generated for subscription");
                 actions += 1;
@@ -295,9 +338,11 @@ pub async fn process_renewals(
     for sub in &past_due_candidates {
         if let Some(ref inv_id) = sub.current_invoice_id {
             if !inv_id.is_empty() {
-                let inv_status: Option<(String,)> = sqlx::query_as(
-                    "SELECT status FROM invoices WHERE id = ?"
-                ).bind(inv_id).fetch_optional(pool).await?;
+                let inv_status: Option<(String,)> =
+                    sqlx::query_as("SELECT status FROM invoices WHERE id = ?")
+                        .bind(inv_id)
+                        .fetch_optional(pool)
+                        .await?;
 
                 if let Some((ref status,)) = inv_status {
                     if status == "confirmed" {
@@ -308,8 +353,14 @@ pub async fn process_renewals(
                                 "new_period_end": new_sub.current_period_end,
                             });
                             let _ = crate::webhooks::dispatch_event(
-                                pool, http, &sub.merchant_id, "subscription.renewed", payload, encryption_key,
-                            ).await;
+                                pool,
+                                http,
+                                &sub.merchant_id,
+                                "subscription.renewed",
+                                payload,
+                                encryption_key,
+                            )
+                            .await;
                             actions += 1;
                         }
                         continue;
@@ -320,18 +371,22 @@ pub async fn process_renewals(
 
         // 4. Period ended without confirmed payment → past_due
         tracing::info!(sub_id = %sub.id, "Subscription past due (period ended without payment)");
-        sqlx::query("UPDATE subscriptions SET status = 'past_due' WHERE id = ? AND status = 'active'")
-            .bind(&sub.id)
-            .execute(pool)
-            .await?;
+        sqlx::query(
+            "UPDATE subscriptions SET status = 'past_due' WHERE id = ? AND status = 'active'",
+        )
+        .bind(&sub.id)
+        .execute(pool)
+        .await?;
 
         // Expire the draft invoice if it exists
         if let Some(ref inv_id) = sub.current_invoice_id {
             if !inv_id.is_empty() {
-                sqlx::query("UPDATE invoices SET status = 'expired' WHERE id = ? AND status = 'draft'")
-                    .bind(inv_id)
-                    .execute(pool)
-                    .await?;
+                sqlx::query(
+                    "UPDATE invoices SET status = 'expired' WHERE id = ? AND status = 'draft'",
+                )
+                .bind(inv_id)
+                .execute(pool)
+                .await?;
             }
         }
 
@@ -340,8 +395,14 @@ pub async fn process_renewals(
             "price_id": sub.price_id,
         });
         let _ = crate::webhooks::dispatch_event(
-            pool, http, &sub.merchant_id, "subscription.past_due", payload, encryption_key,
-        ).await;
+            pool,
+            http,
+            &sub.merchant_id,
+            "subscription.past_due",
+            payload,
+            encryption_key,
+        )
+        .await;
         actions += 1;
     }
 
@@ -375,7 +436,8 @@ pub async fn advance_subscription_period(
     let now_dt = Utc::now();
     let new_start = now_dt.format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let new_end = compute_period_end(&now_dt, interval, count)
-        .format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
 
     sqlx::query(
         "UPDATE subscriptions SET current_period_start = ?, current_period_end = ?, current_invoice_id = NULL

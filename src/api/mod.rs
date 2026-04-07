@@ -50,16 +50,25 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                     .route("/me", web::get().to(auth::me))
                     .route("/me", web::patch().to(auth::update_me))
                     .route("/me/invoices", web::get().to(auth::my_invoices))
-                    .route("/me/regenerate-api-key", web::post().to(auth::regenerate_api_key))
-                    .route("/me/regenerate-dashboard-token", web::post().to(auth::regenerate_dashboard_token))
-                    .route("/me/regenerate-webhook-secret", web::post().to(auth::regenerate_webhook_secret))
+                    .route(
+                        "/me/regenerate-api-key",
+                        web::post().to(auth::regenerate_api_key),
+                    )
+                    .route(
+                        "/me/regenerate-dashboard-token",
+                        web::post().to(auth::regenerate_dashboard_token),
+                    )
+                    .route(
+                        "/me/regenerate-webhook-secret",
+                        web::post().to(auth::regenerate_webhook_secret),
+                    )
                     .route("/me/billing", web::get().to(billing_summary))
                     .route("/me/billing/history", web::get().to(billing_history))
                     .route("/me/billing/settle", web::post().to(billing_settle))
                     .route("/me/delete", web::post().to(delete_account))
                     .route("/me/webhooks", web::get().to(auth::my_webhooks))
                     .route("/me/x402/history", web::get().to(x402::history))
-                    .route("/me/sessions", web::get().to(sessions::history))
+                    .route("/me/sessions", web::get().to(sessions::history)),
             )
             .service(
                 web::scope("/auth")
@@ -67,7 +76,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                     .route("/session", web::post().to(auth::create_session))
                     .route("/logout", web::post().to(auth::logout))
                     .route("/recover", web::post().to(auth::recover))
-                    .route("/recover/confirm", web::post().to(auth::recover_confirm))
+                    .route("/recover/confirm", web::post().to(auth::recover_confirm)),
             )
             // Product endpoints (dashboard auth)
             .route("/products", web::post().to(products::create))
@@ -90,32 +99,64 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             // Subscription endpoints
             .route("/subscriptions", web::post().to(subscriptions::create))
             .route("/subscriptions", web::get().to(subscriptions::list))
-            .route("/subscriptions/{id}/cancel", web::post().to(subscriptions::cancel))
+            .route(
+                "/subscriptions/{id}/cancel",
+                web::post().to(subscriptions::cancel),
+            )
             // Payment links (merchant auth)
             .route("/payment-links", web::post().to(payment_links::create))
             .route("/payment-links", web::get().to(payment_links::list))
-            .route("/payment-links/{id}", web::patch().to(payment_links::update))
-            .route("/payment-links/{id}", web::delete().to(payment_links::delete))
-            .route("/payment-links/{slug}/checkout", web::post().to(payment_links::resolve).wrap(Governor::new(&session_rate_limit)))
-            .route("/payment-links/{slug}/info", web::get().to(payment_links::info).wrap(Governor::new(&public_read_limit)))
+            .route(
+                "/payment-links/{id}",
+                web::patch().to(payment_links::update),
+            )
+            .route(
+                "/payment-links/{id}",
+                web::delete().to(payment_links::delete),
+            )
+            .route(
+                "/payment-links/{slug}/checkout",
+                web::post().to(payment_links::resolve),
+            )
+            .route(
+                "/payment-links/{slug}/info",
+                web::get()
+                    .to(payment_links::info)
+                    .wrap(Governor::new(&public_read_limit)),
+            )
             // Donation links (merchant auth)
-            .route("/donation-links", web::post().to(payment_links::create_donation))
+            .route(
+                "/donation-links",
+                web::post().to(payment_links::create_donation),
+            )
             // Buyer checkout (public)
             .route("/checkout", web::post().to(checkout))
             // Invoice endpoints (API key auth)
             .route("/invoices", web::post().to(invoices::create))
             .route("/invoices", web::get().to(list_invoices))
-            .route("/invoices/lookup/{memo_code}", web::get().to(lookup_by_memo))
+            .route(
+                "/invoices/lookup/{memo_code}",
+                web::get().to(lookup_by_memo),
+            )
             .route("/invoices/{id}", web::get().to(invoices::get))
             .route("/invoices/{id}/status", web::get().to(status::get))
             .route("/invoices/{id}/stream", web::get().to(invoice_stream))
-            .route("/invoices/{id}/finalize", web::post().to(invoices::finalize))
+            .route(
+                "/invoices/{id}/finalize",
+                web::post().to(invoices::finalize),
+            )
             .route("/invoices/{id}/cancel", web::post().to(cancel_invoice))
             .route("/invoices/{id}/refund", web::post().to(refund_invoice))
-            .route("/invoices/{id}/refund-address", web::patch().to(update_refund_address))
+            .route(
+                "/invoices/{id}/refund-address",
+                web::patch().to(update_refund_address),
+            )
             .route("/invoices/{id}/qr", web::get().to(qr_code))
             // Ticket endpoints
-            .route("/tickets/invoice/{invoice_id}", web::get().to(tickets::by_invoice))
+            .route(
+                "/tickets/invoice/{invoice_id}",
+                web::get().to(tickets::by_invoice),
+            )
             .route("/tickets/scan", web::post().to(tickets::scan))
             .route("/tickets", web::get().to(tickets::list))
             .route("/tickets/{id}/void", web::post().to(tickets::void))
@@ -130,12 +171,22 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             // Session endpoints (agentic prepaid credit)
             .service(
                 web::scope("/sessions")
-                    .route("/prepare", web::post().to(sessions::prepare).wrap(Governor::new(&session_rate_limit)))
-                    .route("/open", web::post().to(sessions::open).wrap(Governor::new(&session_rate_limit)))
+                    .route(
+                        "/prepare",
+                        web::post()
+                            .to(sessions::prepare)
+                            .wrap(Governor::new(&session_rate_limit)),
+                    )
+                    .route(
+                        "/open",
+                        web::post()
+                            .to(sessions::open)
+                            .wrap(Governor::new(&session_rate_limit)),
+                    )
                     .route("/validate", web::get().to(sessions::validate))
                     .route("/deduct", web::post().to(sessions::deduct))
                     .route("/{id}", web::get().to(sessions::get_status))
-                    .route("/{id}/close", web::post().to(sessions::close))
+                    .route("/{id}/close", web::post().to(sessions::close)),
             )
             // Admin endpoints (protected by ADMIN_KEY)
             .route("/admin/auth", web::post().to(admin::auth_check))
@@ -162,7 +213,14 @@ async fn checkout(
     }
 
     // Resolve product + pricing: either via price_id or product_id
-    let (product, checkout_amount, checkout_currency, resolved_price_id, resolved_price_label, resolved_max_qty) = if let Some(ref price_id) = body.price_id {
+    let (
+        product,
+        checkout_amount,
+        checkout_currency,
+        resolved_price_id,
+        resolved_price_label,
+        resolved_max_qty,
+    ) = if let Some(ref price_id) = body.price_id {
         let price = match crate::prices::get_price(pool.get_ref(), price_id).await {
             Ok(Some(p)) if p.active == 1 => p,
             Ok(Some(_)) => {
@@ -185,7 +243,14 @@ async fn checkout(
             }
         };
         let mq = price.max_quantity;
-        (product, price.unit_amount, price.currency.clone(), Some(price.id), price.label, mq)
+        (
+            product,
+            price.unit_amount,
+            price.currency.clone(),
+            Some(price.id),
+            price.label,
+            mq,
+        )
     } else if let Some(ref product_id) = body.product_id {
         let product = match crate::products::get_product(pool.get_ref(), product_id).await {
             Ok(Some(p)) if p.active == 1 => p,
@@ -222,7 +287,14 @@ async fn checkout(
             }
         };
         let mq = price.max_quantity;
-        (product, price.unit_amount, price.currency.clone(), Some(price.id), price.label, mq)
+        (
+            product,
+            price.unit_amount,
+            price.currency.clone(),
+            Some(price.id),
+            price.label,
+            mq,
+        )
     } else {
         return actix_web::HttpResponse::BadRequest().json(serde_json::json!({
             "error": "product_id or price_id is required"
@@ -253,7 +325,7 @@ async fn checkout(
             .unwrap_or(0)
         } else {
             sqlx::query_scalar(
-                "SELECT COUNT(*) FROM tickets WHERE price_id = ? AND status != 'void'"
+                "SELECT COUNT(*) FROM tickets WHERE price_id = ? AND status != 'void'",
             )
             .bind(pid)
             .fetch_one(pool.get_ref())
@@ -270,13 +342,12 @@ async fn checkout(
     }
 
     // Real-time event expiry check: block ticket sales for past events
-    let event_row: Option<(String, Option<String>)> = sqlx::query_as(
-        "SELECT status, event_date FROM events WHERE product_id = ? LIMIT 1"
-    )
-    .bind(&product.id)
-    .fetch_optional(pool.get_ref())
-    .await
-    .unwrap_or(None);
+    let event_row: Option<(String, Option<String>)> =
+        sqlx::query_as("SELECT status, event_date FROM events WHERE product_id = ? LIMIT 1")
+            .bind(&product.id)
+            .fetch_optional(pool.get_ref())
+            .await
+            .unwrap_or(None);
 
     if let Some((event_status, event_date)) = event_row {
         if event_status == "cancelled" || event_status == "past" {
@@ -295,8 +366,12 @@ async fn checkout(
                     tokio::spawn(async move {
                         let _ = sqlx::query("UPDATE events SET status = 'past' WHERE product_id = ? AND status = 'active'")
                             .bind(&pid).execute(pool_bg.get_ref()).await;
-                        let _ = sqlx::query("UPDATE products SET active = 0 WHERE id = ? AND active = 1")
-                            .bind(&pid).execute(pool_bg.get_ref()).await;
+                        let _ = sqlx::query(
+                            "UPDATE products SET active = 0 WHERE id = ? AND active = 1",
+                        )
+                        .bind(&pid)
+                        .execute(pool_bg.get_ref())
+                        .await;
                     });
                     return actix_web::HttpResponse::Gone().json(serde_json::json!({
                         "error": "Event has ended"
@@ -333,7 +408,13 @@ async fn checkout(
     // variant field is accepted for backward compatibility but no longer validated
     let _ = &body.variant;
 
-    let merchant = match crate::merchants::get_merchant_by_id(pool.get_ref(), &product.merchant_id, &config.encryption_key).await {
+    let merchant = match crate::merchants::get_merchant_by_id(
+        pool.get_ref(),
+        &product.merchant_id,
+        &config.encryption_key,
+    )
+    .await
+    {
         Ok(Some(m)) => m,
         Ok(None) => {
             return actix_web::HttpResponse::InternalServerError().json(serde_json::json!({
@@ -348,7 +429,9 @@ async fn checkout(
     };
 
     if config.fee_enabled() {
-        if let Ok(status) = crate::billing::get_merchant_billing_status(pool.get_ref(), &merchant.id).await {
+        if let Ok(status) =
+            crate::billing::get_merchant_billing_status(pool.get_ref(), &merchant.id).await
+        {
             if status == "past_due" || status == "suspended" {
                 return actix_web::HttpResponse::PaymentRequired().json(serde_json::json!({
                     "error": "Merchant account has outstanding fees",
@@ -379,10 +462,13 @@ async fn checkout(
     };
 
     let fee_config = if config.fee_enabled() {
-        config.fee_address.as_ref().map(|addr| crate::invoices::FeeConfig {
-            fee_address: addr.clone(),
-            fee_rate: config.fee_rate,
-        })
+        config
+            .fee_address
+            .as_ref()
+            .map(|addr| crate::invoices::FeeConfig {
+                fee_address: addr.clone(),
+                fee_rate: config.fee_rate,
+            })
     } else {
         None
     };
@@ -402,15 +488,31 @@ async fn checkout(
             // Store encrypted attendee PII for Luma events
             if is_luma_event {
                 let enc_key = &config.encryption_key;
-                let enc_name = body.attendee_name.as_deref()
+                let enc_name = body
+                    .attendee_name
+                    .as_deref()
                     .filter(|n| !n.is_empty())
-                    .map(|n| if enc_key.is_empty() { Ok(n.to_string()) } else { crate::crypto::encrypt(n, enc_key) })
+                    .map(|n| {
+                        if enc_key.is_empty() {
+                            Ok(n.to_string())
+                        } else {
+                            crate::crypto::encrypt(n, enc_key)
+                        }
+                    })
                     .transpose()
                     .ok()
                     .flatten();
-                let enc_email = body.attendee_email.as_deref()
+                let enc_email = body
+                    .attendee_email
+                    .as_deref()
                     .filter(|e| !e.is_empty())
-                    .map(|e| if enc_key.is_empty() { Ok(e.to_string()) } else { crate::crypto::encrypt(e, enc_key) })
+                    .map(|e| {
+                        if enc_key.is_empty() {
+                            Ok(e.to_string())
+                        } else {
+                            crate::crypto::encrypt(e, enc_key)
+                        }
+                    })
                     .transpose()
                     .ok()
                     .flatten();
@@ -428,24 +530,47 @@ async fn checkout(
 
             let mut payload = serde_json::to_value(&resp).unwrap_or_else(|_| serde_json::json!({}));
             if let Some(obj) = payload.as_object_mut() {
-                obj.insert("price_label".to_string(), serde_json::to_value(resolved_price_label).unwrap_or(serde_json::Value::Null));
-                if let Ok(Some(ctx)) = crate::events::get_event_context_by_product(pool.get_ref(), &product.id).await {
-                    obj.insert("event_title".to_string(), serde_json::Value::String(ctx.event_title));
-                    obj.insert("event_date".to_string(), serde_json::to_value(ctx.event_date).unwrap_or(serde_json::Value::Null));
-                    obj.insert("event_location".to_string(), serde_json::to_value(ctx.event_location).unwrap_or(serde_json::Value::Null));
+                obj.insert(
+                    "price_label".to_string(),
+                    serde_json::to_value(resolved_price_label).unwrap_or(serde_json::Value::Null),
+                );
+                if let Ok(Some(ctx)) =
+                    crate::events::get_event_context_by_product(pool.get_ref(), &product.id).await
+                {
+                    obj.insert(
+                        "event_title".to_string(),
+                        serde_json::Value::String(ctx.event_title),
+                    );
+                    obj.insert(
+                        "event_date".to_string(),
+                        serde_json::to_value(ctx.event_date).unwrap_or(serde_json::Value::Null),
+                    );
+                    obj.insert(
+                        "event_location".to_string(),
+                        serde_json::to_value(ctx.event_location).unwrap_or(serde_json::Value::Null),
+                    );
                 }
                 obj.insert("is_luma".to_string(), serde_json::json!(is_luma_event));
 
-                let frontend_url = config.frontend_url.as_deref().unwrap_or("https://cipherpay.app");
+                let frontend_url = config
+                    .frontend_url
+                    .as_deref()
+                    .unwrap_or("https://cipherpay.app");
                 let mut checkout_url = format!("{}/pay/{}", frontend_url, resp.invoice_id);
                 if let Some(ref url) = body.success_url {
-                    let encoded: String = url.chars().map(|c| match c {
-                        '&' | '=' | '?' | '#' | ' ' => format!("%{:02X}", c as u8),
-                        _ => c.to_string(),
-                    }).collect();
+                    let encoded: String = url
+                        .chars()
+                        .map(|c| match c {
+                            '&' | '=' | '?' | '#' | ' ' => format!("%{:02X}", c as u8),
+                            _ => c.to_string(),
+                        })
+                        .collect();
                     checkout_url = format!("{}?return_url={}", checkout_url, encoded);
                 }
-                obj.insert("checkout_url".to_string(), serde_json::Value::String(checkout_url));
+                obj.insert(
+                    "checkout_url".to_string(),
+                    serde_json::Value::String(checkout_url),
+                );
             }
             actix_web::HttpResponse::Created().json(payload)
         }
@@ -472,7 +597,8 @@ struct CheckoutRequest {
 fn validate_checkout(req: &CheckoutRequest) -> Result<(), crate::validation::ValidationError> {
     if req.product_id.is_none() && req.price_id.is_none() {
         return Err(crate::validation::ValidationError::invalid(
-            "product_id", "either product_id or price_id is required"
+            "product_id",
+            "either product_id or price_id is required",
         ));
     }
     if let Some(ref pid) = req.product_id {
@@ -491,7 +617,8 @@ fn validate_checkout(req: &CheckoutRequest) -> Result<(), crate::validation::Val
         crate::validation::validate_length("success_url", url, 2000)?;
         if !url.starts_with("https://") && !url.starts_with("http://") {
             return Err(crate::validation::ValidationError::invalid(
-                "success_url", "must be a valid HTTP(S) URL"
+                "success_url",
+                "must be a valid HTTP(S) URL",
             ));
         }
     }
@@ -505,10 +632,12 @@ async fn health() -> actix_web::HttpResponse {
     }))
 }
 
-async fn well_known_payment(
-    config: web::Data<crate::config::Config>,
-) -> actix_web::HttpResponse {
-    let network = if config.is_testnet() { "zcash:testnet" } else { "zcash:mainnet" };
+async fn well_known_payment(config: web::Data<crate::config::Config>) -> actix_web::HttpResponse {
+    let network = if config.is_testnet() {
+        "zcash:testnet"
+    } else {
+        "zcash:mainnet"
+    };
     actix_web::HttpResponse::Ok()
         .insert_header(("Access-Control-Allow-Origin", "*"))
         .insert_header(("Cache-Control", "public, max-age=3600"))
@@ -539,17 +668,24 @@ async fn list_invoices(
             if let Some(auth_header) = req.headers().get("Authorization") {
                 if let Ok(auth_str) = auth_header.to_str() {
                     let key = auth_str.strip_prefix("Bearer ").unwrap_or(auth_str).trim();
-                    let enc_key = req.app_data::<web::Data<crate::config::Config>>()
-                        .map(|c| c.encryption_key.clone()).unwrap_or_default();
+                    let enc_key = req
+                        .app_data::<web::Data<crate::config::Config>>()
+                        .map(|c| c.encryption_key.clone())
+                        .unwrap_or_default();
                     match crate::merchants::authenticate(&pool, key, &enc_key).await {
                         Ok(Some(m)) => m,
-                        _ => return actix_web::HttpResponse::Unauthorized().json(serde_json::json!({"error": "Invalid API key"})),
+                        _ => {
+                            return actix_web::HttpResponse::Unauthorized()
+                                .json(serde_json::json!({"error": "Invalid API key"}))
+                        }
                     }
                 } else {
-                    return actix_web::HttpResponse::Unauthorized().json(serde_json::json!({"error": "Not authenticated"}));
+                    return actix_web::HttpResponse::Unauthorized()
+                        .json(serde_json::json!({"error": "Not authenticated"}));
                 }
             } else {
-                return actix_web::HttpResponse::Unauthorized().json(serde_json::json!({"error": "Not authenticated"}));
+                return actix_web::HttpResponse::Unauthorized()
+                    .json(serde_json::json!({"error": "Not authenticated"}));
             }
         }
     };
@@ -636,7 +772,8 @@ async fn lookup_by_memo(
     match crate::invoices::get_invoice_by_memo(pool.get_ref(), &memo_code).await {
         Ok(Some(inv)) => {
             let received_zec = crate::invoices::zatoshis_to_zec(inv.received_zatoshis);
-            let overpaid = inv.received_zatoshis > inv.price_zatoshis + 1000 && inv.price_zatoshis > 0;
+            let overpaid =
+                inv.received_zatoshis > inv.price_zatoshis + 1000 && inv.price_zatoshis > 0;
             actix_web::HttpResponse::Ok().json(serde_json::json!({
                 "id": inv.id,
                 "memo_code": inv.memo_code,
@@ -664,7 +801,7 @@ async fn lookup_by_memo(
                 "received_zatoshis": inv.received_zatoshis,
                 "overpaid": overpaid,
             }))
-        },
+        }
         Ok(None) => actix_web::HttpResponse::NotFound().json(serde_json::json!({
             "error": "No invoice found for this memo code"
         })),
@@ -741,10 +878,7 @@ async fn invoice_stream(
 }
 
 /// Generate a QR code PNG for a zcash: payment URI (ZIP-321 compliant)
-async fn qr_code(
-    pool: web::Data<SqlitePool>,
-    path: web::Path<String>,
-) -> actix_web::HttpResponse {
+async fn qr_code(pool: web::Data<SqlitePool>, path: web::Path<String>) -> actix_web::HttpResponse {
     let invoice_id = path.into_inner();
 
     let invoice = match crate::invoices::get_invoice(pool.get_ref(), &invoice_id).await {
@@ -753,9 +887,12 @@ async fn qr_code(
     };
 
     let uri = if invoice.zcash_uri.is_empty() {
-        let memo_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(invoice.memo_code.as_bytes());
-        format!("zcash:{}?amount={:.8}&memo={}", invoice.payment_address, invoice.price_zec, memo_b64)
+        let memo_b64 =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(invoice.memo_code.as_bytes());
+        format!(
+            "zcash:{}?amount={:.8}&memo={}",
+            invoice.payment_address, invoice.price_zec, memo_b64
+        )
     } else {
         invoice.zcash_uri.clone()
     };
@@ -816,16 +953,12 @@ async fn cancel_invoice(
             }
             actix_web::HttpResponse::Ok().json(serde_json::json!({ "status": "cancelled" }))
         }
-        Ok(Some(_)) => {
-            actix_web::HttpResponse::BadRequest().json(serde_json::json!({
-                "error": "Only pending invoices can be cancelled"
-            }))
-        }
-        _ => {
-            actix_web::HttpResponse::NotFound().json(serde_json::json!({
-                "error": "Invoice not found"
-            }))
-        }
+        Ok(Some(_)) => actix_web::HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "Only pending invoices can be cancelled"
+        })),
+        _ => actix_web::HttpResponse::NotFound().json(serde_json::json!({
+            "error": "Invoice not found"
+        })),
     }
 }
 
@@ -846,11 +979,16 @@ async fn refund_invoice(
     };
 
     let invoice_id = path.into_inner();
-    let refund_txid = body.get("refund_txid").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+    let refund_txid = body
+        .get("refund_txid")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
 
     match crate::invoices::get_invoice(pool.get_ref(), &invoice_id).await {
         Ok(Some(inv)) if inv.merchant_id == merchant.id && inv.status == "confirmed" => {
-            if let Err(e) = crate::invoices::mark_refunded(pool.get_ref(), &invoice_id, refund_txid).await {
+            if let Err(e) =
+                crate::invoices::mark_refunded(pool.get_ref(), &invoice_id, refund_txid).await
+            {
                 tracing::error!(error = %e, invoice_id = %invoice_id, "Failed to mark invoice refunded");
                 return actix_web::HttpResponse::InternalServerError().json(serde_json::json!({
                     "error": "Failed to process refund"
@@ -863,16 +1001,12 @@ async fn refund_invoice(
             });
             actix_web::HttpResponse::Ok().json(response)
         }
-        Ok(Some(_)) => {
-            actix_web::HttpResponse::BadRequest().json(serde_json::json!({
-                "error": "Only confirmed invoices can be refunded"
-            }))
-        }
-        _ => {
-            actix_web::HttpResponse::NotFound().json(serde_json::json!({
-                "error": "Invoice not found"
-            }))
-        }
+        Ok(Some(_)) => actix_web::HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "Only confirmed invoices can be refunded"
+        })),
+        _ => actix_web::HttpResponse::NotFound().json(serde_json::json!({
+            "error": "Invoice not found"
+        })),
     }
 }
 
@@ -1008,25 +1142,27 @@ async fn billing_settle(
         }
     };
 
-    let summary = match crate::billing::get_billing_summary(pool.get_ref(), &merchant.id, &config).await {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!(error = %e, "Failed to get billing for settle");
-            return actix_web::HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Internal error"
-            }));
-        }
-    };
+    let summary =
+        match crate::billing::get_billing_summary(pool.get_ref(), &merchant.id, &config).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to get billing for settle");
+                return actix_web::HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": "Internal error"
+                }));
+            }
+        };
 
-    if summary.outstanding_zec < 0.00001 {
+    if summary.outstanding_zatoshis <= 0 {
         return actix_web::HttpResponse::Ok().json(serde_json::json!({
             "message": "No outstanding balance",
             "outstanding_zec": 0.0,
         }));
     }
 
+    const MIN_SETTLEMENT_ZATOSHIS: i64 = 5_000_000;
     const MIN_SETTLEMENT_ZEC: f64 = 0.05;
-    if summary.outstanding_zec < MIN_SETTLEMENT_ZEC {
+    if summary.outstanding_zatoshis < MIN_SETTLEMENT_ZATOSHIS {
         return actix_web::HttpResponse::BadRequest().json(serde_json::json!({
             "error": format!("Outstanding balance ({:.6} ZEC) is below the minimum settlement amount ({:.2} ZEC). Fees will carry over until the threshold is reached.", summary.outstanding_zec, MIN_SETTLEMENT_ZEC),
             "outstanding_zec": summary.outstanding_zec,
@@ -1037,23 +1173,37 @@ async fn billing_settle(
     let rates = match price_service.get_rates().await {
         Ok(r) => r,
         Err(_) => crate::invoices::pricing::ZecRates {
-            zec_eur: 0.0, zec_usd: 0.0, zec_brl: 0.0,
-            zec_gbp: 0.0, zec_cad: 0.0, zec_jpy: 0.0,
-            zec_mxn: 0.0, zec_ars: 0.0, zec_ngn: 0.0,
-            zec_chf: 0.0, zec_inr: 0.0,
+            zec_eur: 0.0,
+            zec_usd: 0.0,
+            zec_brl: 0.0,
+            zec_gbp: 0.0,
+            zec_cad: 0.0,
+            zec_jpy: 0.0,
+            zec_mxn: 0.0,
+            zec_ars: 0.0,
+            zec_ngn: 0.0,
+            zec_chf: 0.0,
+            zec_inr: 0.0,
             updated_at: chrono::Utc::now(),
         },
     };
 
     match crate::billing::create_settlement_invoice(
-        pool.get_ref(), &merchant.id, summary.outstanding_zec, &fee_address, rates.zec_eur, rates.zec_usd,
-    ).await {
+        pool.get_ref(),
+        &merchant.id,
+        summary.outstanding_zatoshis,
+        &fee_address,
+        rates.zec_eur,
+        rates.zec_usd,
+    )
+    .await
+    {
         Ok(invoice_id) => {
             if let Some(cycle) = &summary.current_cycle {
                 let _ = sqlx::query(
                     "UPDATE billing_cycles SET settlement_invoice_id = ?, status = 'invoiced',
                      grace_until = strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '+7 days')
-                     WHERE id = ? AND status = 'open'"
+                     WHERE id = ? AND status = 'open'",
                 )
                 .bind(&invoice_id)
                 .bind(&cycle.id)

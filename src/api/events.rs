@@ -3,10 +3,7 @@ use sqlx::SqlitePool;
 
 use crate::events::{CreateEventRequest, UpdateEventRequest};
 
-pub async fn list(
-    req: HttpRequest,
-    pool: web::Data<SqlitePool>,
-) -> HttpResponse {
+pub async fn list(req: HttpRequest, pool: web::Data<SqlitePool>) -> HttpResponse {
     let merchant = match super::auth::resolve_session(&req, &pool).await {
         Some(m) => m,
         None => {
@@ -41,7 +38,9 @@ pub async fn create(
         }
     };
 
-    match crate::events::create_event_with_product_and_prices(pool.get_ref(), &merchant.id, &body).await {
+    match crate::events::create_event_with_product_and_prices(pool.get_ref(), &merchant.id, &body)
+        .await
+    {
         Ok(event) => HttpResponse::Created().json(event),
         Err(e) => {
             let msg = e.to_string();

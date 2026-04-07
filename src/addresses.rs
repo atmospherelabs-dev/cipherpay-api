@@ -15,14 +15,15 @@ pub fn derive_invoice_address(key_str: &str, index: u32) -> Result<DerivedAddres
     let raw = addr.to_raw_address_bytes();
     let orchard_receiver_hex = hex::encode(raw);
 
-    let ua = zcash_address::unified::Address::try_from_items(vec![
-        Receiver::Orchard(raw),
-    ])
-    .map_err(|e| anyhow::anyhow!("UA construction failed: {:?}", e))?;
+    let ua = zcash_address::unified::Address::try_from_items(vec![Receiver::Orchard(raw)])
+        .map_err(|e| anyhow::anyhow!("UA construction failed: {:?}", e))?;
 
     let ua_string = ua.encode(&network);
 
-    tracing::debug!(diversifier_index = index, "Derived invoice address from viewing key");
+    tracing::debug!(
+        diversifier_index = index,
+        "Derived invoice address from viewing key"
+    );
 
     Ok(DerivedAddress {
         ua_string,

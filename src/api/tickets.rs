@@ -9,10 +9,7 @@ pub struct ScanRequest {
 
 /// Public endpoint: returns the ticket code, status, and event metadata for the checkout receipt.
 /// No auth required — invoice IDs are unguessable UUIDs (same model as refund_address).
-pub async fn by_invoice(
-    pool: web::Data<SqlitePool>,
-    path: web::Path<String>,
-) -> HttpResponse {
+pub async fn by_invoice(pool: web::Data<SqlitePool>, path: web::Path<String>) -> HttpResponse {
     let invoice_id = path.into_inner();
     match crate::tickets::get_ticket_by_invoice(pool.get_ref(), &invoice_id).await {
         Ok(Some(ticket)) => {
@@ -113,10 +110,7 @@ pub async fn scan(
     }
 }
 
-pub async fn list(
-    req: HttpRequest,
-    pool: web::Data<SqlitePool>,
-) -> HttpResponse {
+pub async fn list(req: HttpRequest, pool: web::Data<SqlitePool>) -> HttpResponse {
     let merchant = match super::auth::resolve_session(&req, &pool).await {
         Some(m) => m,
         None => {

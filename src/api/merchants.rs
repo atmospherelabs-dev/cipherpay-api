@@ -2,7 +2,7 @@ use actix_web::{web, HttpResponse};
 use sqlx::SqlitePool;
 
 use crate::config::Config;
-use crate::merchants::{CreateMerchantRequest, create_merchant};
+use crate::merchants::{create_merchant, CreateMerchantRequest};
 use crate::validation;
 
 pub async fn create(

@@ -5,6 +5,8 @@ use uuid::Uuid;
 
 use crate::config::Config;
 
+const MIN_SETTLEMENT_ZATOSHIS: i64 = 5_000_000;
+
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct FeeEntry {
@@ -12,6 +14,8 @@ pub struct FeeEntry {
     pub invoice_id: String,
     pub merchant_id: String,
     pub fee_amount_zec: f64,
+    #[serde(skip_serializing)]
+    pub fee_amount_zatoshis: i64,
     pub auto_collected: i32,
     pub collected_at: Option<String>,
     pub billing_cycle_id: Option<String>,
@@ -27,6 +31,12 @@ pub struct BillingCycle {
     pub total_fees_zec: f64,
     pub auto_collected_zec: f64,
     pub outstanding_zec: f64,
+    #[serde(skip_serializing)]
+    pub total_fees_zatoshis: i64,
+    #[serde(skip_serializing)]
+    pub auto_collected_zatoshis: i64,
+    #[serde(skip_serializing)]
+    pub outstanding_zatoshis: i64,
     pub settlement_invoice_id: Option<String>,
     pub status: String,
     pub grace_until: Option<String>,
@@ -42,6 +52,9 @@ pub struct BillingSummary {
     pub total_fees_zec: f64,
     pub auto_collected_zec: f64,
     pub outstanding_zec: f64,
+    pub total_fees_zatoshis: i64,
+    pub auto_collected_zatoshis: i64,
+    pub outstanding_zatoshis: i64,
 }
 
 pub async fn create_fee_entry(
@@ -52,22 +65,24 @@ pub async fn create_fee_entry(
 ) -> anyhow::Result<()> {
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let fee_amount_zatoshis = crate::invoices::zec_to_zatoshis(fee_amount_zec)?;
 
     let cycle_id: Option<String> = sqlx::query_scalar(
-        "SELECT id FROM billing_cycles WHERE merchant_id = ? AND status = 'open' LIMIT 1"
+        "SELECT id FROM billing_cycles WHERE merchant_id = ? AND status = 'open' LIMIT 1",
     )
     .bind(merchant_id)
     .fetch_optional(pool)
     .await?;
 
     sqlx::query(
-        "INSERT OR IGNORE INTO fee_ledger (id, invoice_id, merchant_id, fee_amount_zec, billing_cycle_id, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)"
+        "INSERT OR IGNORE INTO fee_ledger (id, invoice_id, merchant_id, fee_amount_zec, fee_amount_zatoshis, billing_cycle_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)"
     )
     .bind(&id)
     .bind(invoice_id)
     .bind(merchant_id)
     .bind(fee_amount_zec)
+    .bind(fee_amount_zatoshis)
     .bind(&cycle_id)
     .bind(&now)
     .execute(pool)
@@ -76,12 +91,16 @@ pub async fn create_fee_entry(
     if let Some(cid) = &cycle_id {
         sqlx::query(
             "UPDATE billing_cycles SET
-                total_fees_zec = total_fees_zec + ?,
-                outstanding_zec = outstanding_zec + ?
-             WHERE id = ?"
+                total_fees_zatoshis = total_fees_zatoshis + ?,
+                outstanding_zatoshis = outstanding_zatoshis + ?,
+                total_fees_zec = (total_fees_zatoshis + ?) / 100000000.0,
+                outstanding_zec = (outstanding_zatoshis + ?) / 100000000.0
+             WHERE id = ?",
         )
-        .bind(fee_amount_zec)
-        .bind(fee_amount_zec)
+        .bind(fee_amount_zatoshis)
+        .bind(fee_amount_zatoshis)
+        .bind(fee_amount_zatoshis)
+        .bind(fee_amount_zatoshis)
         .bind(cid)
         .execute(pool)
         .await?;
@@ -96,7 +115,7 @@ pub async fn mark_fee_collected(pool: &SqlitePool, invoice_id: &str) -> anyhow::
 
     let result = sqlx::query(
         "UPDATE fee_ledger SET auto_collected = 1, collected_at = ?
-         WHERE invoice_id = ? AND auto_collected = 0"
+         WHERE invoice_id = ? AND auto_collected = 0",
     )
     .bind(&now)
     .bind(invoice_id)
@@ -104,8 +123,8 @@ pub async fn mark_fee_collected(pool: &SqlitePool, invoice_id: &str) -> anyhow::
     .await?;
 
     if result.rows_affected() > 0 {
-        let entry: Option<(f64, Option<String>)> = sqlx::query_as(
-            "SELECT fee_amount_zec, billing_cycle_id FROM fee_ledger WHERE invoice_id = ?"
+        let entry: Option<(i64, Option<String>)> = sqlx::query_as(
+            "SELECT fee_amount_zatoshis, billing_cycle_id FROM fee_ledger WHERE invoice_id = ?",
         )
         .bind(invoice_id)
         .fetch_optional(pool)
@@ -114,10 +133,14 @@ pub async fn mark_fee_collected(pool: &SqlitePool, invoice_id: &str) -> anyhow::
         if let Some((amount, Some(cycle_id))) = entry {
             sqlx::query(
                 "UPDATE billing_cycles SET
-                    auto_collected_zec = auto_collected_zec + ?,
-                    outstanding_zec = MAX(0, outstanding_zec - ?)
-                 WHERE id = ?"
+                    auto_collected_zatoshis = auto_collected_zatoshis + ?,
+                    outstanding_zatoshis = MAX(0, outstanding_zatoshis - ?),
+                    auto_collected_zec = (auto_collected_zatoshis + ?) / 100000000.0,
+                    outstanding_zec = MAX(0, outstanding_zatoshis - ?) / 100000000.0
+                 WHERE id = ?",
             )
+            .bind(amount)
+            .bind(amount)
             .bind(amount)
             .bind(amount)
             .bind(&cycle_id)
@@ -138,7 +161,7 @@ pub async fn get_billing_summary(
 ) -> anyhow::Result<BillingSummary> {
     let (trust_tier, billing_status): (String, String) = sqlx::query_as(
         "SELECT COALESCE(trust_tier, 'new'), COALESCE(billing_status, 'active')
-         FROM merchants WHERE id = ?"
+         FROM merchants WHERE id = ?",
     )
     .bind(merchant_id)
     .fetch_one(pool)
@@ -146,7 +169,7 @@ pub async fn get_billing_summary(
 
     let current_cycle: Option<BillingCycle> = sqlx::query_as(
         "SELECT * FROM billing_cycles WHERE merchant_id = ? AND status IN ('open', 'invoiced')
-         ORDER BY created_at DESC LIMIT 1"
+         ORDER BY created_at DESC LIMIT 1",
     )
     .bind(merchant_id)
     .fetch_optional(pool)
@@ -155,6 +178,15 @@ pub async fn get_billing_summary(
     let (total_fees, auto_collected, outstanding) = match &current_cycle {
         Some(c) => (c.total_fees_zec, c.auto_collected_zec, c.outstanding_zec),
         None => (0.0, 0.0, 0.0),
+    };
+    let (total_fees_zatoshis, auto_collected_zatoshis, outstanding_zatoshis) = match &current_cycle
+    {
+        Some(c) => (
+            c.total_fees_zatoshis,
+            c.auto_collected_zatoshis,
+            c.outstanding_zatoshis,
+        ),
+        None => (0, 0, 0),
     };
 
     Ok(BillingSummary {
@@ -165,6 +197,9 @@ pub async fn get_billing_summary(
         total_fees_zec: total_fees,
         auto_collected_zec: auto_collected,
         outstanding_zec: outstanding,
+        total_fees_zatoshis,
+        auto_collected_zatoshis,
+        outstanding_zatoshis,
     })
 }
 
@@ -174,7 +209,7 @@ pub async fn get_billing_history(
 ) -> anyhow::Result<Vec<BillingCycle>> {
     let cycles = sqlx::query_as::<_, BillingCycle>(
         "SELECT * FROM billing_cycles WHERE merchant_id = ?
-         ORDER BY period_start DESC LIMIT 24"
+         ORDER BY period_start DESC LIMIT 24",
     )
     .bind(merchant_id)
     .fetch_all(pool)
@@ -183,9 +218,13 @@ pub async fn get_billing_history(
     Ok(cycles)
 }
 
-pub async fn ensure_billing_cycle(pool: &SqlitePool, merchant_id: &str, config: &Config) -> anyhow::Result<()> {
+pub async fn ensure_billing_cycle(
+    pool: &SqlitePool,
+    merchant_id: &str,
+    config: &Config,
+) -> anyhow::Result<()> {
     let existing: Option<String> = sqlx::query_scalar(
-        "SELECT id FROM billing_cycles WHERE merchant_id = ? AND status = 'open' LIMIT 1"
+        "SELECT id FROM billing_cycles WHERE merchant_id = ? AND status = 'open' LIMIT 1",
     )
     .bind(merchant_id)
     .fetch_optional(pool)
@@ -195,12 +234,11 @@ pub async fn ensure_billing_cycle(pool: &SqlitePool, merchant_id: &str, config: 
         return Ok(());
     }
 
-    let (trust_tier,): (String,) = sqlx::query_as(
-        "SELECT COALESCE(trust_tier, 'new') FROM merchants WHERE id = ?"
-    )
-    .bind(merchant_id)
-    .fetch_one(pool)
-    .await?;
+    let (trust_tier,): (String,) =
+        sqlx::query_as("SELECT COALESCE(trust_tier, 'new') FROM merchants WHERE id = ?")
+            .bind(merchant_id)
+            .fetch_one(pool)
+            .await?;
 
     let cycle_days = match trust_tier.as_str() {
         "new" => config.billing_cycle_days_new,
@@ -210,43 +248,57 @@ pub async fn ensure_billing_cycle(pool: &SqlitePool, merchant_id: &str, config: 
     let now = Utc::now();
     let id = Uuid::new_v4().to_string();
     let period_start = now.format("%Y-%m-%dT%H:%M:%SZ").to_string();
-    let period_end = (now + Duration::days(cycle_days)).format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let period_end = (now + Duration::days(cycle_days))
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
 
-    let carried: f64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(outstanding_zec), 0.0) FROM billing_cycles
-         WHERE merchant_id = ? AND status = 'carried_over'"
+    let carried: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(outstanding_zatoshis), 0) FROM billing_cycles
+         WHERE merchant_id = ? AND status = 'carried_over'",
     )
     .bind(merchant_id)
     .fetch_one(pool)
     .await
-    .unwrap_or(0.0);
+    .unwrap_or(0);
+    let carried_zec = crate::invoices::zatoshis_to_zec(carried);
 
     sqlx::query(
-        "INSERT INTO billing_cycles (id, merchant_id, period_start, period_end, total_fees_zec, outstanding_zec, status)
-         VALUES (?, ?, ?, ?, ?, ?, 'open')"
+        "INSERT INTO billing_cycles (
+            id, merchant_id, period_start, period_end,
+            total_fees_zec, auto_collected_zec, outstanding_zec,
+            total_fees_zatoshis, auto_collected_zatoshis, outstanding_zatoshis,
+            status
+         )
+         VALUES (?, ?, ?, ?, ?, 0.0, ?, ?, 0, ?, 'open')",
     )
     .bind(&id)
     .bind(merchant_id)
     .bind(&period_start)
     .bind(&period_end)
+    .bind(carried_zec)
+    .bind(carried_zec)
     .bind(carried)
     .bind(carried)
     .execute(pool)
     .await?;
 
-    if carried > 0.0 {
+    if carried > 0 {
         sqlx::query(
-            "UPDATE billing_cycles SET outstanding_zec = 0.0
-             WHERE merchant_id = ? AND status = 'carried_over' AND outstanding_zec > 0"
+            "UPDATE billing_cycles SET outstanding_zec = 0.0, outstanding_zatoshis = 0
+             WHERE merchant_id = ? AND status = 'carried_over' AND outstanding_zatoshis > 0",
         )
         .bind(merchant_id)
         .execute(pool)
         .await?;
-        tracing::info!(merchant_id, carried, "Carried over outstanding fees to new cycle");
+        tracing::info!(
+            merchant_id,
+            carried,
+            "Carried over outstanding fees to new cycle"
+        );
     }
 
     sqlx::query(
-        "UPDATE merchants SET billing_started_at = COALESCE(billing_started_at, ?) WHERE id = ?"
+        "UPDATE merchants SET billing_started_at = COALESCE(billing_started_at, ?) WHERE id = ?",
     )
     .bind(&period_start)
     .bind(merchant_id)
@@ -260,7 +312,7 @@ pub async fn ensure_billing_cycle(pool: &SqlitePool, merchant_id: &str, config: 
 pub async fn create_settlement_invoice(
     pool: &SqlitePool,
     merchant_id: &str,
-    outstanding_zec: f64,
+    outstanding_zatoshis: i64,
     fee_address: &str,
     zec_eur_rate: f64,
     zec_usd_rate: f64,
@@ -268,12 +320,15 @@ pub async fn create_settlement_invoice(
     let id = Uuid::new_v4().to_string();
     let memo_code = format!("SETTLE-{}", &Uuid::new_v4().to_string()[..8].to_uppercase());
     let now = Utc::now();
-    let expires_at = (now + Duration::days(7)).format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let expires_at = (now + Duration::days(7))
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
     let created_at = now.format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
+    let outstanding_zec = crate::invoices::zatoshis_to_zec(outstanding_zatoshis);
     let price_eur = outstanding_zec * zec_eur_rate;
     let price_usd = outstanding_zec * zec_usd_rate;
-    let price_zatoshis = (outstanding_zec * 100_000_000.0) as i64;
+    let price_zatoshis = outstanding_zatoshis;
 
     let memo_b64 = base64::Engine::encode(
         &base64::engine::general_purpose::URL_SAFE_NO_PAD,
@@ -323,22 +378,20 @@ pub async fn process_billing_cycles(
 
     // 1. Close expired open cycles
     let expired_cycles = sqlx::query_as::<_, BillingCycle>(
-        "SELECT * FROM billing_cycles WHERE status = 'open' AND period_end < ?"
+        "SELECT * FROM billing_cycles WHERE status = 'open' AND period_end < ?",
     )
     .bind(&now_str)
     .fetch_all(pool)
     .await?;
 
     for cycle in &expired_cycles {
-        const MIN_SETTLEMENT_ZEC: f64 = 0.05;
-
-        if cycle.outstanding_zec <= 0.0 {
+        if cycle.outstanding_zatoshis <= 0 {
             sqlx::query("UPDATE billing_cycles SET status = 'paid' WHERE id = ?")
                 .bind(&cycle.id)
                 .execute(pool)
                 .await?;
             tracing::info!(merchant_id = %cycle.merchant_id, "Billing cycle closed (fully collected)");
-        } else if cycle.outstanding_zec < MIN_SETTLEMENT_ZEC {
+        } else if cycle.outstanding_zatoshis < MIN_SETTLEMENT_ZATOSHIS {
             sqlx::query("UPDATE billing_cycles SET status = 'carried_over' WHERE id = ?")
                 .bind(&cycle.id)
                 .execute(pool)
@@ -355,11 +408,18 @@ pub async fn process_billing_cycles(
                 _ => 7,
             };
             let grace_until = (Utc::now() + Duration::days(grace_days))
-                .format("%Y-%m-%dT%H:%M:%SZ").to_string();
+                .format("%Y-%m-%dT%H:%M:%SZ")
+                .to_string();
 
             let settlement_id = create_settlement_invoice(
-                pool, &cycle.merchant_id, cycle.outstanding_zec, fee_addr, zec_eur, zec_usd,
-            ).await?;
+                pool,
+                &cycle.merchant_id,
+                cycle.outstanding_zatoshis,
+                fee_addr,
+                zec_eur,
+                zec_usd,
+            )
+            .await?;
 
             sqlx::query(
                 "UPDATE billing_cycles SET status = 'invoiced', settlement_invoice_id = ?, grace_until = ?
@@ -384,14 +444,14 @@ pub async fn process_billing_cycles(
 
     // 2. Enforce past due
     let overdue_cycles = sqlx::query_as::<_, BillingCycle>(
-        "SELECT * FROM billing_cycles WHERE status = 'invoiced' AND grace_until < ?"
+        "SELECT * FROM billing_cycles WHERE status = 'invoiced' AND grace_until < ?",
     )
     .bind(&now_str)
     .fetch_all(pool)
     .await?;
 
     for cycle in &overdue_cycles {
-        if cycle.outstanding_zec < 0.05 {
+        if cycle.outstanding_zatoshis < MIN_SETTLEMENT_ZATOSHIS {
             sqlx::query("UPDATE billing_cycles SET status = 'carried_over' WHERE id = ?")
                 .bind(&cycle.id)
                 .execute(pool)
@@ -415,11 +475,10 @@ pub async fn process_billing_cycles(
     }
 
     // 3. Enforce suspension (7 days after past_due for new, 14 for standard/trusted)
-    let past_due_cycles = sqlx::query_as::<_, BillingCycle>(
-        "SELECT * FROM billing_cycles WHERE status = 'past_due'"
-    )
-    .fetch_all(pool)
-    .await?;
+    let past_due_cycles =
+        sqlx::query_as::<_, BillingCycle>("SELECT * FROM billing_cycles WHERE status = 'past_due'")
+            .fetch_all(pool)
+            .await?;
 
     for cycle in &past_due_cycles {
         let suspend_days: i64 = match get_trust_tier(pool, &cycle.merchant_id).await?.as_str() {
@@ -429,7 +488,9 @@ pub async fn process_billing_cycles(
         };
 
         if let Some(grace_until) = &cycle.grace_until {
-            if let Ok(grace_dt) = chrono::NaiveDateTime::parse_from_str(grace_until, "%Y-%m-%dT%H:%M:%SZ") {
+            if let Ok(grace_dt) =
+                chrono::NaiveDateTime::parse_from_str(grace_until, "%Y-%m-%dT%H:%M:%SZ")
+            {
                 let suspend_at = grace_dt + Duration::days(suspend_days);
                 if Utc::now().naive_utc() > suspend_at {
                     sqlx::query("UPDATE billing_cycles SET status = 'suspended' WHERE id = ?")
@@ -448,16 +509,21 @@ pub async fn process_billing_cycles(
 
     // 4. Upgrade trust tiers: 3+ consecutive paid on time
     let merchants_for_upgrade: Vec<(String, String)> = sqlx::query_as(
-        "SELECT id, COALESCE(trust_tier, 'new') FROM merchants WHERE trust_tier != 'trusted'"
+        "SELECT id, COALESCE(trust_tier, 'new') FROM merchants WHERE trust_tier != 'trusted'",
     )
     .fetch_all(pool)
     .await?;
 
     for (merchant_id, current_tier) in &merchants_for_upgrade {
         let paid_count: i32 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM billing_cycles
-             WHERE merchant_id = ? AND status IN ('paid', 'carried_over')
-             ORDER BY period_end DESC LIMIT 3"
+            "SELECT COUNT(*) FROM (
+                SELECT status
+                FROM billing_cycles
+                WHERE merchant_id = ?
+                ORDER BY period_end DESC
+                LIMIT 3
+             ) recent_cycles
+             WHERE status IN ('paid', 'carried_over')",
         )
         .bind(merchant_id)
         .fetch_one(pool)
@@ -467,7 +533,7 @@ pub async fn process_billing_cycles(
         let late_count: i32 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM billing_cycles
              WHERE merchant_id = ? AND status IN ('past_due', 'suspended')
-             AND period_end > datetime('now', '-90 days')"
+             AND period_end > datetime('now', '-90 days')",
         )
         .bind(merchant_id)
         .fetch_one(pool)
@@ -498,16 +564,20 @@ pub async fn check_settlement_payments(pool: &SqlitePool) -> anyhow::Result<()> 
         "SELECT bc.* FROM billing_cycles bc
          JOIN invoices i ON i.id = bc.settlement_invoice_id
          WHERE bc.status IN ('invoiced', 'past_due', 'suspended')
-         AND i.status = 'confirmed'"
+         AND i.status = 'confirmed'",
     )
     .fetch_all(pool)
     .await?;
 
     for cycle in &settled {
-        sqlx::query("UPDATE billing_cycles SET status = 'paid', outstanding_zec = 0.0 WHERE id = ?")
-            .bind(&cycle.id)
-            .execute(pool)
-            .await?;
+        sqlx::query(
+            "UPDATE billing_cycles
+             SET status = 'paid', outstanding_zec = 0.0, outstanding_zatoshis = 0
+             WHERE id = ?",
+        )
+        .bind(&cycle.id)
+        .execute(pool)
+        .await?;
         sqlx::query("UPDATE merchants SET billing_status = 'active' WHERE id = ?")
             .bind(&cycle.merchant_id)
             .execute(pool)
@@ -519,21 +589,22 @@ pub async fn check_settlement_payments(pool: &SqlitePool) -> anyhow::Result<()> 
 }
 
 async fn get_trust_tier(pool: &SqlitePool, merchant_id: &str) -> anyhow::Result<String> {
-    let tier: String = sqlx::query_scalar(
-        "SELECT COALESCE(trust_tier, 'new') FROM merchants WHERE id = ?"
-    )
-    .bind(merchant_id)
-    .fetch_one(pool)
-    .await?;
+    let tier: String =
+        sqlx::query_scalar("SELECT COALESCE(trust_tier, 'new') FROM merchants WHERE id = ?")
+            .bind(merchant_id)
+            .fetch_one(pool)
+            .await?;
     Ok(tier)
 }
 
-pub async fn get_merchant_billing_status(pool: &SqlitePool, merchant_id: &str) -> anyhow::Result<String> {
-    let status: String = sqlx::query_scalar(
-        "SELECT COALESCE(billing_status, 'active') FROM merchants WHERE id = ?"
-    )
-    .bind(merchant_id)
-    .fetch_one(pool)
-    .await?;
+pub async fn get_merchant_billing_status(
+    pool: &SqlitePool,
+    merchant_id: &str,
+) -> anyhow::Result<String> {
+    let status: String =
+        sqlx::query_scalar("SELECT COALESCE(billing_status, 'active') FROM merchants WHERE id = ?")
+            .bind(merchant_id)
+            .fetch_one(pool)
+            .await?;
     Ok(status)
 }

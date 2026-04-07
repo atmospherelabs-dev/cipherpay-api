@@ -24,13 +24,13 @@ pub fn authenticate_admin(req: &actix_web::HttpRequest) -> bool {
     if provided.is_empty() {
         return false;
     }
-    let mut mac = HmacSha256::new_from_slice(b"admin-key-verify")
-        .expect("HMAC accepts any key length");
+    let mut mac =
+        HmacSha256::new_from_slice(b"admin-key-verify").expect("HMAC accepts any key length");
     mac.update(expected.as_bytes());
     let expected_tag = mac.finalize().into_bytes();
 
-    let mut mac2 = HmacSha256::new_from_slice(b"admin-key-verify")
-        .expect("HMAC accepts any key length");
+    let mut mac2 =
+        HmacSha256::new_from_slice(b"admin-key-verify").expect("HMAC accepts any key length");
     mac2.update(provided.as_bytes());
     let provided_tag = mac2.finalize().into_bytes();
 
@@ -61,46 +61,69 @@ pub async fn stats(
     }
 
     let merchant_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM merchants")
-        .fetch_one(pool.get_ref()).await.unwrap_or(0);
+        .fetch_one(pool.get_ref())
+        .await
+        .unwrap_or(0);
 
     let invoice_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM invoices")
-        .fetch_one(pool.get_ref()).await.unwrap_or(0);
+        .fetch_one(pool.get_ref())
+        .await
+        .unwrap_or(0);
 
-    let confirmed_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM invoices WHERE status = 'confirmed'"
-    ).fetch_one(pool.get_ref()).await.unwrap_or(0);
+    let confirmed_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM invoices WHERE status = 'confirmed'")
+            .fetch_one(pool.get_ref())
+            .await
+            .unwrap_or(0);
 
     let pending_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM invoices WHERE status IN ('pending', 'underpaid', 'detected')"
-    ).fetch_one(pool.get_ref()).await.unwrap_or(0);
+        "SELECT COUNT(*) FROM invoices WHERE status IN ('pending', 'underpaid', 'detected')",
+    )
+    .fetch_one(pool.get_ref())
+    .await
+    .unwrap_or(0);
 
-    let expired_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM invoices WHERE status = 'expired'"
-    ).fetch_one(pool.get_ref()).await.unwrap_or(0);
+    let expired_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM invoices WHERE status = 'expired'")
+            .fetch_one(pool.get_ref())
+            .await
+            .unwrap_or(0);
 
-    let draft_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM invoices WHERE status = 'draft'"
-    ).fetch_one(pool.get_ref()).await.unwrap_or(0);
+    let draft_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM invoices WHERE status = 'draft'")
+            .fetch_one(pool.get_ref())
+            .await
+            .unwrap_or(0);
 
     let total_zec_received: f64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(price_zec), 0.0) FROM invoices WHERE status = 'confirmed'"
-    ).fetch_one(pool.get_ref()).await.unwrap_or(0.0);
+        "SELECT COALESCE(SUM(price_zec), 0.0) FROM invoices WHERE status = 'confirmed'",
+    )
+    .fetch_one(pool.get_ref())
+    .await
+    .unwrap_or(0.0);
 
     let total_zatoshis_received: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(received_zatoshis), 0) FROM invoices WHERE status = 'confirmed'"
-    ).fetch_one(pool.get_ref()).await.unwrap_or(0);
+        "SELECT COALESCE(SUM(received_zatoshis), 0) FROM invoices WHERE status = 'confirmed'",
+    )
+    .fetch_one(pool.get_ref())
+    .await
+    .unwrap_or(0);
 
-    let product_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM products WHERE active = 1"
-    ).fetch_one(pool.get_ref()).await.unwrap_or(0);
+    let product_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM products WHERE active = 1")
+        .fetch_one(pool.get_ref())
+        .await
+        .unwrap_or(0);
 
-    let subscription_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM subscriptions"
-    ).fetch_one(pool.get_ref()).await.unwrap_or(0);
+    let subscription_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM subscriptions")
+        .fetch_one(pool.get_ref())
+        .await
+        .unwrap_or(0);
 
-    let active_subscriptions: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM subscriptions WHERE status = 'active'"
-    ).fetch_one(pool.get_ref()).await.unwrap_or(0);
+    let active_subscriptions: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM subscriptions WHERE status = 'active'")
+            .fetch_one(pool.get_ref())
+            .await
+            .unwrap_or(0);
 
     let total_fees_collected: f64 = sqlx::query_scalar(
         "SELECT COALESCE(SUM(fee_amount_zec), 0.0) FROM fee_ledger WHERE auto_collected = 1 OR collected_at IS NOT NULL"
@@ -110,9 +133,11 @@ pub async fn stats(
         "SELECT COALESCE(SUM(fee_amount_zec), 0.0) FROM fee_ledger WHERE auto_collected = 0 AND collected_at IS NULL"
     ).fetch_one(pool.get_ref()).await.unwrap_or(0.0);
 
-    let total_fees_all: f64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(fee_amount_zec), 0.0) FROM fee_ledger"
-    ).fetch_one(pool.get_ref()).await.unwrap_or(0.0);
+    let total_fees_all: f64 =
+        sqlx::query_scalar("SELECT COALESCE(SUM(fee_amount_zec), 0.0) FROM fee_ledger")
+            .fetch_one(pool.get_ref())
+            .await
+            .unwrap_or(0.0);
 
     // Invoices in the last 24 hours
     let invoices_24h: i64 = sqlx::query_scalar(
@@ -216,17 +241,20 @@ pub async fn merchants(
     .await
     .unwrap_or_default();
 
-    let merchants: Vec<serde_json::Value> = rows.iter().map(|r| {
-        serde_json::json!({
-            "id": r.0,
-            "name": r.1,
-            "invoice_count": r.2,
-            "total_zec": r.3,
-            "webhook_configured": r.4.is_some() && !r.4.as_ref().unwrap().is_empty(),
-            "created_at": r.5,
-            "billing_status": r.6,
+    let merchants: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "id": r.0,
+                "name": r.1,
+                "invoice_count": r.2,
+                "total_zec": r.3,
+                "webhook_configured": r.4.is_some() && !r.4.as_ref().unwrap().is_empty(),
+                "created_at": r.5,
+                "billing_status": r.6,
+            })
         })
-    }).collect();
+        .collect();
 
     actix_web::HttpResponse::Ok().json(merchants)
 }
@@ -240,37 +268,52 @@ pub async fn billing(
         return unauthorized();
     }
 
-    let open_cycles: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM billing_cycles WHERE status = 'open'"
-    ).fetch_one(pool.get_ref()).await.unwrap_or(0);
+    let open_cycles: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM billing_cycles WHERE status = 'open'")
+            .fetch_one(pool.get_ref())
+            .await
+            .unwrap_or(0);
 
-    let invoiced_cycles: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM billing_cycles WHERE status = 'invoiced'"
-    ).fetch_one(pool.get_ref()).await.unwrap_or(0);
+    let invoiced_cycles: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM billing_cycles WHERE status = 'invoiced'")
+            .fetch_one(pool.get_ref())
+            .await
+            .unwrap_or(0);
 
-    let past_due_cycles: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM billing_cycles WHERE status = 'past_due'"
-    ).fetch_one(pool.get_ref()).await.unwrap_or(0);
+    let past_due_cycles: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM billing_cycles WHERE status = 'past_due'")
+            .fetch_one(pool.get_ref())
+            .await
+            .unwrap_or(0);
 
-    let paid_cycles: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM billing_cycles WHERE status = 'paid'"
-    ).fetch_one(pool.get_ref()).await.unwrap_or(0);
+    let paid_cycles: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM billing_cycles WHERE status = 'paid'")
+            .fetch_one(pool.get_ref())
+            .await
+            .unwrap_or(0);
 
-    let suspended_merchants: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM merchants WHERE billing_status = 'suspended'"
-    ).fetch_one(pool.get_ref()).await.unwrap_or(0);
+    let suspended_merchants: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM merchants WHERE billing_status = 'suspended'")
+            .fetch_one(pool.get_ref())
+            .await
+            .unwrap_or(0);
 
-    let past_due_merchants: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM merchants WHERE billing_status = 'past_due'"
-    ).fetch_one(pool.get_ref()).await.unwrap_or(0);
+    let past_due_merchants: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM merchants WHERE billing_status = 'past_due'")
+            .fetch_one(pool.get_ref())
+            .await
+            .unwrap_or(0);
 
     let total_outstanding: f64 = sqlx::query_scalar(
         "SELECT COALESCE(SUM(outstanding_zec), 0.0) FROM billing_cycles WHERE status IN ('open', 'invoiced', 'past_due')"
     ).fetch_one(pool.get_ref()).await.unwrap_or(0.0);
 
     let total_collected: f64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(total_fees_zec), 0.0) FROM billing_cycles WHERE status = 'paid'"
-    ).fetch_one(pool.get_ref()).await.unwrap_or(0.0);
+        "SELECT COALESCE(SUM(total_fees_zec), 0.0) FROM billing_cycles WHERE status = 'paid'",
+    )
+    .fetch_one(pool.get_ref())
+    .await
+    .unwrap_or(0.0);
 
     // Recent billing cycles
     let recent_cycles: Vec<(String, String, String, String, f64, f64, String, Option<String>)> = sqlx::query_as(
@@ -283,18 +326,21 @@ pub async fn billing(
     .await
     .unwrap_or_default();
 
-    let cycles_json: Vec<serde_json::Value> = recent_cycles.iter().map(|c| {
-        serde_json::json!({
-            "id": c.0,
-            "merchant_id": c.1,
-            "merchant_name": c.2,
-            "period_end": c.3,
-            "total_fees_zec": c.4,
-            "outstanding_zec": c.5,
-            "status": c.6,
-            "grace_until": c.7,
+    let cycles_json: Vec<serde_json::Value> = recent_cycles
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "id": c.0,
+                "merchant_id": c.1,
+                "merchant_name": c.2,
+                "period_end": c.3,
+                "total_fees_zec": c.4,
+                "outstanding_zec": c.5,
+                "status": c.6,
+                "grace_until": c.7,
+            })
         })
-    }).collect();
+        .collect();
 
     actix_web::HttpResponse::Ok().json(serde_json::json!({
         "cycles": {
@@ -354,30 +400,52 @@ pub async fn webhooks(
     );
 
     let mut count_q = sqlx::query_scalar::<_, i64>(&count_sql);
-    for v in &bind_values { count_q = count_q.bind(v); }
+    for v in &bind_values {
+        count_q = count_q.bind(v);
+    }
     let total: i64 = count_q.fetch_one(pool.get_ref()).await.unwrap_or(0);
 
-    let mut list_q = sqlx::query_as::<_, (String, String, Option<String>, Option<String>, String, String, Option<i32>, Option<String>, i32, String, Option<String>)>(&list_sql);
-    for v in &bind_values { list_q = list_q.bind(v); }
+    let mut list_q = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+            String,
+            Option<i32>,
+            Option<String>,
+            i32,
+            String,
+            Option<String>,
+        ),
+    >(&list_sql);
+    for v in &bind_values {
+        list_q = list_q.bind(v);
+    }
     list_q = list_q.bind(limit).bind(offset);
 
     let rows = list_q.fetch_all(pool.get_ref()).await.unwrap_or_default();
 
-    let deliveries: Vec<serde_json::Value> = rows.iter().map(|r| {
-        serde_json::json!({
-            "id": r.0,
-            "invoice_id": r.1,
-            "event_type": r.2,
-            "merchant_id": r.3,
-            "url": r.4,
-            "status": r.5,
-            "response_status": r.6,
-            "response_error": r.7,
-            "attempts": r.8,
-            "created_at": r.9,
-            "last_attempt_at": r.10,
+    let deliveries: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "id": r.0,
+                "invoice_id": r.1,
+                "event_type": r.2,
+                "merchant_id": r.3,
+                "url": r.4,
+                "status": r.5,
+                "response_status": r.6,
+                "response_error": r.7,
+                "attempts": r.8,
+                "created_at": r.9,
+                "last_attempt_at": r.10,
+            })
         })
-    }).collect();
+        .collect();
 
     actix_web::HttpResponse::Ok().json(serde_json::json!({
         "deliveries": deliveries,
@@ -407,25 +475,34 @@ pub async fn system(
     let scanner_height = crate::db::get_scanner_state(pool.get_ref(), "last_height").await;
 
     let rates = price_service.get_rates().await.ok();
-    let price_info = rates.map(|r| serde_json::json!({
-        "zec_eur": r.zec_eur,
-        "zec_usd": r.zec_usd,
-        "zec_brl": r.zec_brl,
-        "zec_gbp": r.zec_gbp,
-        "updated_at": r.updated_at.to_rfc3339(),
-    }));
+    let price_info = rates.map(|r| {
+        serde_json::json!({
+            "zec_eur": r.zec_eur,
+            "zec_usd": r.zec_usd,
+            "zec_brl": r.zec_brl,
+            "zec_gbp": r.zec_gbp,
+            "updated_at": r.updated_at.to_rfc3339(),
+        })
+    });
 
-    let pending_webhooks: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM webhook_deliveries WHERE status = 'pending'"
-    ).fetch_one(pool.get_ref()).await.unwrap_or(0);
+    let pending_webhooks: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM webhook_deliveries WHERE status = 'pending'")
+            .fetch_one(pool.get_ref())
+            .await
+            .unwrap_or(0);
 
-    let failed_webhooks: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM webhook_deliveries WHERE status = 'failed'"
-    ).fetch_one(pool.get_ref()).await.unwrap_or(0);
+    let failed_webhooks: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM webhook_deliveries WHERE status = 'failed'")
+            .fetch_one(pool.get_ref())
+            .await
+            .unwrap_or(0);
 
     let active_sessions: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM sessions WHERE expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
-    ).fetch_one(pool.get_ref()).await.unwrap_or(0);
+        "SELECT COUNT(*) FROM sessions WHERE expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
+    )
+    .fetch_one(pool.get_ref())
+    .await
+    .unwrap_or(0);
 
     actix_web::HttpResponse::Ok().json(serde_json::json!({
         "network": config.network,

@@ -1,7 +1,9 @@
 use actix_web::{web, HttpRequest, HttpResponse};
 use sqlx::SqlitePool;
 
-use crate::payment_links::{self, CreatePaymentLinkRequest, CreateDonationLinkRequest, UpdatePaymentLinkRequest};
+use crate::payment_links::{
+    self, CreateDonationLinkRequest, CreatePaymentLinkRequest, UpdatePaymentLinkRequest,
+};
 use crate::validation;
 
 pub async fn create(
@@ -62,10 +64,7 @@ pub async fn create_donation(
     }
 }
 
-pub async fn list(
-    req: HttpRequest,
-    pool: web::Data<SqlitePool>,
-) -> HttpResponse {
+pub async fn list(req: HttpRequest, pool: web::Data<SqlitePool>) -> HttpResponse {
     let merchant = match super::auth::resolve_merchant_or_session(&req, &pool).await {
         Some(m) => m,
         None => {
@@ -197,16 +196,18 @@ pub async fn info(
         }
     };
 
-    let merchant_name: Option<String> = sqlx::query_scalar(
-        "SELECT name FROM merchants WHERE id = ?"
-    )
-    .bind(&link.merchant_id)
-    .fetch_optional(pool.get_ref())
-    .await
-    .ok()
-    .flatten();
+    let merchant_name: Option<String> =
+        sqlx::query_scalar("SELECT name FROM merchants WHERE id = ?")
+            .bind(&link.merchant_id)
+            .fetch_optional(pool.get_ref())
+            .await
+            .ok()
+            .flatten();
 
-    let frontend_url = config.frontend_url.as_deref().unwrap_or("https://cipherpay.app");
+    let frontend_url = config
+        .frontend_url
+        .as_deref()
+        .unwrap_or("https://cipherpay.app");
 
     let mut response = serde_json::json!({
         "slug": link.slug,
@@ -236,9 +237,11 @@ pub async fn info(
                 "social_share_text": config.social_share_text,
             });
         }
-        response["donate_url"] = serde_json::json!(format!("{}/en/donate/{}", frontend_url, link.slug));
+        response["donate_url"] =
+            serde_json::json!(format!("{}/en/donate/{}", frontend_url, link.slug));
     } else {
-        response["checkout_url"] = serde_json::json!(format!("{}/link/{}", frontend_url, link.slug));
+        response["checkout_url"] =
+            serde_json::json!(format!("{}/link/{}", frontend_url, link.slug));
     }
 
     HttpResponse::Ok().json(response)
@@ -308,7 +311,8 @@ async fn resolve_donation(
         }
     };
 
-    let currency = body.get("currency")
+    let currency = body
+        .get("currency")
         .and_then(|v| v.as_str())
         .unwrap_or(&donation_config.currency);
 
@@ -324,8 +328,12 @@ async fn resolve_donation(
     }
 
     let merchant = match crate::merchants::get_merchant_by_id(
-        pool.get_ref(), &link.merchant_id, &config.encryption_key
-    ).await {
+        pool.get_ref(),
+        &link.merchant_id,
+        &config.encryption_key,
+    )
+    .await
+    {
         Ok(Some(m)) => m,
         _ => {
             return HttpResponse::InternalServerError().json(serde_json::json!({
@@ -335,7 +343,9 @@ async fn resolve_donation(
     };
 
     if config.fee_enabled() {
-        if let Ok(status) = crate::billing::get_merchant_billing_status(pool.get_ref(), &merchant.id).await {
+        if let Ok(status) =
+            crate::billing::get_merchant_billing_status(pool.get_ref(), &merchant.id).await
+        {
             if status == "past_due" || status == "suspended" {
                 return HttpResponse::PaymentRequired().json(serde_json::json!({
                     "error": "Merchant account has outstanding fees"
@@ -355,7 +365,9 @@ async fn resolve_donation(
     };
 
     let amount_fiat = amount_cents as f64 / 100.0;
-    let display_name = donation_config.campaign_name.as_deref()
+    let display_name = donation_config
+        .campaign_name
+        .as_deref()
         .filter(|n| !n.is_empty())
         .map(|n| n.to_string())
         .unwrap_or_else(|| {
@@ -378,10 +390,13 @@ async fn resolve_donation(
     };
 
     let fee_config = if config.fee_enabled() {
-        config.fee_address.as_ref().map(|addr| crate::invoices::FeeConfig {
-            fee_address: addr.clone(),
-            fee_rate: config.fee_rate,
-        })
+        config
+            .fee_address
+            .as_ref()
+            .map(|addr| crate::invoices::FeeConfig {
+                fee_address: addr.clone(),
+                fee_rate: config.fee_rate,
+            })
     } else {
         None
     };
@@ -401,16 +416,17 @@ async fn resolve_donation(
             let _ = payment_links::increment_created(pool.get_ref(), &link.id).await;
 
             // Tag the invoice as a donation and link it to the campaign
-            sqlx::query(
-                "UPDATE invoices SET payment_link_id = ?, is_donation = 1 WHERE id = ?"
-            )
-            .bind(&link.id)
-            .bind(&resp.invoice_id)
-            .execute(pool.get_ref())
-            .await
-            .ok();
+            sqlx::query("UPDATE invoices SET payment_link_id = ?, is_donation = 1 WHERE id = ?")
+                .bind(&link.id)
+                .bind(&resp.invoice_id)
+                .execute(pool.get_ref())
+                .await
+                .ok();
 
-            let frontend_url = config.frontend_url.as_deref().unwrap_or("https://cipherpay.app");
+            let frontend_url = config
+                .frontend_url
+                .as_deref()
+                .unwrap_or("https://cipherpay.app");
             let checkout_url = format!("{}/pay/{}", frontend_url, resp.invoice_id);
 
             HttpResponse::Created().json(serde_json::json!({
@@ -469,8 +485,12 @@ async fn resolve_payment(
     };
 
     let merchant = match crate::merchants::get_merchant_by_id(
-        pool.get_ref(), &link.merchant_id, &config.encryption_key
-    ).await {
+        pool.get_ref(),
+        &link.merchant_id,
+        &config.encryption_key,
+    )
+    .await
+    {
         Ok(Some(m)) => m,
         _ => {
             return HttpResponse::InternalServerError().json(serde_json::json!({
@@ -480,7 +500,9 @@ async fn resolve_payment(
     };
 
     if config.fee_enabled() {
-        if let Ok(status) = crate::billing::get_merchant_billing_status(pool.get_ref(), &merchant.id).await {
+        if let Ok(status) =
+            crate::billing::get_merchant_billing_status(pool.get_ref(), &merchant.id).await
+        {
             if status == "past_due" || status == "suspended" {
                 return HttpResponse::PaymentRequired().json(serde_json::json!({
                     "error": "Merchant account has outstanding fees"
@@ -510,10 +532,13 @@ async fn resolve_payment(
     };
 
     let fee_config = if config.fee_enabled() {
-        config.fee_address.as_ref().map(|addr| crate::invoices::FeeConfig {
-            fee_address: addr.clone(),
-            fee_rate: config.fee_rate,
-        })
+        config
+            .fee_address
+            .as_ref()
+            .map(|addr| crate::invoices::FeeConfig {
+                fee_address: addr.clone(),
+                fee_rate: config.fee_rate,
+            })
     } else {
         None
     };
@@ -533,22 +558,26 @@ async fn resolve_payment(
             let _ = payment_links::increment_created(pool.get_ref(), &link.id).await;
 
             // Tag with payment_link_id for tracking
-            sqlx::query(
-                "UPDATE invoices SET payment_link_id = ? WHERE id = ?"
-            )
-            .bind(&link.id)
-            .bind(&resp.invoice_id)
-            .execute(pool.get_ref())
-            .await
-            .ok();
+            sqlx::query("UPDATE invoices SET payment_link_id = ? WHERE id = ?")
+                .bind(&link.id)
+                .bind(&resp.invoice_id)
+                .execute(pool.get_ref())
+                .await
+                .ok();
 
-            let frontend_url = config.frontend_url.as_deref().unwrap_or("https://cipherpay.app");
+            let frontend_url = config
+                .frontend_url
+                .as_deref()
+                .unwrap_or("https://cipherpay.app");
             let mut checkout_url = format!("{}/pay/{}", frontend_url, resp.invoice_id);
             if let Some(ref success) = link.success_url {
-                let encoded: String = success.chars().map(|c| match c {
-                    '&' | '=' | '?' | '#' | ' ' => format!("%{:02X}", c as u8),
-                    _ => c.to_string(),
-                }).collect();
+                let encoded: String = success
+                    .chars()
+                    .map(|c| match c {
+                        '&' | '=' | '?' | '#' | ' ' => format!("%{:02X}", c as u8),
+                        _ => c.to_string(),
+                    })
+                    .collect();
                 checkout_url = format!("{}?return_url={}", checkout_url, encoded);
             }
 
@@ -610,7 +639,9 @@ fn validate_create(req: &CreatePaymentLinkRequest) -> Result<(), validation::Val
     Ok(())
 }
 
-fn validate_create_donation(req: &CreateDonationLinkRequest) -> Result<(), validation::ValidationError> {
+fn validate_create_donation(
+    req: &CreateDonationLinkRequest,
+) -> Result<(), validation::ValidationError> {
     validation::validate_length("name", &req.name, 200)?;
     if let Some(ref mission) = req.mission {
         validation::validate_length("mission", mission, 2000)?;

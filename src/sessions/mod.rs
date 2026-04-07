@@ -17,6 +17,22 @@ pub struct Session {
     pub closed_at: Option<String>,
 }
 
+type SessionRow = (
+    String,
+    String,
+    String,
+    String,
+    i64,
+    i64,
+    i64,
+    i64,
+    Option<String>,
+    String,
+    String,
+    String,
+    Option<String>,
+);
+
 pub struct SessionSummary {
     pub session_id: String,
     pub requests_made: i64,
@@ -55,7 +71,8 @@ pub async fn create_session(
     .execute(pool)
     .await?;
 
-    let session = get_session(pool, &id).await?
+    let session = get_session(pool, &id)
+        .await?
         .ok_or_else(|| anyhow::anyhow!("Session creation failed"))?;
 
     tracing::info!(
@@ -70,7 +87,7 @@ pub async fn create_session(
 }
 
 pub async fn get_session(pool: &SqlitePool, session_id: &str) -> Result<Option<Session>> {
-    let row = sqlx::query_as::<_, (String, String, String, String, i64, i64, i64, i64, Option<String>, String, String, String, Option<String>)>(
+    let row = sqlx::query_as::<_, SessionRow>(
         "SELECT id, merchant_id, deposit_txid, bearer_token, balance_zatoshis, balance_remaining, cost_per_request, requests_made, refund_address, status, expires_at, created_at, closed_at
          FROM agent_sessions WHERE id = ?"
     )
@@ -78,21 +95,22 @@ pub async fn get_session(pool: &SqlitePool, session_id: &str) -> Result<Option<S
     .fetch_optional(pool)
     .await?;
 
-    Ok(row.map(|r| Session {
-        id: r.0,
-        merchant_id: r.1,
-        deposit_txid: r.2,
-        bearer_token: r.3,
-        balance_zatoshis: r.4,
-        balance_remaining: r.5,
-        cost_per_request: r.6,
-        requests_made: r.7,
-        refund_address: r.8,
-        status: r.9,
-        expires_at: r.10,
-        created_at: r.11,
-        closed_at: r.12,
-    }))
+    Ok(row.map(session_from_row))
+}
+
+pub async fn get_session_by_token(
+    pool: &SqlitePool,
+    bearer_token: &str,
+) -> Result<Option<Session>> {
+    let row = sqlx::query_as::<_, SessionRow>(
+        "SELECT id, merchant_id, deposit_txid, bearer_token, balance_zatoshis, balance_remaining, cost_per_request, requests_made, refund_address, status, expires_at, created_at, closed_at
+         FROM agent_sessions WHERE bearer_token = ?"
+    )
+    .bind(bearer_token)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(session_from_row))
 }
 
 pub async fn validate_and_deduct(pool: &SqlitePool, bearer_token: &str) -> Result<Option<Session>> {
@@ -105,7 +123,7 @@ pub async fn validate_and_deduct(pool: &SqlitePool, bearer_token: &str) -> Resul
          WHERE bearer_token = ?
            AND status = 'active'
            AND balance_remaining >= cost_per_request
-           AND expires_at >= strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
+           AND expires_at >= strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
     )
     .bind(bearer_token)
     .execute(pool)
@@ -118,7 +136,7 @@ pub async fn validate_and_deduct(pool: &SqlitePool, bearer_token: &str) -> Resul
                 WHEN expires_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now') THEN 'expired'
                 WHEN balance_remaining < cost_per_request THEN 'depleted'
                 ELSE status END
-             WHERE bearer_token = ? AND status = 'active'"
+             WHERE bearer_token = ? AND status = 'active'",
         )
         .bind(bearer_token)
         .execute(pool)
@@ -131,30 +149,35 @@ pub async fn validate_and_deduct(pool: &SqlitePool, bearer_token: &str) -> Resul
     // Read back the updated session state
     let row = sqlx::query_as::<_, (String, String, i64, i64, i64, Option<String>)>(
         "SELECT id, merchant_id, balance_remaining, cost_per_request, requests_made, refund_address
-         FROM agent_sessions WHERE bearer_token = ?"
+         FROM agent_sessions WHERE bearer_token = ?",
     )
     .bind(bearer_token)
     .fetch_optional(pool)
     .await?;
 
     match row {
-        Some((id, merchant_id, balance_remaining, cost_per_request, requests_made, refund_address)) => {
-            Ok(Some(Session {
-                id,
-                merchant_id,
-                deposit_txid: String::new(),
-                bearer_token: bearer_token.to_string(),
-                balance_zatoshis: 0,
-                balance_remaining,
-                cost_per_request,
-                requests_made,
-                refund_address,
-                status: "active".to_string(),
-                expires_at: String::new(),
-                created_at: String::new(),
-                closed_at: None,
-            }))
-        }
+        Some((
+            id,
+            merchant_id,
+            balance_remaining,
+            cost_per_request,
+            requests_made,
+            refund_address,
+        )) => Ok(Some(Session {
+            id,
+            merchant_id,
+            deposit_txid: String::new(),
+            bearer_token: bearer_token.to_string(),
+            balance_zatoshis: 0,
+            balance_remaining,
+            cost_per_request,
+            requests_made,
+            refund_address,
+            status: "active".to_string(),
+            expires_at: String::new(),
+            created_at: String::new(),
+            closed_at: None,
+        })),
         None => Ok(None),
     }
 }
@@ -217,7 +240,7 @@ pub async fn get_summary(pool: &SqlitePool, session_id: &str) -> Result<Option<S
 
 /// List sessions for a merchant (dashboard view)
 pub async fn list_for_merchant(pool: &SqlitePool, merchant_id: &str) -> Result<Vec<Session>> {
-    let rows = sqlx::query_as::<_, (String, String, String, String, i64, i64, i64, i64, Option<String>, String, String, String, Option<String>)>(
+    let rows = sqlx::query_as::<_, SessionRow>(
         "SELECT id, merchant_id, deposit_txid, bearer_token, balance_zatoshis, balance_remaining, cost_per_request, requests_made, refund_address, status, expires_at, created_at, closed_at
          FROM agent_sessions WHERE merchant_id = ? ORDER BY created_at DESC LIMIT 100"
     )
@@ -225,37 +248,26 @@ pub async fn list_for_merchant(pool: &SqlitePool, merchant_id: &str) -> Result<V
     .fetch_all(pool)
     .await?;
 
-    Ok(rows.into_iter().map(|r| Session {
-        id: r.0,
-        merchant_id: r.1,
-        deposit_txid: r.2,
-        bearer_token: r.3,
-        balance_zatoshis: r.4,
-        balance_remaining: r.5,
-        cost_per_request: r.6,
-        requests_made: r.7,
-        refund_address: r.8,
-        status: r.9,
-        expires_at: r.10,
-        created_at: r.11,
-        closed_at: r.12,
-    }).collect())
+    Ok(rows.into_iter().map(session_from_row).collect())
 }
 
 /// Check if a deposit txid has already been used for a session
 pub async fn txid_already_used(pool: &SqlitePool, txid: &str) -> bool {
-    sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM agent_sessions WHERE deposit_txid = ?"
-    )
-    .bind(txid)
-    .fetch_one(pool)
-    .await
-    .unwrap_or(0) > 0
+    sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM agent_sessions WHERE deposit_txid = ?")
+        .bind(txid)
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0)
+        > 0
 }
 
 /// Deduct a variable amount from a session (used for streaming metering).
 /// Returns the updated session if successful, None if insufficient balance or inactive.
-pub async fn deduct(pool: &SqlitePool, bearer_token: &str, amount_zatoshis: i64) -> Result<Option<Session>> {
+pub async fn deduct(
+    pool: &SqlitePool,
+    bearer_token: &str,
+    amount_zatoshis: i64,
+) -> Result<Option<Session>> {
     if amount_zatoshis <= 0 {
         anyhow::bail!("Deduction amount must be positive");
     }
@@ -267,7 +279,7 @@ pub async fn deduct(pool: &SqlitePool, bearer_token: &str, amount_zatoshis: i64)
          WHERE bearer_token = ?
            AND status = 'active'
            AND balance_remaining >= ?
-           AND expires_at >= strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
+           AND expires_at >= strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
     )
     .bind(amount_zatoshis)
     .bind(bearer_token)
@@ -281,7 +293,7 @@ pub async fn deduct(pool: &SqlitePool, bearer_token: &str, amount_zatoshis: i64)
                 WHEN expires_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now') THEN 'expired'
                 WHEN balance_remaining < ? THEN 'depleted'
                 ELSE status END
-             WHERE bearer_token = ? AND status = 'active'"
+             WHERE bearer_token = ? AND status = 'active'",
         )
         .bind(amount_zatoshis)
         .bind(bearer_token)
@@ -294,30 +306,35 @@ pub async fn deduct(pool: &SqlitePool, bearer_token: &str, amount_zatoshis: i64)
 
     let row = sqlx::query_as::<_, (String, String, i64, i64, i64, Option<String>)>(
         "SELECT id, merchant_id, balance_remaining, cost_per_request, requests_made, refund_address
-         FROM agent_sessions WHERE bearer_token = ?"
+         FROM agent_sessions WHERE bearer_token = ?",
     )
     .bind(bearer_token)
     .fetch_optional(pool)
     .await?;
 
     match row {
-        Some((id, merchant_id, balance_remaining, cost_per_request, requests_made, refund_address)) => {
-            Ok(Some(Session {
-                id,
-                merchant_id,
-                deposit_txid: String::new(),
-                bearer_token: bearer_token.to_string(),
-                balance_zatoshis: 0,
-                balance_remaining,
-                cost_per_request,
-                requests_made,
-                refund_address,
-                status: "active".to_string(),
-                expires_at: String::new(),
-                created_at: String::new(),
-                closed_at: None,
-            }))
-        }
+        Some((
+            id,
+            merchant_id,
+            balance_remaining,
+            cost_per_request,
+            requests_made,
+            refund_address,
+        )) => Ok(Some(Session {
+            id,
+            merchant_id,
+            deposit_txid: String::new(),
+            bearer_token: bearer_token.to_string(),
+            balance_zatoshis: 0,
+            balance_remaining,
+            cost_per_request,
+            requests_made,
+            refund_address,
+            status: "active".to_string(),
+            expires_at: String::new(),
+            created_at: String::new(),
+            closed_at: None,
+        })),
         None => Ok(None),
     }
 }
@@ -353,11 +370,14 @@ pub async fn create_session_request(
 }
 
 /// Look up a pending session request by ID.
-pub async fn get_session_request(pool: &SqlitePool, request_id: &str) -> Result<Option<SessionRequest>> {
+pub async fn get_session_request(
+    pool: &SqlitePool,
+    request_id: &str,
+) -> Result<Option<SessionRequest>> {
     let row = sqlx::query_as::<_, (String, String, String, i64, String)>(
         "SELECT id, merchant_id, deposit_address, diversifier_index, expires_at
          FROM session_requests WHERE id = ? AND status = 'pending'
-         AND expires_at >= strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
+         AND expires_at >= strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
     )
     .bind(request_id)
     .fetch_optional(pool)
@@ -393,4 +413,22 @@ fn generate_token() -> String {
     let uuid1 = uuid::Uuid::new_v4();
     let uuid2 = uuid::Uuid::new_v4();
     format!("cps_{}{}", uuid1.simple(), uuid2.simple())
+}
+
+fn session_from_row(row: SessionRow) -> Session {
+    Session {
+        id: row.0,
+        merchant_id: row.1,
+        deposit_txid: row.2,
+        bearer_token: row.3,
+        balance_zatoshis: row.4,
+        balance_remaining: row.5,
+        cost_per_request: row.6,
+        requests_made: row.7,
+        refund_address: row.8,
+        status: row.9,
+        expires_at: row.10,
+        created_at: row.11,
+        closed_at: row.12,
+    }
 }
