@@ -55,6 +55,7 @@ pub struct BillingSummary {
     pub total_fees_zatoshis: i64,
     pub auto_collected_zatoshis: i64,
     pub outstanding_zatoshis: i64,
+    pub settlement_invoice_status: Option<String>,
 }
 
 pub async fn create_fee_entry(
@@ -189,6 +190,16 @@ pub async fn get_billing_summary(
         None => (0, 0, 0),
     };
 
+    let settlement_invoice_status: Option<String> = match &current_cycle {
+        Some(c) if c.settlement_invoice_id.is_some() => {
+            sqlx::query_scalar("SELECT status FROM invoices WHERE id = ?")
+                .bind(c.settlement_invoice_id.as_ref().unwrap())
+                .fetch_optional(pool)
+                .await?
+        }
+        _ => None,
+    };
+
     Ok(BillingSummary {
         fee_rate: config.fee_rate,
         trust_tier,
@@ -200,6 +211,7 @@ pub async fn get_billing_summary(
         total_fees_zatoshis,
         auto_collected_zatoshis,
         outstanding_zatoshis,
+        settlement_invoice_status,
     })
 }
 

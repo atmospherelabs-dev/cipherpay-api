@@ -1084,6 +1084,7 @@ async fn billing_summary(
             "auto_collected_zec": summary.auto_collected_zec,
             "outstanding_zec": summary.outstanding_zec,
             "min_settlement_zec": 0.05,
+            "settlement_invoice_status": summary.settlement_invoice_status,
         })),
         Err(e) => {
             tracing::error!(error = %e, "Failed to get billing summary");
