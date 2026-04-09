@@ -208,9 +208,13 @@ pub async fn run(config: Config, pool: SqlitePool, http: reqwest::Client) {
 /// Build or refresh the PIVK cache when the merchant set changes.
 /// Compares merchant IDs (not just count) so additions, deletions,
 /// or replacements all trigger a rebuild.
+/// When `fee_ufvk` is set, a synthetic "__platform_fee__" entry is
+/// appended so settlement invoice payments to `fee_address` are
+/// decrypted and matched like any other invoice.
 fn refresh_key_cache<'a>(
     cache: &'a mut Option<KeyCache>,
     merchants: &[crate::merchants::Merchant],
+    fee_ufvk: Option<&str>,
 ) -> &'a [(String, decrypt::CachedKeys)] {
     let current_ids: Vec<String> = merchants.iter().map(|m| m.id.clone()).collect();
 
@@ -220,11 +224,17 @@ fn refresh_key_cache<'a>(
     };
 
     if needs_refresh {
-        let mut keys = Vec::with_capacity(merchants.len());
+        let mut keys = Vec::with_capacity(merchants.len() + 1);
         for m in merchants {
             match decrypt::prepare_keys(&m.ufvk) {
                 Ok(k) => keys.push((m.id.clone(), k)),
                 Err(e) => tracing::warn!(merchant_id = %m.id, error = %e, "Failed to prepare PIVK"),
+            }
+        }
+        if let Some(ufvk) = fee_ufvk {
+            match decrypt::prepare_keys(ufvk) {
+                Ok(k) => keys.push(("__platform_fee__".to_string(), k)),
+                Err(e) => tracing::warn!(error = %e, "Failed to prepare fee wallet PIVK"),
             }
         }
         tracing::info!(merchants = keys.len(), "PIVK cache refreshed");
@@ -287,11 +297,12 @@ async fn scan_mempool(
     }
 
     let merchants = crate::merchants::get_all_merchants(pool, &config.encryption_key).await?;
-    if merchants.is_empty() {
+    let fee_ufvk = config.fee_ufvk.as_deref();
+    if merchants.is_empty() && fee_ufvk.is_none() {
         return Ok(());
     }
 
-    let cached_keys = refresh_key_cache(key_cache, &merchants);
+    let cached_keys = refresh_key_cache(key_cache, &merchants, fee_ufvk);
 
     let mempool_txids = mempool::fetch_mempool_txids(http, &config.cipherscan_api_url).await?;
 
@@ -418,11 +429,12 @@ async fn process_ws_mempool_tx(
     }
 
     let merchants = crate::merchants::get_all_merchants(pool, &config.encryption_key).await?;
-    if merchants.is_empty() {
+    let fee_ufvk = config.fee_ufvk.as_deref();
+    if merchants.is_empty() && fee_ufvk.is_none() {
         return Ok(());
     }
 
-    let cached_keys = refresh_key_cache(key_cache, &merchants);
+    let cached_keys = refresh_key_cache(key_cache, &merchants, fee_ufvk);
     let invoice_index = matching::InvoiceIndex::build(&pending);
 
     let mut invoice_totals: HashMap<String, (invoices::Invoice, i64)> = HashMap::new();
@@ -579,7 +591,7 @@ async fn scan_blocks(
         }
 
         let merchants = crate::merchants::get_all_merchants(pool, &config.encryption_key).await?;
-        let cached_keys = refresh_key_cache(key_cache, &merchants);
+        let cached_keys = refresh_key_cache(key_cache, &merchants, config.fee_ufvk.as_deref());
         let block_txids =
             blocks::fetch_block_txids(http, &config.cipherscan_api_url, start_height, batch_end)
                 .await?;
