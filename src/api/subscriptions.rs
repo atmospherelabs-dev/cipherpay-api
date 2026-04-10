@@ -166,7 +166,7 @@ pub async fn simulate_period_end(
                 let http = reqwest::Client::new();
                 let payload = serde_json::json!({
                     "subscription_id": new_sub.id,
-                    "invoice_id": "simulated",
+                    "simulated": true,
                     "new_period_start": new_sub.current_period_start,
                     "new_period_end": new_sub.current_period_end,
                 });
