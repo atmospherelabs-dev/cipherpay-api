@@ -175,28 +175,33 @@ pub async fn process_renewals(
     let mut actions = 0u32;
 
     // 1. Cancel subscriptions marked for end-of-period cancellation
-    let canceled = sqlx::query(
-        "UPDATE subscriptions SET status = 'canceled'
-         WHERE cancel_at_period_end = 1 AND current_period_end <= ? AND status = 'active'",
-    )
-    .bind(&now_str)
-    .execute(pool)
-    .await?;
+    // First, select the ones we're about to cancel (before updating) so we dispatch webhooks only for these
+    let q = format!(
+        "SELECT {} FROM subscriptions WHERE cancel_at_period_end = 1 AND current_period_end <= ? AND status = 'active'",
+        SUB_COLS
+    );
+    let to_cancel: Vec<Subscription> = sqlx::query_as::<_, Subscription>(&q)
+        .bind(&now_str)
+        .fetch_all(pool)
+        .await?;
 
-    if canceled.rows_affected() > 0 {
+    if !to_cancel.is_empty() {
+        // Now update them
+        sqlx::query(
+            "UPDATE subscriptions SET status = 'canceled'
+             WHERE cancel_at_period_end = 1 AND current_period_end <= ? AND status = 'active'",
+        )
+        .bind(&now_str)
+        .execute(pool)
+        .await?;
+
         tracing::info!(
-            count = canceled.rows_affected(),
+            count = to_cancel.len(),
             "Subscriptions canceled at period end"
         );
-        // Fire webhooks for canceled subscriptions
-        let q = format!(
-            "SELECT {} FROM subscriptions WHERE status = 'canceled' AND cancel_at_period_end = 1",
-            SUB_COLS
-        );
-        let canceled_subs: Vec<Subscription> = sqlx::query_as::<_, Subscription>(&q)
-            .fetch_all(pool)
-            .await?;
-        for sub in &canceled_subs {
+
+        // Fire webhooks only for the subscriptions we just canceled
+        for sub in &to_cancel {
             let payload = serde_json::json!({
                 "subscription_id": sub.id,
                 "price_id": sub.price_id,
@@ -211,7 +216,7 @@ pub async fn process_renewals(
             )
             .await;
         }
-        actions += canceled.rows_affected() as u32;
+        actions += to_cancel.len() as u32;
     }
 
     // 2. Generate draft invoices for active subscriptions approaching period end
@@ -326,6 +331,8 @@ pub async fn process_renewals(
     }
 
     // 3. Advance paid periods (subscriptions past period_end with confirmed invoice)
+    // Note: subscription.renewed webhook is dispatched by the scanner on payment confirmation.
+    // This step is a fallback for edge cases (e.g., server restart during scan).
     let q = format!(
         "SELECT {} FROM subscriptions WHERE status = 'active' AND current_period_end <= ? AND cancel_at_period_end = 0",
         SUB_COLS
@@ -346,21 +353,8 @@ pub async fn process_renewals(
 
                 if let Some((ref status,)) = inv_status {
                     if status == "confirmed" {
-                        if let Some(new_sub) = advance_subscription_period(pool, &sub.id).await? {
-                            let payload = serde_json::json!({
-                                "subscription_id": new_sub.id,
-                                "new_period_start": new_sub.current_period_start,
-                                "new_period_end": new_sub.current_period_end,
-                            });
-                            let _ = crate::webhooks::dispatch_event(
-                                pool,
-                                http,
-                                &sub.merchant_id,
-                                "subscription.renewed",
-                                payload,
-                                encryption_key,
-                            )
-                            .await;
+                        // Just advance the period — webhook already dispatched by scanner
+                        if advance_subscription_period(pool, &sub.id).await?.is_some() {
                             actions += 1;
                         }
                         continue;
