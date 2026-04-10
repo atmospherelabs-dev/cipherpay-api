@@ -1457,6 +1457,34 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
     })
     .await?;
 
+    // Billing email infrastructure: per-merchant fee rate, discount expiry, email idempotency
+    run_tracked_migration(&pool, "billing_emails_v2026_04_10", || async {
+        for sql in &[
+            "ALTER TABLE merchants ADD COLUMN fee_rate REAL",
+            "ALTER TABLE merchants ADD COLUMN fee_discount_until TEXT",
+            "ALTER TABLE fee_ledger ADD COLUMN fee_rate_applied REAL",
+        ] {
+            sqlx::query(sql).execute(&pool).await.ok();
+        }
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS email_events (
+                id TEXT PRIMARY KEY,
+                merchant_id TEXT NOT NULL,
+                template TEXT NOT NULL,
+                entity_id TEXT NOT NULL,
+                sent_at TEXT NOT NULL,
+                UNIQUE(merchant_id, template, entity_id)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .ok();
+
+        Ok(())
+    })
+    .await?;
+
     Ok(pool)
 }
 
