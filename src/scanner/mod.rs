@@ -124,7 +124,7 @@ pub async fn run(config: Config, pool: SqlitePool, http: reqwest::Client) {
                     }
 
                     if mempool_config.fee_enabled() {
-                        let _ = billing::check_settlement_payments(&mempool_pool).await;
+                        let _ = billing::check_settlement_payments(&mempool_pool, &mempool_config).await;
                     }
                 }
             }
@@ -850,7 +850,15 @@ async fn on_invoice_confirmed(
         return;
     }
 
-    let fee_amount = invoice.price_zec * config.fee_rate;
+    let fee_rate = match billing::get_effective_fee_rate(pool, &invoice.merchant_id, config).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to get merchant fee rate, using default");
+            config.fee_rate
+        }
+    };
+
+    let fee_amount = invoice.price_zec * fee_rate;
     if fee_amount < 0.00025 {
         return;
     }
@@ -860,7 +868,8 @@ async fn on_invoice_confirmed(
     }
 
     if let Err(e) =
-        billing::create_fee_entry(pool, &invoice.id, &invoice.merchant_id, fee_amount).await
+        billing::create_fee_entry(pool, &invoice.id, &invoice.merchant_id, fee_amount, fee_rate)
+            .await
     {
         tracing::error!(error = %e, "Failed to create fee entry");
     }

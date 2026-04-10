@@ -174,6 +174,7 @@ Privacy-preserving Zcash payment gateway. Non-custodial, shielded-only.
   - Cron job with cryptographic erasure (not just NULL, but overwrite)
   - Zero-knowledge order fulfillment: merchant gets shipping label, not raw address
 - [ ] **PostgreSQL migration** for production (multi-tenant, proper indexing)
+  - [ ] Separate `settlement_invoices` table from `invoices` — settlement invoices (bills from CipherPay to merchants) currently share the `invoices` table for scanner pipeline reuse; split into dedicated table with shared detection trait during Postgres migration
 - [ ] **Read/write role separation after Postgres** — reserve migration path for scanner-heavy reads, webhook writes, and dashboard queries so one hot connection pool does not do everything
 - [ ] **Multi-node CipherScan infrastructure**
   - Load balancer in front of multiple Zebra nodes
@@ -258,6 +259,7 @@ Privacy-preserving Zcash payment gateway. Non-custodial, shielded-only.
   - Enterprise: dedicated infrastructure, SLA, custom integrations
 - [ ] API key rate limiting per tier
 - [ ] Merchant dashboard (invoice history, analytics, webhook logs)
+- [ ] **Billing export** — CSV/PDF export of billing cycles and settlement invoices for accounting
 - [ ] Multi-merchant management (agencies managing multiple stores)
 - [ ] **Evaluate `mpp-rs` crate adoption** — replace custom MPP challenge/credential handling in `@cipherpay/x402` with the first-party [mpp-rs](https://github.com/nicholasgasior/mpp) Rust crate
   - Reduces protocol maintenance burden as MPP spec evolves
