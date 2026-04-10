@@ -111,6 +111,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 "/subscriptions/{id}/cancel",
                 web::post().to(subscriptions::cancel),
             )
+            .route(
+                "/subscriptions/{id}/simulate-period-end",
+                web::post().to(subscriptions::simulate_period_end),
+            )
             // Payment links (merchant auth)
             .route("/payment-links", web::post().to(payment_links::create))
             .route("/payment-links", web::get().to(payment_links::list))
