@@ -6,10 +6,9 @@ use orchard::{
     note_encryption::OrchardDomain,
 };
 use zcash_address::unified::{Container, Encoding, Fvk, Ivk, Ufvk, Uivk};
-#[allow(deprecated)]
-use zcash_address::Network as NetworkType;
 use zcash_note_encryption::try_note_decryption;
 use zcash_primitives::transaction::Transaction;
+use zcash_protocol::consensus::NetworkType;
 
 /// Accept payments within 0.5% of invoice price to account for
 /// wallet rounding and network fee differences.

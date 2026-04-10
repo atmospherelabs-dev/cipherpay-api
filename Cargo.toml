@@ -33,6 +33,7 @@ zcash_primitives = { version = "0.25", default-features = false }
 zcash_note_encryption = "0.4"
 orchard = { version = "0.11", default-features = false, features = ["std"] }
 zcash_address = "0.10"
+zcash_protocol = "0.7"
 
 # Crypto / hashing
 sha2 = "0.10"
