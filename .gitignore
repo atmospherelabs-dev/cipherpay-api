@@ -6,3 +6,6 @@
 *.db-shm
 *.db-wal
 .bizdev-outreach.md
+
+# Internal docs (referral program, strategy)
+docs/REFERRAL-*
