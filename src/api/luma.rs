@@ -4,8 +4,6 @@ use sqlx::SqlitePool;
 use crate::config::Config;
 use crate::events::parse_event_datetime;
 
-use super::auth::resolve_session;
-
 /// Normalize a Luma ISO 8601 datetime (e.g. "2026-04-01T15:00:00.000Z") to "YYYY-MM-DDTHH:MM"
 fn normalize_luma_date(s: &str) -> Option<String> {
     parse_event_datetime(s).map(|dt| dt.format("%Y-%m-%dT%H:%M").to_string())
@@ -17,12 +15,9 @@ pub async fn list_events(
     pool: web::Data<SqlitePool>,
     config: web::Data<Config>,
 ) -> HttpResponse {
-    let merchant = match resolve_session(&req, &pool).await {
-        Some(m) => m,
-        None => {
-            return HttpResponse::Unauthorized()
-                .json(serde_json::json!({"error": "Not authenticated"}))
-        }
+    let merchant = match super::auth::require_session(&req, pool.get_ref()).await {
+        Ok(merchant) => merchant,
+        Err(response) => return response,
     };
 
     let api_key = match get_luma_key(pool.get_ref(), &merchant.id, &config.encryption_key).await {
@@ -107,12 +102,9 @@ pub async fn import_event(
     config: web::Data<Config>,
     body: web::Json<ImportRequest>,
 ) -> HttpResponse {
-    let merchant = match resolve_session(&req, &pool).await {
-        Some(m) => m,
-        None => {
-            return HttpResponse::Unauthorized()
-                .json(serde_json::json!({"error": "Not authenticated"}))
-        }
+    let merchant = match super::auth::require_session(&req, pool.get_ref()).await {
+        Ok(merchant) => merchant,
+        Err(response) => return response,
     };
 
     let api_key = match get_luma_key(pool.get_ref(), &merchant.id, &config.encryption_key).await {
@@ -352,12 +344,9 @@ pub async fn sync_event(
 ) -> HttpResponse {
     let event_id = path.into_inner();
 
-    let merchant = match resolve_session(&req, &pool).await {
-        Some(m) => m,
-        None => {
-            return HttpResponse::Unauthorized()
-                .json(serde_json::json!({"error": "Not authenticated"}))
-        }
+    let merchant = match super::auth::require_session(&req, pool.get_ref()).await {
+        Ok(merchant) => merchant,
+        Err(response) => return response,
     };
 
     let api_key = match get_luma_key(pool.get_ref(), &merchant.id, &config.encryption_key).await {

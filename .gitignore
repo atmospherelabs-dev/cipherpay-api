@@ -6,6 +6,8 @@
 *.db-shm
 *.db-wal
 .bizdev-outreach.md
+.cursor/
+.cargo-home/
 
 # Internal docs (referral program, strategy)
 docs/REFERRAL-*

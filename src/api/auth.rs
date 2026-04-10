@@ -381,6 +381,18 @@ pub fn extract_session_id(req: &HttpRequest) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
+pub fn not_authenticated_response() -> HttpResponse {
+    HttpResponse::Unauthorized().json(serde_json::json!({
+        "error": "Not authenticated"
+    }))
+}
+
+pub fn invalid_api_key_response() -> HttpResponse {
+    HttpResponse::Unauthorized().json(serde_json::json!({
+        "error": "Invalid API key"
+    }))
+}
+
 /// Resolve a merchant from the session cookie
 pub async fn resolve_session(req: &HttpRequest, pool: &SqlitePool) -> Option<merchants::Merchant> {
     let session_id = extract_session_id(req)?;
@@ -409,6 +421,51 @@ pub async fn resolve_merchant_or_session(
     }
 
     resolve_session(req, pool).await
+}
+
+pub async fn require_session(
+    req: &HttpRequest,
+    pool: &SqlitePool,
+) -> Result<merchants::Merchant, HttpResponse> {
+    resolve_session(req, pool)
+        .await
+        .ok_or_else(not_authenticated_response)
+}
+
+pub async fn require_merchant_or_session(
+    req: &HttpRequest,
+    pool: &SqlitePool,
+) -> Result<merchants::Merchant, HttpResponse> {
+    resolve_merchant_or_session(req, pool)
+        .await
+        .ok_or_else(not_authenticated_response)
+}
+
+pub async fn require_api_key_or_session(
+    req: &HttpRequest,
+    pool: &SqlitePool,
+) -> Result<merchants::Merchant, HttpResponse> {
+    if let Some(merchant) = resolve_session(req, pool).await {
+        return Ok(merchant);
+    }
+
+    let Some(auth_header) = req.headers().get("Authorization") else {
+        return Err(not_authenticated_response());
+    };
+    let Ok(auth_str) = auth_header.to_str() else {
+        return Err(not_authenticated_response());
+    };
+
+    let key = auth_str.strip_prefix("Bearer ").unwrap_or(auth_str).trim();
+    let enc_key = req
+        .app_data::<web::Data<crate::config::Config>>()
+        .map(|c| c.encryption_key.clone())
+        .unwrap_or_default();
+
+    match crate::merchants::authenticate(pool, key, &enc_key).await {
+        Ok(Some(merchant)) => Ok(merchant),
+        _ => Err(invalid_api_key_response()),
+    }
 }
 
 fn build_session_cookie<'a>(value: &str, config: &Config, clear: bool) -> Cookie<'a> {

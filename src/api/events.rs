@@ -4,13 +4,9 @@ use sqlx::SqlitePool;
 use crate::events::{CreateEventRequest, UpdateEventRequest};
 
 pub async fn list(req: HttpRequest, pool: web::Data<SqlitePool>) -> HttpResponse {
-    let merchant = match super::auth::resolve_session(&req, &pool).await {
-        Some(m) => m,
-        None => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Not authenticated"
-            }));
-        }
+    let merchant = match super::auth::require_session(&req, pool.get_ref()).await {
+        Ok(merchant) => merchant,
+        Err(response) => return response,
     };
 
     match crate::events::list_events_for_merchant(pool.get_ref(), &merchant.id).await {
@@ -29,13 +25,9 @@ pub async fn create(
     pool: web::Data<SqlitePool>,
     body: web::Json<CreateEventRequest>,
 ) -> HttpResponse {
-    let merchant = match super::auth::resolve_session(&req, &pool).await {
-        Some(m) => m,
-        None => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Not authenticated"
-            }));
-        }
+    let merchant = match super::auth::require_session(&req, pool.get_ref()).await {
+        Ok(merchant) => merchant,
+        Err(response) => return response,
     };
 
     match crate::events::create_event_with_product_and_prices(pool.get_ref(), &merchant.id, &body)
@@ -43,13 +35,11 @@ pub async fn create(
     {
         Ok(event) => HttpResponse::Created().json(event),
         Err(e) => {
-            let msg = e.to_string();
-            let is_validation = msg.contains("is required")
-                || msg.contains("must be > 0")
-                || msg.contains("Unsupported currency");
-            if is_validation {
+            if e.downcast_ref::<crate::events::EventValidationError>()
+                .is_some()
+            {
                 HttpResponse::BadRequest().json(serde_json::json!({
-                    "error": msg
+                    "error": e.to_string()
                 }))
             } else {
                 tracing::error!(error = %e, "Failed to create event");
@@ -66,13 +56,9 @@ pub async fn get(
     pool: web::Data<SqlitePool>,
     path: web::Path<String>,
 ) -> HttpResponse {
-    let merchant = match super::auth::resolve_session(&req, &pool).await {
-        Some(m) => m,
-        None => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Not authenticated"
-            }));
-        }
+    let merchant = match super::auth::require_session(&req, pool.get_ref()).await {
+        Ok(merchant) => merchant,
+        Err(response) => return response,
     };
 
     let event_id = path.into_inner();
@@ -96,13 +82,9 @@ pub async fn update(
     path: web::Path<String>,
     body: web::Json<UpdateEventRequest>,
 ) -> HttpResponse {
-    let merchant = match super::auth::resolve_session(&req, &pool).await {
-        Some(m) => m,
-        None => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Not authenticated"
-            }));
-        }
+    let merchant = match super::auth::require_session(&req, pool.get_ref()).await {
+        Ok(merchant) => merchant,
+        Err(response) => return response,
     };
 
     let event_id = path.into_inner();
@@ -112,13 +94,11 @@ pub async fn update(
             "error": "Event not found"
         })),
         Err(e) => {
-            let msg = e.to_string();
-            let is_validation = msg.contains("is required")
-                || msg.contains("characters or fewer")
-                || msg.contains("cannot edit");
-            if is_validation {
+            if e.downcast_ref::<crate::events::EventValidationError>()
+                .is_some()
+            {
                 HttpResponse::BadRequest().json(serde_json::json!({
-                    "error": msg
+                    "error": e.to_string()
                 }))
             } else {
                 tracing::error!(error = %e, "Failed to update event");
@@ -135,13 +115,9 @@ pub async fn archive(
     pool: web::Data<SqlitePool>,
     path: web::Path<String>,
 ) -> HttpResponse {
-    let merchant = match super::auth::resolve_session(&req, &pool).await {
-        Some(m) => m,
-        None => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Not authenticated"
-            }));
-        }
+    let merchant = match super::auth::require_session(&req, pool.get_ref()).await {
+        Ok(merchant) => merchant,
+        Err(response) => return response,
     };
 
     let event_id = path.into_inner();

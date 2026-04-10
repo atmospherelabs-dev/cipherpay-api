@@ -11,13 +11,9 @@ pub async fn create(
     pool: web::Data<SqlitePool>,
     body: web::Json<CreatePaymentLinkRequest>,
 ) -> HttpResponse {
-    let merchant = match super::auth::resolve_merchant_or_session(&req, &pool).await {
-        Some(m) => m,
-        None => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Not authenticated"
-            }));
-        }
+    let merchant = match super::auth::require_merchant_or_session(&req, pool.get_ref()).await {
+        Ok(merchant) => merchant,
+        Err(response) => return response,
     };
 
     if let Err(e) = validate_create(&body) {
@@ -40,13 +36,9 @@ pub async fn create_donation(
     pool: web::Data<SqlitePool>,
     body: web::Json<CreateDonationLinkRequest>,
 ) -> HttpResponse {
-    let merchant = match super::auth::resolve_merchant_or_session(&req, &pool).await {
-        Some(m) => m,
-        None => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Not authenticated"
-            }));
-        }
+    let merchant = match super::auth::require_merchant_or_session(&req, pool.get_ref()).await {
+        Ok(merchant) => merchant,
+        Err(response) => return response,
     };
 
     if let Err(e) = validate_create_donation(&body) {
@@ -65,13 +57,9 @@ pub async fn create_donation(
 }
 
 pub async fn list(req: HttpRequest, pool: web::Data<SqlitePool>) -> HttpResponse {
-    let merchant = match super::auth::resolve_merchant_or_session(&req, &pool).await {
-        Some(m) => m,
-        None => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Not authenticated"
-            }));
-        }
+    let merchant = match super::auth::require_merchant_or_session(&req, pool.get_ref()).await {
+        Ok(merchant) => merchant,
+        Err(response) => return response,
     };
 
     match payment_links::list_payment_links(pool.get_ref(), &merchant.id).await {
@@ -108,13 +96,9 @@ pub async fn update(
     path: web::Path<String>,
     body: web::Json<UpdatePaymentLinkRequest>,
 ) -> HttpResponse {
-    let merchant = match super::auth::resolve_merchant_or_session(&req, &pool).await {
-        Some(m) => m,
-        None => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Not authenticated"
-            }));
-        }
+    let merchant = match super::auth::require_merchant_or_session(&req, pool.get_ref()).await {
+        Ok(merchant) => merchant,
+        Err(response) => return response,
     };
 
     let link_id = path.into_inner();
@@ -142,13 +126,9 @@ pub async fn delete(
     pool: web::Data<SqlitePool>,
     path: web::Path<String>,
 ) -> HttpResponse {
-    let merchant = match super::auth::resolve_merchant_or_session(&req, &pool).await {
-        Some(m) => m,
-        None => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Not authenticated"
-            }));
-        }
+    let merchant = match super::auth::require_merchant_or_session(&req, pool.get_ref()).await {
+        Ok(merchant) => merchant,
+        Err(response) => return response,
     };
 
     let link_id = path.into_inner();

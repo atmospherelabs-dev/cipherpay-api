@@ -84,9 +84,7 @@ async fn email_already_sent(
 /// Record that an email was sent (insert-or-ignore for idempotency).
 async fn record_email_sent(pool: &SqlitePool, merchant_id: &str, template: &str, entity_id: &str) {
     let id = Uuid::new_v4().to_string();
-    let now = chrono::Utc::now()
-        .format("%Y-%m-%dT%H:%M:%SZ")
-        .to_string();
+    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     sqlx::query(
         "INSERT OR IGNORE INTO email_events (id, merchant_id, template, entity_id, sent_at) VALUES (?, ?, ?, ?, ?)",
     )

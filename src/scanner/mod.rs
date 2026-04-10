@@ -1,5 +1,6 @@
 pub mod blocks;
 pub mod decrypt;
+mod invoice_detection;
 pub mod mempool;
 pub mod ws;
 
@@ -338,77 +339,15 @@ async fn scan_mempool(
     let invoice_index = matching::InvoiceIndex::build(&pending);
 
     for (txid, raw_hex) in &raw_txs {
-        let mut invoice_totals: HashMap<String, (invoices::Invoice, i64)> = HashMap::new();
-
-        for (_merchant_id, keys) in cached_keys {
-            match decrypt::try_decrypt_with_keys(raw_hex, keys) {
-                Ok(outputs) => {
-                    for output in &outputs {
-                        let recipient_hex = hex::encode(output.recipient_raw);
-                        tracing::info!(txid, "Decrypted mempool output");
-                        tracing::debug!(txid, memo = %output.memo, amount = output.amount_zec, "Decrypted output details");
-
-                        if let Some(invoice) = invoice_index.find(&recipient_hex, &output.memo) {
-                            let entry = invoice_totals
-                                .entry(invoice.id.clone())
-                                .or_insert((invoice.clone(), 0));
-                            entry.1 += output.amount_zatoshis as i64;
-                        }
-                    }
-                }
-                Err(_) => {}
-            }
-        }
-
-        for (invoice_id, (invoice, tx_total)) in &invoice_totals {
-            let dust_min = std::cmp::max(
-                (invoice.price_zatoshis as f64 * decrypt::DUST_THRESHOLD_FRACTION) as i64,
-                decrypt::DUST_THRESHOLD_MIN_ZATOSHIS,
-            );
-            if *tx_total < dust_min && *tx_total < invoice.price_zatoshis {
-                tracing::debug!(invoice_id, tx_total, dust_min, "Ignoring dust payment");
-                continue;
-            }
-
-            let new_received = if invoice.status == "underpaid" {
-                invoices::accumulate_payment(pool, invoice_id, *tx_total).await?
-            } else {
-                *tx_total
-            };
-
-            let min = (invoice.price_zatoshis as f64 * decrypt::SLIPPAGE_TOLERANCE) as i64;
-
-            if new_received >= min {
-                let changed = invoices::mark_detected(pool, invoice_id, txid, new_received).await?;
-                if changed {
-                    let overpaid = new_received > invoice.price_zatoshis + 1000;
-                    spawn_payment_webhook(
-                        pool,
-                        http,
-                        invoice_id,
-                        "detected",
-                        txid,
-                        invoice.price_zatoshis,
-                        new_received,
-                        overpaid,
-                        &config.encryption_key,
-                    );
-                }
-            } else if invoice.status == "pending" {
-                invoices::mark_underpaid(pool, invoice_id, new_received, txid).await?;
-                spawn_payment_webhook(
-                    pool,
-                    http,
-                    invoice_id,
-                    "underpaid",
-                    txid,
-                    invoice.price_zatoshis,
-                    new_received,
-                    false,
-                    &config.encryption_key,
-                );
-            }
-        }
+        let invoice_totals = invoice_detection::collect_mempool_invoice_totals(
+            txid,
+            raw_hex,
+            cached_keys,
+            &invoice_index,
+            invoice_detection::MempoolSource::Polling,
+        );
+        invoice_detection::apply_mempool_invoice_totals(pool, http, config, txid, &invoice_totals)
+            .await?;
     }
 
     Ok(())
@@ -437,81 +376,21 @@ async fn process_ws_mempool_tx(
     let cached_keys = refresh_key_cache(key_cache, &merchants, fee_ufvk);
     let invoice_index = matching::InvoiceIndex::build(&pending);
 
-    let mut invoice_totals: HashMap<String, (invoices::Invoice, i64)> = HashMap::new();
-
-    for (_merchant_id, keys) in cached_keys {
-        match decrypt::try_decrypt_with_keys(&push.raw_hex, keys) {
-            Ok(outputs) => {
-                for output in &outputs {
-                    let recipient_hex = hex::encode(output.recipient_raw);
-                    tracing::info!(txid = %push.txid, "[WS] Decrypted mempool output");
-                    tracing::debug!(
-                        txid = %push.txid, memo = %output.memo,
-                        amount = output.amount_zec, "Decrypted output details"
-                    );
-
-                    if let Some(invoice) = invoice_index.find(&recipient_hex, &output.memo) {
-                        let entry = invoice_totals
-                            .entry(invoice.id.clone())
-                            .or_insert((invoice.clone(), 0));
-                        entry.1 += output.amount_zatoshis as i64;
-                    }
-                }
-            }
-            Err(_) => {}
-        }
-    }
-
-    for (invoice_id, (invoice, tx_total)) in &invoice_totals {
-        let dust_min = std::cmp::max(
-            (invoice.price_zatoshis as f64 * decrypt::DUST_THRESHOLD_FRACTION) as i64,
-            decrypt::DUST_THRESHOLD_MIN_ZATOSHIS,
-        );
-        if *tx_total < dust_min && *tx_total < invoice.price_zatoshis {
-            tracing::debug!(invoice_id, tx_total, dust_min, "Ignoring dust payment");
-            continue;
-        }
-
-        let new_received = if invoice.status == "underpaid" {
-            invoices::accumulate_payment(pool, invoice_id, *tx_total).await?
-        } else {
-            *tx_total
-        };
-
-        let min = (invoice.price_zatoshis as f64 * decrypt::SLIPPAGE_TOLERANCE) as i64;
-
-        if new_received >= min {
-            let changed =
-                invoices::mark_detected(pool, invoice_id, &push.txid, new_received).await?;
-            if changed {
-                let overpaid = new_received > invoice.price_zatoshis + 1000;
-                spawn_payment_webhook(
-                    pool,
-                    http,
-                    invoice_id,
-                    "detected",
-                    &push.txid,
-                    invoice.price_zatoshis,
-                    new_received,
-                    overpaid,
-                    &config.encryption_key,
-                );
-            }
-        } else if invoice.status == "pending" {
-            invoices::mark_underpaid(pool, invoice_id, new_received, &push.txid).await?;
-            spawn_payment_webhook(
-                pool,
-                http,
-                invoice_id,
-                "underpaid",
-                &push.txid,
-                invoice.price_zatoshis,
-                new_received,
-                false,
-                &config.encryption_key,
-            );
-        }
-    }
+    let invoice_totals = invoice_detection::collect_mempool_invoice_totals(
+        &push.txid,
+        &push.raw_hex,
+        cached_keys,
+        &invoice_index,
+        invoice_detection::MempoolSource::WebSocket,
+    );
+    invoice_detection::apply_mempool_invoice_totals(
+        pool,
+        http,
+        config,
+        &push.txid,
+        &invoice_totals,
+    )
+    .await?;
 
     Ok(())
 }
@@ -867,9 +746,14 @@ async fn on_invoice_confirmed(
         tracing::error!(error = %e, "Failed to ensure billing cycle");
     }
 
-    if let Err(e) =
-        billing::create_fee_entry(pool, &invoice.id, &invoice.merchant_id, fee_amount, fee_rate)
-            .await
+    if let Err(e) = billing::create_fee_entry(
+        pool,
+        &invoice.id,
+        &invoice.merchant_id,
+        fee_amount,
+        fee_rate,
+    )
+    .await
     {
         tracing::error!(error = %e, "Failed to create fee entry");
     }

@@ -1,6 +1,8 @@
 pub mod admin;
 pub mod auth;
+pub mod billing_routes;
 pub mod events;
+pub mod invoice_routes;
 pub mod invoices;
 pub mod luma;
 pub mod merchants;
@@ -11,16 +13,13 @@ pub mod rates;
 pub mod sessions;
 pub mod status;
 pub mod subscriptions;
+pub mod system;
 pub mod tickets;
 pub mod x402;
 
 use actix_governor::{Governor, GovernorConfigBuilder};
 use actix_web::web;
-use actix_web_lab::sse;
-use base64::Engine;
 use sqlx::SqlitePool;
-use std::time::Duration;
-use tokio::time::interval;
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
     let auth_rate_limit = GovernorConfigBuilder::default()
@@ -43,7 +42,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
 
     cfg.service(
         web::scope("/api")
-            .route("/health", web::get().to(health))
+            .route("/health", web::get().to(system::health))
             .service(
                 web::scope("/merchants")
                     .route("", web::post().to(merchants::create))
@@ -62,10 +61,19 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                         "/me/regenerate-webhook-secret",
                         web::post().to(auth::regenerate_webhook_secret),
                     )
-                    .route("/me/billing", web::get().to(billing_summary))
-                    .route("/me/billing/history", web::get().to(billing_history))
-                    .route("/me/billing/settle", web::post().to(billing_settle))
-                    .route("/me/delete", web::post().to(delete_account))
+                    .route(
+                        "/me/billing",
+                        web::get().to(billing_routes::billing_summary),
+                    )
+                    .route(
+                        "/me/billing/history",
+                        web::get().to(billing_routes::billing_history),
+                    )
+                    .route(
+                        "/me/billing/settle",
+                        web::post().to(billing_routes::billing_settle),
+                    )
+                    .route("/me/delete", web::post().to(billing_routes::delete_account))
                     .route("/me/webhooks", web::get().to(auth::my_webhooks))
                     .route("/me/x402/history", web::get().to(x402::history))
                     .route("/me/sessions", web::get().to(sessions::history)),
@@ -133,25 +141,34 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/checkout", web::post().to(checkout))
             // Invoice endpoints (API key auth)
             .route("/invoices", web::post().to(invoices::create))
-            .route("/invoices", web::get().to(list_invoices))
+            .route("/invoices", web::get().to(invoice_routes::list_invoices))
             .route(
                 "/invoices/lookup/{memo_code}",
-                web::get().to(lookup_by_memo),
+                web::get().to(invoice_routes::lookup_by_memo),
             )
             .route("/invoices/{id}", web::get().to(invoices::get))
             .route("/invoices/{id}/status", web::get().to(status::get))
-            .route("/invoices/{id}/stream", web::get().to(invoice_stream))
+            .route(
+                "/invoices/{id}/stream",
+                web::get().to(invoice_routes::invoice_stream),
+            )
             .route(
                 "/invoices/{id}/finalize",
                 web::post().to(invoices::finalize),
             )
-            .route("/invoices/{id}/cancel", web::post().to(cancel_invoice))
-            .route("/invoices/{id}/refund", web::post().to(refund_invoice))
+            .route(
+                "/invoices/{id}/cancel",
+                web::post().to(invoice_routes::cancel_invoice),
+            )
+            .route(
+                "/invoices/{id}/refund",
+                web::post().to(invoice_routes::refund_invoice),
+            )
             .route(
                 "/invoices/{id}/refund-address",
-                web::patch().to(update_refund_address),
+                web::patch().to(invoice_routes::update_refund_address),
             )
-            .route("/invoices/{id}/qr", web::get().to(qr_code))
+            .route("/invoices/{id}/qr", web::get().to(invoice_routes::qr_code))
             // Ticket endpoints
             .route(
                 "/tickets/invoice/{invoice_id}",
@@ -198,7 +215,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/admin/test-email", web::post().to(admin::test_email)),
     );
 
-    cfg.route("/.well-known/payment", web::get().to(well_known_payment));
+    cfg.route(
+        "/.well-known/payment",
+        web::get().to(system::well_known_payment),
+    );
 }
 
 /// Public checkout endpoint for buyer-driven invoice creation.
@@ -624,651 +644,4 @@ fn validate_checkout(req: &CheckoutRequest) -> Result<(), crate::validation::Val
         }
     }
     Ok(())
-}
-
-async fn health() -> actix_web::HttpResponse {
-    actix_web::HttpResponse::Ok().json(serde_json::json!({
-        "status": "ok",
-        "service": "cipherpay",
-    }))
-}
-
-async fn well_known_payment(config: web::Data<crate::config::Config>) -> actix_web::HttpResponse {
-    let network = if config.is_testnet() {
-        "zcash:testnet"
-    } else {
-        "zcash:mainnet"
-    };
-    actix_web::HttpResponse::Ok()
-        .insert_header(("Access-Control-Allow-Origin", "*"))
-        .insert_header(("Cache-Control", "public, max-age=3600"))
-        .json(serde_json::json!({
-            "version": "1.0",
-            "methods": ["zcash"],
-            "currencies": ["ZEC"],
-            "network": network,
-            "protocols": ["x402", "mpp"],
-            "capabilities": {
-                "sessions": true,
-                "streaming": true,
-                "replay_protection": true,
-            },
-            "facilitator": "https://api.cipherpay.app",
-            "documentation": "https://cipherpay.app/docs",
-        }))
-}
-
-/// List invoices: requires API key or session auth. Scoped to the authenticated merchant.
-async fn list_invoices(
-    req: actix_web::HttpRequest,
-    pool: web::Data<SqlitePool>,
-) -> actix_web::HttpResponse {
-    let merchant = match auth::resolve_session(&req, &pool).await {
-        Some(m) => m,
-        None => {
-            if let Some(auth_header) = req.headers().get("Authorization") {
-                if let Ok(auth_str) = auth_header.to_str() {
-                    let key = auth_str.strip_prefix("Bearer ").unwrap_or(auth_str).trim();
-                    let enc_key = req
-                        .app_data::<web::Data<crate::config::Config>>()
-                        .map(|c| c.encryption_key.clone())
-                        .unwrap_or_default();
-                    match crate::merchants::authenticate(&pool, key, &enc_key).await {
-                        Ok(Some(m)) => m,
-                        _ => {
-                            return actix_web::HttpResponse::Unauthorized()
-                                .json(serde_json::json!({"error": "Invalid API key"}))
-                        }
-                    }
-                } else {
-                    return actix_web::HttpResponse::Unauthorized()
-                        .json(serde_json::json!({"error": "Not authenticated"}));
-                }
-            } else {
-                return actix_web::HttpResponse::Unauthorized()
-                    .json(serde_json::json!({"error": "Not authenticated"}));
-            }
-        }
-    };
-
-    let rows = sqlx::query(
-        "SELECT invoices.id, invoices.merchant_id, memo_code, invoices.product_id, product_name, size,
-         price_eur, price_usd, invoices.currency, price_zec, zec_rate_at_creation,
-         amount, invoices.price_id,
-         payment_address, zcash_uri,
-         status, detected_txid,
-         detected_at, expires_at, confirmed_at, refunded_at,
-         refund_address, invoices.created_at, price_zatoshis, received_zatoshis,
-         (EXISTS (SELECT 1 FROM events WHERE product_id = invoices.product_id)) AS is_event,
-         pr.label AS price_label,
-         invoices.is_donation, invoices.payment_link_id
-         FROM invoices
-         LEFT JOIN prices pr ON pr.id = invoices.price_id
-         WHERE invoices.merchant_id = ? ORDER BY invoices.created_at DESC LIMIT 50",
-    )
-    .bind(&merchant.id)
-    .fetch_all(pool.get_ref())
-    .await;
-
-    match rows {
-        Ok(rows) => {
-            use sqlx::Row;
-            let invoices: Vec<_> = rows
-                .into_iter()
-                .map(|r| {
-                    let pz = r.get::<i64, _>("price_zatoshis");
-                    let rz = r.get::<i64, _>("received_zatoshis");
-                    serde_json::json!({
-                        "id": r.get::<String, _>("id"),
-                        "merchant_id": r.get::<String, _>("merchant_id"),
-                        "memo_code": r.get::<String, _>("memo_code"),
-                        "product_id": r.get::<Option<String>, _>("product_id"),
-                        "product_name": r.get::<Option<String>, _>("product_name"),
-                        "size": r.get::<Option<String>, _>("size"),
-                        "price_eur": r.get::<f64, _>("price_eur"),
-                        "price_usd": r.get::<Option<f64>, _>("price_usd"),
-                        "currency": r.get::<Option<String>, _>("currency"),
-                        "price_zec": r.get::<f64, _>("price_zec"),
-                        "zec_rate": r.get::<f64, _>("zec_rate_at_creation"),
-                        "amount": r.get::<Option<f64>, _>("amount"),
-                        "price_id": r.get::<Option<String>, _>("price_id"),
-                        "payment_address": r.get::<String, _>("payment_address"),
-                        "zcash_uri": r.get::<String, _>("zcash_uri"),
-                        "status": r.get::<String, _>("status"),
-                        "detected_txid": r.get::<Option<String>, _>("detected_txid"),
-                        "detected_at": r.get::<Option<String>, _>("detected_at"),
-                        "expires_at": r.get::<String, _>("expires_at"),
-                        "confirmed_at": r.get::<Option<String>, _>("confirmed_at"),
-                        "refunded_at": r.get::<Option<String>, _>("refunded_at"),
-                        "refund_address": r.get::<Option<String>, _>("refund_address"),
-                        "created_at": r.get::<String, _>("created_at"),
-                        "received_zec": crate::invoices::zatoshis_to_zec(rz),
-                        "price_zatoshis": pz,
-                        "received_zatoshis": rz,
-                        "overpaid": rz > pz + 1000 && pz > 0,
-                        "is_event": r.get::<bool, _>("is_event"),
-                        "price_label": r.get::<Option<String>, _>("price_label"),
-                        "is_donation": r.get::<i32, _>("is_donation") == 1,
-                        "payment_link_id": r.get::<Option<String>, _>("payment_link_id"),
-                    })
-                })
-                .collect();
-            actix_web::HttpResponse::Ok().json(invoices)
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "Failed to list invoices");
-            actix_web::HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Internal error"
-            }))
-        }
-    }
-}
-
-async fn lookup_by_memo(
-    pool: web::Data<SqlitePool>,
-    path: web::Path<String>,
-) -> actix_web::HttpResponse {
-    let memo_code = path.into_inner();
-
-    match crate::invoices::get_invoice_by_memo(pool.get_ref(), &memo_code).await {
-        Ok(Some(inv)) => {
-            let received_zec = crate::invoices::zatoshis_to_zec(inv.received_zatoshis);
-            let overpaid =
-                inv.received_zatoshis > inv.price_zatoshis + 1000 && inv.price_zatoshis > 0;
-            actix_web::HttpResponse::Ok().json(serde_json::json!({
-                "id": inv.id,
-                "memo_code": inv.memo_code,
-                "product_name": inv.product_name,
-                "size": inv.size,
-                "amount": inv.amount,
-                "price_id": inv.price_id,
-                "price_eur": inv.price_eur,
-                "price_usd": inv.price_usd,
-                "currency": inv.currency,
-                "price_zec": inv.price_zec,
-                "zec_rate_at_creation": inv.zec_rate_at_creation,
-                "payment_address": inv.payment_address,
-                "zcash_uri": inv.zcash_uri,
-                "merchant_name": inv.merchant_name,
-                "status": inv.status,
-                "detected_txid": inv.detected_txid,
-                "detected_at": inv.detected_at,
-                "confirmed_at": inv.confirmed_at,
-                "refunded_at": inv.refunded_at,
-                "expires_at": inv.expires_at,
-                "created_at": inv.created_at,
-                "received_zec": received_zec,
-                "price_zatoshis": inv.price_zatoshis,
-                "received_zatoshis": inv.received_zatoshis,
-                "overpaid": overpaid,
-            }))
-        }
-        Ok(None) => actix_web::HttpResponse::NotFound().json(serde_json::json!({
-            "error": "No invoice found for this memo code"
-        })),
-        Err(e) => {
-            tracing::error!(error = %e, "Failed to lookup invoice by memo");
-            actix_web::HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Internal error"
-            }))
-        }
-    }
-}
-
-/// SSE stream for invoice status updates -- replaces client-side polling.
-/// The server polls the DB internally and pushes only when state changes.
-async fn invoice_stream(
-    pool: web::Data<SqlitePool>,
-    path: web::Path<String>,
-) -> impl actix_web::Responder {
-    let invoice_id = path.into_inner();
-    let (tx, rx) = tokio::sync::mpsc::channel::<sse::Event>(10);
-
-    tokio::spawn(async move {
-        let mut tick = interval(Duration::from_secs(2));
-        let mut last_status = String::new();
-
-        // Send initial state immediately
-        if let Ok(Some(status)) = crate::invoices::get_invoice_status(&pool, &invoice_id).await {
-            last_status.clone_from(&status.status);
-            let data = serde_json::json!({
-                "status": status.status,
-                "txid": status.detected_txid,
-                "received_zatoshis": status.received_zatoshis,
-                "price_zatoshis": status.price_zatoshis,
-            });
-            let _ = tx
-                .send(sse::Data::new(data.to_string()).event("status").into())
-                .await;
-        }
-
-        let mut last_received: i64 = 0;
-        loop {
-            tick.tick().await;
-
-            match crate::invoices::get_invoice_status(&pool, &invoice_id).await {
-                Ok(Some(status)) => {
-                    let amounts_changed = status.received_zatoshis != last_received;
-                    if status.status != last_status || amounts_changed {
-                        last_status.clone_from(&status.status);
-                        last_received = status.received_zatoshis;
-                        let data = serde_json::json!({
-                            "status": status.status,
-                            "txid": status.detected_txid,
-                            "received_zatoshis": status.received_zatoshis,
-                            "price_zatoshis": status.price_zatoshis,
-                        });
-                        if tx
-                            .send(sse::Data::new(data.to_string()).event("status").into())
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
-                        if status.status == "confirmed" || status.status == "expired" {
-                            break;
-                        }
-                    }
-                }
-                _ => break,
-            }
-        }
-    });
-
-    sse::Sse::from_infallible_receiver(rx).with_retry_duration(Duration::from_secs(5))
-}
-
-/// Generate a QR code PNG for a zcash: payment URI (ZIP-321 compliant)
-async fn qr_code(pool: web::Data<SqlitePool>, path: web::Path<String>) -> actix_web::HttpResponse {
-    let invoice_id = path.into_inner();
-
-    let invoice = match crate::invoices::get_invoice(pool.get_ref(), &invoice_id).await {
-        Ok(Some(inv)) => inv,
-        _ => return actix_web::HttpResponse::NotFound().finish(),
-    };
-
-    let uri = if invoice.zcash_uri.is_empty() {
-        let memo_b64 =
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(invoice.memo_code.as_bytes());
-        format!(
-            "zcash:{}?amount={:.8}&memo={}",
-            invoice.payment_address, invoice.price_zec, memo_b64
-        )
-    } else {
-        invoice.zcash_uri.clone()
-    };
-
-    match generate_qr_png(&uri) {
-        Ok(png_bytes) => actix_web::HttpResponse::Ok()
-            .content_type("image/png")
-            .body(png_bytes),
-        Err(_) => actix_web::HttpResponse::InternalServerError().finish(),
-    }
-}
-
-fn generate_qr_png(data: &str) -> anyhow::Result<Vec<u8>> {
-    use image::Luma;
-    use qrcode::QrCode;
-
-    let code = QrCode::new(data.as_bytes())?;
-    let img = code
-        .render::<Luma<u8>>()
-        .quiet_zone(true)
-        .min_dimensions(250, 250)
-        .build();
-
-    let mut buf = std::io::Cursor::new(Vec::new());
-    img.write_to(&mut buf, image::ImageFormat::Png)?;
-    Ok(buf.into_inner())
-}
-
-/// Cancel a pending invoice (only pending invoices can be cancelled)
-async fn cancel_invoice(
-    req: actix_web::HttpRequest,
-    pool: web::Data<SqlitePool>,
-    path: web::Path<String>,
-) -> actix_web::HttpResponse {
-    let merchant = match auth::resolve_session(&req, &pool).await {
-        Some(m) => m,
-        None => {
-            return actix_web::HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Not authenticated"
-            }));
-        }
-    };
-
-    let invoice_id = path.into_inner();
-
-    match crate::invoices::get_invoice(pool.get_ref(), &invoice_id).await {
-        Ok(Some(inv)) if inv.merchant_id == merchant.id && inv.status == "pending" => {
-            if inv.product_name.as_deref() == Some("Fee Settlement") {
-                return actix_web::HttpResponse::Forbidden().json(serde_json::json!({
-                    "error": "Settlement invoices cannot be cancelled"
-                }));
-            }
-            if let Err(e) = crate::invoices::mark_expired(pool.get_ref(), &invoice_id).await {
-                tracing::error!(error = %e, invoice_id = %invoice_id, "Failed to cancel invoice");
-                return actix_web::HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": "Failed to cancel invoice"
-                }));
-            }
-            actix_web::HttpResponse::Ok().json(serde_json::json!({ "status": "cancelled" }))
-        }
-        Ok(Some(_)) => actix_web::HttpResponse::BadRequest().json(serde_json::json!({
-            "error": "Only pending invoices can be cancelled"
-        })),
-        _ => actix_web::HttpResponse::NotFound().json(serde_json::json!({
-            "error": "Invoice not found"
-        })),
-    }
-}
-
-/// Mark an invoice as refunded (dashboard auth)
-async fn refund_invoice(
-    req: actix_web::HttpRequest,
-    pool: web::Data<SqlitePool>,
-    path: web::Path<String>,
-    body: web::Json<serde_json::Value>,
-) -> actix_web::HttpResponse {
-    let merchant = match auth::resolve_session(&req, &pool).await {
-        Some(m) => m,
-        None => {
-            return actix_web::HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Not authenticated"
-            }));
-        }
-    };
-
-    let invoice_id = path.into_inner();
-    let refund_txid = body
-        .get("refund_txid")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty());
-
-    match crate::invoices::get_invoice(pool.get_ref(), &invoice_id).await {
-        Ok(Some(inv)) if inv.merchant_id == merchant.id && inv.status == "confirmed" => {
-            if let Err(e) =
-                crate::invoices::mark_refunded(pool.get_ref(), &invoice_id, refund_txid).await
-            {
-                tracing::error!(error = %e, invoice_id = %invoice_id, "Failed to mark invoice refunded");
-                return actix_web::HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": "Failed to process refund"
-                }));
-            }
-            let response = serde_json::json!({
-                "status": "refunded",
-                "refund_address": inv.refund_address,
-                "refund_txid": refund_txid,
-            });
-            actix_web::HttpResponse::Ok().json(response)
-        }
-        Ok(Some(_)) => actix_web::HttpResponse::BadRequest().json(serde_json::json!({
-            "error": "Only confirmed invoices can be refunded"
-        })),
-        _ => actix_web::HttpResponse::NotFound().json(serde_json::json!({
-            "error": "Invoice not found"
-        })),
-    }
-}
-
-/// Buyer can save a refund address on their invoice (write-once).
-/// No auth required: invoice IDs are unguessable UUIDs and the address
-/// can only be set once (write-once guard in update_refund_address).
-async fn update_refund_address(
-    pool: web::Data<SqlitePool>,
-    path: web::Path<String>,
-    body: web::Json<serde_json::Value>,
-) -> actix_web::HttpResponse {
-    let invoice_id = path.into_inner();
-
-    let address = match body.get("refund_address").and_then(|v| v.as_str()) {
-        Some(a) if !a.is_empty() => a,
-        _ => {
-            return actix_web::HttpResponse::BadRequest().json(serde_json::json!({
-                "error": "refund_address is required"
-            }));
-        }
-    };
-
-    if let Err(e) = crate::validation::validate_zcash_address("refund_address", address) {
-        return actix_web::HttpResponse::BadRequest().json(e.to_json());
-    }
-
-    match crate::invoices::update_refund_address(pool.get_ref(), &invoice_id, address).await {
-        Ok(true) => actix_web::HttpResponse::Ok().json(serde_json::json!({
-            "status": "saved",
-            "refund_address": address,
-        })),
-        Ok(false) => actix_web::HttpResponse::Conflict().json(serde_json::json!({
-            "error": "Refund address is already set or invoice status does not allow changes"
-        })),
-        Err(e) => {
-            tracing::error!(error = %e, "Failed to update refund address");
-            actix_web::HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Internal error"
-            }))
-        }
-    }
-}
-
-async fn billing_summary(
-    req: actix_web::HttpRequest,
-    pool: web::Data<SqlitePool>,
-    config: web::Data<crate::config::Config>,
-) -> actix_web::HttpResponse {
-    let merchant = match auth::resolve_session(&req, &pool).await {
-        Some(m) => m,
-        None => {
-            return actix_web::HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Not authenticated"
-            }));
-        }
-    };
-
-    if !config.fee_enabled() {
-        return actix_web::HttpResponse::Ok().json(serde_json::json!({
-            "fee_enabled": false,
-            "fee_rate": 0.0,
-            "billing_status": "active",
-            "trust_tier": "standard",
-        }));
-    }
-
-    match crate::billing::get_billing_summary(pool.get_ref(), &merchant.id, &config).await {
-        Ok(summary) => actix_web::HttpResponse::Ok().json(serde_json::json!({
-            "fee_enabled": true,
-            "fee_rate": summary.fee_rate,
-            "trust_tier": summary.trust_tier,
-            "billing_status": summary.billing_status,
-            "current_cycle": summary.current_cycle,
-            "total_fees_zec": summary.total_fees_zec,
-            "auto_collected_zec": summary.auto_collected_zec,
-            "outstanding_zec": summary.outstanding_zec,
-            "min_settlement_zec": 0.05,
-            "settlement_invoice_status": summary.settlement_invoice_status,
-        })),
-        Err(e) => {
-            tracing::error!(error = %e, "Failed to get billing summary");
-            actix_web::HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Internal error"
-            }))
-        }
-    }
-}
-
-async fn billing_history(
-    req: actix_web::HttpRequest,
-    pool: web::Data<SqlitePool>,
-) -> actix_web::HttpResponse {
-    let merchant = match auth::resolve_session(&req, &pool).await {
-        Some(m) => m,
-        None => {
-            return actix_web::HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Not authenticated"
-            }));
-        }
-    };
-
-    match crate::billing::get_billing_history(pool.get_ref(), &merchant.id).await {
-        Ok(cycles) => actix_web::HttpResponse::Ok().json(cycles),
-        Err(e) => {
-            tracing::error!(error = %e, "Failed to get billing history");
-            actix_web::HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Internal error"
-            }))
-        }
-    }
-}
-
-async fn billing_settle(
-    req: actix_web::HttpRequest,
-    pool: web::Data<SqlitePool>,
-    config: web::Data<crate::config::Config>,
-    price_service: web::Data<crate::invoices::pricing::PriceService>,
-) -> actix_web::HttpResponse {
-    let merchant = match auth::resolve_session(&req, &pool).await {
-        Some(m) => m,
-        None => {
-            return actix_web::HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Not authenticated"
-            }));
-        }
-    };
-
-    let fee_address = match &config.fee_address {
-        Some(addr) => addr.clone(),
-        None => {
-            return actix_web::HttpResponse::BadRequest().json(serde_json::json!({
-                "error": "Billing not enabled"
-            }));
-        }
-    };
-
-    let summary =
-        match crate::billing::get_billing_summary(pool.get_ref(), &merchant.id, &config).await {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::error!(error = %e, "Failed to get billing for settle");
-                return actix_web::HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": "Internal error"
-                }));
-            }
-        };
-
-    if summary.outstanding_zatoshis <= 0 {
-        return actix_web::HttpResponse::Ok().json(serde_json::json!({
-            "message": "No outstanding balance",
-            "outstanding_zec": 0.0,
-        }));
-    }
-
-    const MIN_SETTLEMENT_ZATOSHIS: i64 = 5_000_000;
-    const MIN_SETTLEMENT_ZEC: f64 = 0.05;
-    if summary.outstanding_zatoshis < MIN_SETTLEMENT_ZATOSHIS {
-        return actix_web::HttpResponse::BadRequest().json(serde_json::json!({
-            "error": format!("Outstanding balance ({:.6} ZEC) is below the minimum settlement amount ({:.2} ZEC). Fees will carry over until the threshold is reached.", summary.outstanding_zec, MIN_SETTLEMENT_ZEC),
-            "outstanding_zec": summary.outstanding_zec,
-            "min_settlement_zec": MIN_SETTLEMENT_ZEC,
-        }));
-    }
-
-    let rates = match price_service.get_rates().await {
-        Ok(r) => r,
-        Err(_) => crate::invoices::pricing::ZecRates {
-            zec_eur: 0.0,
-            zec_usd: 0.0,
-            zec_brl: 0.0,
-            zec_gbp: 0.0,
-            zec_cad: 0.0,
-            zec_jpy: 0.0,
-            zec_mxn: 0.0,
-            zec_ars: 0.0,
-            zec_ngn: 0.0,
-            zec_chf: 0.0,
-            zec_inr: 0.0,
-            updated_at: chrono::Utc::now(),
-        },
-    };
-
-    match crate::billing::create_settlement_invoice(
-        pool.get_ref(),
-        &merchant.id,
-        summary.outstanding_zatoshis,
-        &fee_address,
-        rates.zec_eur,
-        rates.zec_usd,
-    )
-    .await
-    {
-        Ok(invoice_id) => {
-            if let Some(cycle) = &summary.current_cycle {
-                let _ = sqlx::query(
-                    "UPDATE billing_cycles SET settlement_invoice_id = ?, status = 'invoiced',
-                     grace_until = strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '+7 days')
-                     WHERE id = ? AND status = 'open'",
-                )
-                .bind(&invoice_id)
-                .bind(&cycle.id)
-                .execute(pool.get_ref())
-                .await;
-            }
-
-            actix_web::HttpResponse::Created().json(serde_json::json!({
-                "invoice_id": invoice_id,
-                "outstanding_zec": summary.outstanding_zec,
-                "message": "Settlement invoice created. Pay to restore full access.",
-            }))
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "Failed to create settlement invoice");
-            actix_web::HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Failed to create settlement invoice"
-            }))
-        }
-    }
-}
-
-async fn delete_account(
-    req: actix_web::HttpRequest,
-    pool: web::Data<SqlitePool>,
-    config: web::Data<crate::config::Config>,
-) -> actix_web::HttpResponse {
-    let merchant = match auth::resolve_session(&req, &pool).await {
-        Some(m) => m,
-        None => {
-            return actix_web::HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Not authenticated"
-            }));
-        }
-    };
-
-    if config.fee_enabled() {
-        match crate::merchants::has_outstanding_balance(pool.get_ref(), &merchant.id).await {
-            Ok(true) => {
-                return actix_web::HttpResponse::Forbidden().json(serde_json::json!({
-                    "error": "Cannot delete account with outstanding billing balance. Please settle your fees first."
-                }));
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "Failed to check billing balance");
-                return actix_web::HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": "Internal error"
-                }));
-            }
-            _ => {}
-        }
-    }
-
-    match crate::merchants::delete_merchant(pool.get_ref(), &merchant.id).await {
-        Ok(()) => actix_web::HttpResponse::Ok().json(serde_json::json!({
-            "status": "deleted",
-            "message": "Your account and all associated data have been permanently deleted."
-        })),
-        Err(e) => {
-            tracing::error!(error = %e, "Failed to delete merchant account");
-            actix_web::HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Failed to delete account"
-            }))
-        }
-    }
 }
