@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <title>CipherPay Referral Program</title>
+  <style>
+    /* Default styles provided by pandoc.
+    ** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
+    */
+    code{white-space: pre-wrap;}
+    span.smallcaps{font-variant: small-caps;}
+    div.columns{display: flex; gap: min(4vw, 1.5em);}
+    div.column{flex: auto; overflow-x: auto;}
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    /* The extra [class] is a hack that increases specificity enough to
+       override a similar rule in reveal.js */
+    ul.task-list[class]{list-style: none;}
+    ul.task-list li input[type="checkbox"] {
+      font-size: inherit;
+      width: 0.8em;
+      margin: 0 0.8em 0.2em -1.6em;
+      vertical-align: middle;
+    }
+    .display.math{display: block; text-align: center; margin: 0.5rem auto;}
+  </style>
+  <link rel="stylesheet" href="data:text/css,body{font-family:Helvetica,Arial,sans-serif;max-width:700px;margin:40px auto;padding:0 20px;line-height:1.6;color:%23333}h1{border-bottom:2px solid %23333;padding-bottom:8px}h2{margin-top:32px}h3{margin-top:24px}table{border-collapse:collapse;width:100%}th,td{border:1px solid %23ccc;padding:8px 12px;text-align:left}th{background:%23f5f5f5}hr{border:none;border-top:1px solid %23ddd;margin:24px 0}" />
+</head>
+<body>
+<h1 id="cipherpay-referral-program">CipherPay Referral Program</h1>
+<p><strong>Private draft – not for public distribution</strong></p>
+<hr />
+<h2 id="what-is-it">What is it?</h2>
+<p>A referral program that rewards people who bring new merchants to
+CipherPay. Referrers earn a percentage of the payment volume processed
+by the merchants they refer. Referred merchants get a reduced fee to
+start.</p>
+<hr />
+<h2 id="who-can-refer">Who can refer?</h2>
+<h3 id="existing-merchants">Existing merchants</h3>
+<p>Any CipherPay merchant can generate a referral code from their
+dashboard and share it. Their earnings are credited against their own
+CipherPay fees.</p>
+<h3 id="advocates-non-merchants">Advocates (non-merchants)</h3>
+<p>Community members, influencers, or Zcash enthusiasts who don’t
+process payments themselves. They register with a Zcash payout address
+and receive their earnings directly in ZEC.</p>
+<p>Non-merchant referrers are invite-only during the initial
+rollout.</p>
+<hr />
+<h2 id="what-does-the-referrer-get">What does the referrer get?</h2>
+<ul>
+<li><strong>0.5% of referred merchant’s payment volume</strong> for
+<strong>12 months</strong></li>
+<li>Earnings are calculated on every confirmed payment the referred
+merchant receives</li>
+<li><strong>Choose your payout method:</strong>
+<ul>
+<li><strong>Fee credit</strong> (default) – earnings are deducted from
+your CipherPay fees</li>
+<li><strong>ZEC payout</strong> – earnings are paid out directly in ZEC
+to a wallet address you provide</li>
+</ul></li>
+<li>Minimum payout threshold for ZEC payouts: 0.5 ZEC</li>
+</ul>
+<h3 id="example">Example</h3>
+<p>Bob refers Ledger. Ledger processes 100 ZEC in payments over 12
+months.</p>
+<p>Bob earns 0.5% of 100 ZEC = <strong>0.50 ZEC</strong> total over the
+year.</p>
+<hr />
+<h2 id="what-does-the-referred-merchant-get">What does the referred
+merchant get?</h2>
+<ul>
+<li><strong>Half-price fees for the first 3 months</strong>: 0.5%
+instead of the standard 1%</li>
+<li>After 3 months, the standard 1% fee applies</li>
+<li>The discount is automatic – applied at signup when the referral code
+is used</li>
+</ul>
+<h3 id="existing-merchants-1">Existing merchants</h3>
+<p>Already using CipherPay but don’t have a referral code? You can apply
+one at any time. You get the full discount (0.5% for 3 months from the
+date you apply it), and the referrer earns their commission for 12
+months.</p>
+<p>One code per merchant, one time, no exceptions.</p>
+<h3 id="example-1">Example</h3>
+<p>Ledger uses Bob’s referral code when signing up.</p>
+<ul>
+<li>Months 1–3: Ledger pays <strong>0.5%</strong> on every payment
+received</li>
+<li>Month 4 onward: Ledger pays the standard <strong>1%</strong></li>
+</ul>
+<hr />
+<h2 id="how-it-works">How it works</h2>
+<ol type="1">
+<li><strong>Referrer generates a code</strong> – from the dashboard
+(merchants) or on registration (advocates)</li>
+<li><strong>New merchant signs up with the code</strong> – entered
+during registration</li>
+<li><strong>Discount activates immediately</strong> – 0.5% fee for 3
+months</li>
+<li><strong>Commissions accrue on every payment</strong> – 0.5% of
+volume for 12 months</li>
+<li><strong>Earnings are credited or paid out</strong> – fee credits for
+merchants, ZEC payouts for advocates</li>
+</ol>
+<p>Referral codes look like <code>CPREF-A3K9M2X7</code>. Custom vanity
+codes (e.g. <code>CPREF-ZCASH</code>) are available on request.</p>
+<p>Referrers get a shareable link:
+<code>cipherpay.app/ref/{code}</code></p>
+<hr />
+<h2 id="who-pays-for-this">Who pays for this?</h2>
+<p>The referrer’s commission comes from CipherPay’s fee – not from the
+merchant. Merchants never pay more than the standard 1%.</p>
+<p>During the 3-month discount period, CipherPay absorbs the full cost
+as a merchant acquisition investment.</p>
+<table>
+<thead>
+<tr>
+<th>Period</th>
+<th>Merchant pays</th>
+<th>Referrer earns</th>
+<th>CipherPay keeps</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Months 1–3</td>
+<td>0.5%</td>
+<td>0.5%</td>
+<td>0%</td>
+</tr>
+<tr>
+<td>Months 4–12</td>
+<td>1.0%</td>
+<td>0.5%</td>
+<td>0.5%</td>
+</tr>
+<tr>
+<td>After month 12</td>
+<td>1.0%</td>
+<td>0%</td>
+<td>1.0%</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="when-do-commissions-activate">When do commissions activate?</h2>
+<p>To prevent gaming, commissions become payable only after the referred
+merchant shows real activity:</p>
+<ul>
+<li>At least <strong>3 confirmed payments</strong> received</li>
+<li>Activity spread over at least <strong>14 days</strong></li>
+<li>At least <strong>0.5 ZEC in fees</strong> generated</li>
+</ul>
+<p>Until these conditions are met, commissions are tracked but not
+payable.</p>
+<hr />
+<h2 id="fair-use-rules">Fair use rules</h2>
+<ul>
+<li><strong>No self-referrals</strong> – you cannot refer your own
+account</li>
+<li><strong>One code per merchant</strong> – apply once, anytime, full
+discount</li>
+<li><strong>Existing merchants</strong> can apply a referral code at any
+time and get the full 3-month discount</li>
+<li><strong>12-month limit</strong> – commissions expire after one year
+per referred merchant</li>
+<li><strong>Minimum activity to refer</strong> – merchants need at least
+7 days of account history and 3 confirmed payments before they can
+generate a referral code</li>
+</ul>
+<hr />
+<h2 id="tracking-and-transparency">Tracking and transparency</h2>
+<p><strong>For merchant referrers:</strong> - Referral tab in the
+dashboard - See referred merchants, their status, volume, and your
+earnings - Total earned, total credited to fees or paid out in ZEC -
+Switch between fee credit and ZEC payout at any time</p>
+<p><strong>For non-merchant referrers:</strong> - Lightweight portal
+with API key login - See referral count, total earned, total paid, and
+pending balance - Payout history</p>
+<hr />
+<h2 id="questions">Questions?</h2>
+<p>This is an early draft – we’re looking for feedback before building
+it. Let us know what you think.</p>
+</body>
+</html>
