@@ -8,13 +8,9 @@ pub async fn create(
     pool: web::Data<SqlitePool>,
     body: web::Json<CreatePriceRequest>,
 ) -> HttpResponse {
-    let merchant = match super::auth::resolve_session(&req, &pool).await {
-        Some(m) => m,
-        None => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Not authenticated"
-            }));
-        }
+    let merchant = match super::auth::require_session(&req, pool.get_ref()).await {
+        Ok(merchant) => merchant,
+        Err(response) => return response,
     };
 
     match crate::events::is_product_backed_by_event(pool.get_ref(), &body.product_id).await {
@@ -41,15 +37,14 @@ pub async fn create(
     match prices::create_price(pool.get_ref(), &merchant.id, &body).await {
         Ok(price) => HttpResponse::Created().json(price),
         Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("UNIQUE constraint") {
-                HttpResponse::Conflict().json(serde_json::json!({
-                    "error": "A price for this currency already exists on this product"
+            if e.downcast_ref::<prices::PriceValidationError>().is_some() {
+                HttpResponse::BadRequest().json(serde_json::json!({
+                    "error": e.to_string()
                 }))
             } else {
                 tracing::error!(error = %e, "Failed to create price");
-                HttpResponse::BadRequest().json(serde_json::json!({
-                    "error": msg
+                HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": "Internal error"
                 }))
             }
         }
@@ -61,13 +56,9 @@ pub async fn list(
     pool: web::Data<SqlitePool>,
     path: web::Path<String>,
 ) -> HttpResponse {
-    let merchant = match super::auth::resolve_session(&req, &pool).await {
-        Some(m) => m,
-        None => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Not authenticated"
-            }));
-        }
+    let merchant = match super::auth::require_session(&req, pool.get_ref()).await {
+        Ok(merchant) => merchant,
+        Err(response) => return response,
     };
 
     let product_id = path.into_inner();
@@ -98,13 +89,9 @@ pub async fn update(
     path: web::Path<String>,
     body: web::Json<UpdatePriceRequest>,
 ) -> HttpResponse {
-    let merchant = match super::auth::resolve_session(&req, &pool).await {
-        Some(m) => m,
-        None => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Not authenticated"
-            }));
-        }
+    let merchant = match super::auth::require_session(&req, pool.get_ref()).await {
+        Ok(merchant) => merchant,
+        Err(response) => return response,
     };
 
     let price_id = path.into_inner();
@@ -157,13 +144,9 @@ pub async fn deactivate(
     pool: web::Data<SqlitePool>,
     path: web::Path<String>,
 ) -> HttpResponse {
-    let merchant = match super::auth::resolve_session(&req, &pool).await {
-        Some(m) => m,
-        None => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Not authenticated"
-            }));
-        }
+    let merchant = match super::auth::require_session(&req, pool.get_ref()).await {
+        Ok(merchant) => merchant,
+        Err(response) => return response,
     };
 
     let price_id = path.into_inner();
@@ -203,10 +186,9 @@ pub async fn deactivate(
             "error": "Price not found"
         })),
         Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("last active price") {
+            if e.downcast_ref::<prices::PriceValidationError>().is_some() {
                 HttpResponse::BadRequest().json(serde_json::json!({
-                    "error": msg
+                    "error": e.to_string()
                 }))
             } else {
                 tracing::error!(error = %e, "Failed to deactivate price");

@@ -8,12 +8,9 @@ pub async fn create(
     pool: web::Data<SqlitePool>,
     body: web::Json<CreateSubscriptionRequest>,
 ) -> HttpResponse {
-    let merchant = match super::auth::resolve_merchant_or_session(&req, &pool).await {
-        Some(m) => m,
-        None => {
-            return HttpResponse::Unauthorized()
-                .json(serde_json::json!({"error": "Not authenticated"}))
-        }
+    let merchant = match super::auth::require_merchant_or_session(&req, pool.get_ref()).await {
+        Ok(merchant) => merchant,
+        Err(response) => return response,
     };
 
     match subscriptions::create_subscription(pool.get_ref(), &merchant.id, &body).await {
@@ -23,12 +20,9 @@ pub async fn create(
 }
 
 pub async fn list(req: HttpRequest, pool: web::Data<SqlitePool>) -> HttpResponse {
-    let merchant = match super::auth::resolve_merchant_or_session(&req, &pool).await {
-        Some(m) => m,
-        None => {
-            return HttpResponse::Unauthorized()
-                .json(serde_json::json!({"error": "Not authenticated"}))
-        }
+    let merchant = match super::auth::require_merchant_or_session(&req, pool.get_ref()).await {
+        Ok(merchant) => merchant,
+        Err(response) => return response,
     };
 
     match subscriptions::list_subscriptions(pool.get_ref(), &merchant.id).await {
@@ -51,12 +45,9 @@ pub async fn cancel(
     path: web::Path<String>,
     body: web::Json<CancelBody>,
 ) -> HttpResponse {
-    let merchant = match super::auth::resolve_merchant_or_session(&req, &pool).await {
-        Some(m) => m,
-        None => {
-            return HttpResponse::Unauthorized()
-                .json(serde_json::json!({"error": "Not authenticated"}))
-        }
+    let merchant = match super::auth::require_merchant_or_session(&req, pool.get_ref()).await {
+        Ok(merchant) => merchant,
+        Err(response) => return response,
     };
 
     let sub_id = path.into_inner();

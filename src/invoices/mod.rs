@@ -1,105 +1,24 @@
+mod amounts;
 pub mod matching;
 pub mod pricing;
+mod queries;
+mod types;
 
 use base64::Engine;
 use chrono::{Duration, Utc};
-use serde::{Deserialize, Serialize};
-use sqlx::{FromRow, SqlitePool};
+use sqlx::SqlitePool;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
-pub struct Invoice {
-    pub id: String,
-    pub merchant_id: String,
-    pub memo_code: String,
-    pub product_id: Option<String>,
-    pub product_name: Option<String>,
-    pub size: Option<String>,
-    pub price_eur: f64,
-    pub price_usd: Option<f64>,
-    pub currency: Option<String>,
-    pub price_zec: f64,
-    pub zec_rate_at_creation: f64,
-    pub amount: Option<f64>,
-    pub price_id: Option<String>,
-    pub payment_address: String,
-    pub zcash_uri: String,
-    pub merchant_name: Option<String>,
-    pub refund_address: Option<String>,
-    pub status: String,
-    pub detected_txid: Option<String>,
-    pub detected_at: Option<String>,
-    pub confirmed_at: Option<String>,
-    pub refunded_at: Option<String>,
-    pub refund_txid: Option<String>,
-    pub expires_at: String,
-    pub purge_after: Option<String>,
-    pub created_at: String,
-    #[serde(skip_serializing)]
-    pub orchard_receiver_hex: Option<String>,
-    #[serde(skip_serializing)]
-    #[allow(dead_code)]
-    pub diversifier_index: Option<i64>,
-    pub price_zatoshis: i64,
-    pub received_zatoshis: i64,
-    pub subscription_id: Option<String>,
-    pub payment_link_id: Option<String>,
-    pub is_donation: i32,
-    pub campaign_counted: i32,
-}
+use amounts::MIN_FEE_ZEC;
 
-#[derive(Debug, Serialize, FromRow)]
-pub struct InvoiceStatus {
-    #[sqlx(rename = "id")]
-    pub invoice_id: String,
-    pub status: String,
-    pub detected_txid: Option<String>,
-    pub received_zatoshis: i64,
-    pub price_zatoshis: i64,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct CreateInvoiceRequest {
-    pub product_id: Option<String>,
-    pub price_id: Option<String>,
-    pub product_name: Option<String>,
-    pub size: Option<String>,
-    #[serde(alias = "price_eur")]
-    pub amount: f64,
-    pub currency: Option<String>,
-    pub refund_address: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct CreateInvoiceResponse {
-    pub invoice_id: String,
-    pub memo_code: String,
-    pub amount: f64,
-    pub currency: String,
-    pub price_eur: f64,
-    pub price_usd: f64,
-    pub price_zec: f64,
-    pub zec_rate: f64,
-    pub price_id: Option<String>,
-    pub payment_address: String,
-    pub zcash_uri: String,
-    pub expires_at: String,
-}
+pub use amounts::{zatoshis_to_zec, zec_to_zatoshis};
+pub use queries::{get_invoice, get_invoice_by_memo, get_invoice_status, get_pending_invoices};
+pub use types::{CreateInvoiceRequest, CreateInvoiceResponse, FeeConfig, Invoice, InvoiceStatus};
 
 fn generate_memo_code() -> String {
     let bytes: [u8; 4] = rand::random();
     format!("CP-{}", hex::encode(bytes).to_uppercase())
 }
-
-pub struct FeeConfig {
-    pub fee_address: String,
-    pub fee_rate: f64,
-}
-
-/// Minimum fee output to include in ZIP 321 URIs (10,000 zatoshis = 0.0001 ZEC).
-/// Below this, the output costs more to spend than it's worth. Fees on small
-/// payments still accrue in the billing cycle and settle via the normal threshold.
-const MIN_FEE_ZEC: f64 = 0.0001;
 
 pub async fn create_invoice(
     pool: &SqlitePool,
@@ -292,96 +211,6 @@ pub async fn create_invoice(
     })
 }
 
-pub async fn get_invoice(pool: &SqlitePool, id: &str) -> anyhow::Result<Option<Invoice>> {
-    let row = sqlx::query_as::<_, Invoice>(
-        "SELECT i.id, i.merchant_id, i.memo_code, i.product_id, i.product_name, i.size,
-         i.price_eur, i.price_usd, i.currency, i.price_zec, i.zec_rate_at_creation,
-         i.amount, i.price_id,
-         COALESCE(NULLIF(i.payment_address, ''), m.payment_address) AS payment_address,
-         i.zcash_uri,
-         NULLIF(m.name, '') AS merchant_name,
-         i.refund_address, i.status, i.detected_txid, i.detected_at,
-         i.confirmed_at, i.refunded_at, i.refund_txid, i.expires_at, i.purge_after, i.created_at,
-         i.orchard_receiver_hex, i.diversifier_index,
-         i.price_zatoshis, i.received_zatoshis,
-         i.subscription_id,
-         i.payment_link_id, i.is_donation, i.campaign_counted
-         FROM invoices i
-         LEFT JOIN merchants m ON m.id = i.merchant_id
-         WHERE i.id = ?",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await?;
-
-    Ok(row)
-}
-
-/// Look up an invoice by its memo code (e.g. CP-C6CDB775)
-pub async fn get_invoice_by_memo(
-    pool: &SqlitePool,
-    memo_code: &str,
-) -> anyhow::Result<Option<Invoice>> {
-    let row = sqlx::query_as::<_, Invoice>(
-        "SELECT i.id, i.merchant_id, i.memo_code, i.product_id, i.product_name, i.size,
-         i.price_eur, i.price_usd, i.currency, i.price_zec, i.zec_rate_at_creation,
-         i.amount, i.price_id,
-         COALESCE(NULLIF(i.payment_address, ''), m.payment_address) AS payment_address,
-         i.zcash_uri,
-         NULLIF(m.name, '') AS merchant_name,
-         i.refund_address, i.status, i.detected_txid, i.detected_at,
-         i.confirmed_at, i.refunded_at, i.refund_txid, i.expires_at, i.purge_after, i.created_at,
-         i.orchard_receiver_hex, i.diversifier_index,
-         i.price_zatoshis, i.received_zatoshis,
-         i.subscription_id,
-         i.payment_link_id, i.is_donation, i.campaign_counted
-         FROM invoices i
-         LEFT JOIN merchants m ON m.id = i.merchant_id
-         WHERE i.memo_code = ?",
-    )
-    .bind(memo_code)
-    .fetch_optional(pool)
-    .await?;
-
-    Ok(row)
-}
-
-pub async fn get_invoice_status(
-    pool: &SqlitePool,
-    id: &str,
-) -> anyhow::Result<Option<InvoiceStatus>> {
-    let row = sqlx::query_as::<_, InvoiceStatus>(
-        "SELECT id, status, detected_txid, received_zatoshis, price_zatoshis FROM invoices WHERE id = ?"
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await?;
-
-    Ok(row)
-}
-
-pub async fn get_pending_invoices(pool: &SqlitePool) -> anyhow::Result<Vec<Invoice>> {
-    let rows = sqlx::query_as::<_, Invoice>(
-        "SELECT id, merchant_id, memo_code, product_id, product_name, size,
-         price_eur, price_usd, currency, price_zec, zec_rate_at_creation,
-         amount, price_id,
-         payment_address, zcash_uri,
-         NULL AS merchant_name,
-         refund_address, status, detected_txid, detected_at,
-         confirmed_at, NULL AS refunded_at, NULL AS refund_txid, expires_at, purge_after, created_at,
-         orchard_receiver_hex, diversifier_index,
-         price_zatoshis, received_zatoshis,
-         subscription_id,
-         payment_link_id, is_donation, campaign_counted
-         FROM invoices WHERE status IN ('pending', 'underpaid', 'detected')
-         AND expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
-    )
-    .fetch_all(pool)
-    .await?;
-
-    Ok(rows)
-}
-
 /// Returns true if the status actually changed (used to gate webhook dispatch).
 pub async fn mark_detected(
     pool: &SqlitePool,
@@ -563,36 +392,6 @@ pub async fn update_refund_address(
     .await?;
 
     Ok(result.rows_affected() > 0)
-}
-
-pub fn zatoshis_to_zec(z: i64) -> f64 {
-    format!("{:.8}", z as f64 / 100_000_000.0)
-        .parse::<f64>()
-        .unwrap_or(0.0)
-}
-
-pub fn zec_to_zatoshis(amount_zec: f64) -> anyhow::Result<i64> {
-    if !amount_zec.is_finite() || amount_zec < 0.0 {
-        anyhow::bail!("Invalid ZEC amount");
-    }
-
-    let scaled = (amount_zec * 100_000_000.0).round();
-    if scaled < 0.0 || scaled > i64::MAX as f64 {
-        anyhow::bail!("ZEC amount out of range");
-    }
-
-    Ok(scaled as i64)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::zec_to_zatoshis;
-
-    #[test]
-    fn rounds_to_nearest_zatoshi() {
-        assert_eq!(zec_to_zatoshis(0.000000016).unwrap(), 2);
-        assert_eq!(zec_to_zatoshis(1.234567895).unwrap(), 123_456_790);
-    }
 }
 
 /// Create a draft invoice for a subscription renewal. No ZEC conversion yet;

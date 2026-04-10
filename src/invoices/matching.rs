@@ -47,20 +47,3 @@ fn find_by_memo<'a>(invoices: &'a [Invoice], memo_text: &str) -> Option<&'a Invo
         .iter()
         .find(|i| memo_trimmed.contains(&i.memo_code))
 }
-
-/// Convenience wrapper that builds an index inline — use InvoiceIndex::build
-/// directly when matching against the same invoice set multiple times.
-pub fn find_matching_invoice<'a>(
-    invoices: &'a [Invoice],
-    recipient_hex: &str,
-    memo_text: &str,
-) -> Option<&'a Invoice> {
-    // For single-call sites, delegate to linear scan (index overhead not worth it)
-    if let Some(inv) = invoices
-        .iter()
-        .find(|i| i.orchard_receiver_hex.as_deref() == Some(recipient_hex))
-    {
-        return Some(inv);
-    }
-    find_by_memo(invoices, memo_text)
-}

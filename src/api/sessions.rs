@@ -344,13 +344,9 @@ pub async fn close(
 }
 
 pub async fn history(req: HttpRequest, pool: web::Data<SqlitePool>) -> HttpResponse {
-    let merchant = match crate::api::auth::resolve_session(&req, &pool).await {
-        Some(m) => m,
-        None => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Not authenticated"
-            }));
-        }
+    let merchant = match crate::api::auth::require_session(&req, pool.get_ref()).await {
+        Ok(merchant) => merchant,
+        Err(response) => return response,
     };
 
     match crate::sessions::list_for_merchant(pool.get_ref(), &merchant.id).await {

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, SqlitePool};
+use thiserror::Error;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -24,6 +25,19 @@ fn default_price_type() -> String {
 
 const VALID_PRICE_TYPES: &[&str] = &["one_time", "recurring"];
 const VALID_INTERVALS: &[&str] = &["day", "week", "month", "year"];
+
+#[derive(Debug, Error)]
+#[error("{message}")]
+pub struct PriceValidationError {
+    message: String,
+}
+
+fn validation_error(message: impl Into<String>) -> anyhow::Error {
+    PriceValidationError {
+        message: message.into(),
+    }
+    .into()
+}
 
 #[derive(Debug, Deserialize)]
 pub struct CreatePriceRequest {
@@ -64,54 +78,62 @@ pub async fn create_price(
 ) -> anyhow::Result<Price> {
     let currency = req.currency.to_uppercase();
     if !SUPPORTED_CURRENCIES.contains(&currency.as_str()) {
-        anyhow::bail!(
+        return Err(validation_error(format!(
             "Unsupported currency: {}. Supported: {}",
             currency,
             SUPPORTED_CURRENCIES.join(", ")
-        );
+        )));
     }
     if req.unit_amount <= 0.0 {
-        anyhow::bail!("unit_amount must be > 0");
+        return Err(validation_error("unit_amount must be > 0"));
     }
     if req.unit_amount > MAX_UNIT_AMOUNT {
-        anyhow::bail!("unit_amount exceeds maximum of {}", MAX_UNIT_AMOUNT);
+        return Err(validation_error(format!(
+            "unit_amount exceeds maximum of {}",
+            MAX_UNIT_AMOUNT
+        )));
     }
     if let Some(max_q) = req.max_quantity {
         if max_q <= 0 {
-            anyhow::bail!("max_quantity must be > 0");
+            return Err(validation_error("max_quantity must be > 0"));
         }
     }
 
     let product = crate::products::get_product(pool, &req.product_id).await?;
     match product {
         Some(p) if p.merchant_id == merchant_id => {}
-        Some(_) => anyhow::bail!("Product does not belong to this merchant"),
-        None => anyhow::bail!("Product not found"),
+        Some(_) => return Err(validation_error("Product does not belong to this merchant")),
+        None => return Err(validation_error("Product not found")),
     }
 
     let is_event_backed = crate::events::is_product_backed_by_event(pool, &req.product_id).await?;
     let existing = get_price_by_product_currency(pool, &req.product_id, &currency).await?;
     if let Some(p) = existing {
         if p.active == 1 && !is_event_backed {
-            anyhow::bail!("An active price for {} already exists on this product. Deactivate it first or update it.", currency);
+            return Err(validation_error(format!(
+                "An active price for {} already exists on this product. Deactivate it first or update it.",
+                currency
+            )));
         }
     }
 
     let price_type = req.price_type.as_deref().unwrap_or("one_time");
     if !VALID_PRICE_TYPES.contains(&price_type) {
-        anyhow::bail!("price_type must be one_time or recurring");
+        return Err(validation_error("price_type must be one_time or recurring"));
     }
     let (billing_interval, interval_count) = if price_type == "recurring" {
         let interval = req
             .billing_interval
             .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("billing_interval required for recurring prices"))?;
+            .ok_or_else(|| validation_error("billing_interval required for recurring prices"))?;
         if !VALID_INTERVALS.contains(&interval) {
-            anyhow::bail!("billing_interval must be day, week, month, or year");
+            return Err(validation_error(
+                "billing_interval must be day, week, month, or year",
+            ));
         }
         let count = req.interval_count.unwrap_or(1);
         if count < 1 || count > 365 {
-            anyhow::bail!("interval_count must be between 1 and 365");
+            return Err(validation_error("interval_count must be between 1 and 365"));
         }
         (Some(interval.to_string()), Some(count))
     } else {
@@ -199,19 +221,26 @@ pub async fn update_price(
     let product = crate::products::get_product(pool, &price.product_id).await?;
     match product {
         Some(p) if p.merchant_id == merchant_id => {}
-        _ => anyhow::bail!("Price not found or does not belong to this merchant"),
+        _ => {
+            return Err(validation_error(
+                "Price not found or does not belong to this merchant",
+            ))
+        }
     }
 
     let unit_amount = req.unit_amount.unwrap_or(price.unit_amount);
     if unit_amount <= 0.0 {
-        anyhow::bail!("unit_amount must be > 0");
+        return Err(validation_error("unit_amount must be > 0"));
     }
     if unit_amount > MAX_UNIT_AMOUNT {
-        anyhow::bail!("unit_amount exceeds maximum of {}", MAX_UNIT_AMOUNT);
+        return Err(validation_error(format!(
+            "unit_amount exceeds maximum of {}",
+            MAX_UNIT_AMOUNT
+        )));
     }
     if let Some(max_q) = req.max_quantity {
         if max_q <= 0 {
-            anyhow::bail!("max_quantity must be > 0");
+            return Err(validation_error("max_quantity must be > 0"));
         }
     }
 
@@ -219,14 +248,17 @@ pub async fn update_price(
         Some(c) => {
             let c = c.to_uppercase();
             if !SUPPORTED_CURRENCIES.contains(&c.as_str()) {
-                anyhow::bail!("Unsupported currency: {}", c);
+                return Err(validation_error(format!("Unsupported currency: {}", c)));
             }
             if c != price.currency {
                 let existing = get_price_by_product_currency(pool, &price.product_id, &c).await?;
                 let is_event_backed =
                     crate::events::is_product_backed_by_event(pool, &price.product_id).await?;
                 if existing.is_some() && !is_event_backed {
-                    anyhow::bail!("An active price for {} already exists on this product. Deactivate it first.", c);
+                    return Err(validation_error(format!(
+                        "An active price for {} already exists on this product. Deactivate it first.",
+                        c
+                    )));
                 }
             }
             c
@@ -239,20 +271,22 @@ pub async fn update_price(
 
     let price_type = req.price_type.as_deref().unwrap_or(&price.price_type);
     if !VALID_PRICE_TYPES.contains(&price_type) {
-        anyhow::bail!("price_type must be one_time or recurring");
+        return Err(validation_error("price_type must be one_time or recurring"));
     }
     let (billing_interval, interval_count) = if price_type == "recurring" {
         let interval = req
             .billing_interval
             .as_deref()
             .or(price.billing_interval.as_deref())
-            .ok_or_else(|| anyhow::anyhow!("billing_interval required for recurring prices"))?;
+            .ok_or_else(|| validation_error("billing_interval required for recurring prices"))?;
         if !VALID_INTERVALS.contains(&interval) {
-            anyhow::bail!("billing_interval must be day, week, month, or year");
+            return Err(validation_error(
+                "billing_interval must be day, week, month, or year",
+            ));
         }
         let count = req.interval_count.or(price.interval_count).unwrap_or(1);
         if count < 1 || count > 365 {
-            anyhow::bail!("interval_count must be between 1 and 365");
+            return Err(validation_error("interval_count must be between 1 and 365"));
         }
         (Some(interval.to_string()), Some(count))
     } else {
@@ -306,9 +340,9 @@ pub async fn deactivate_price(
             .await?;
 
     if active_count.0 <= 1 {
-        anyhow::bail!(
-            "Cannot remove the last active price. A product must have at least one price."
-        );
+        return Err(validation_error(
+            "Cannot remove the last active price. A product must have at least one price.",
+        ));
     }
 
     // If this price is the product's default, reassign to another active price before deactivating
@@ -326,7 +360,9 @@ pub async fn deactivate_price(
             crate::products::set_default_price(pool, &price.product_id, &new_default_id).await?;
             tracing::info!(price_id = %price_id, new_default = %new_default_id, "Reassigned default price before deactivation");
         } else {
-            anyhow::bail!("Cannot deactivate the default price when it is the only active price.");
+            return Err(validation_error(
+                "Cannot deactivate the default price when it is the only active price.",
+            ));
         }
     }
 

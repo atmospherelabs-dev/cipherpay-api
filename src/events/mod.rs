@@ -1,6 +1,7 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, SqlitePool};
+use thiserror::Error;
 use uuid::Uuid;
 
 #[allow(dead_code)]
@@ -81,6 +82,19 @@ pub struct EventDetailResponse {
     #[serde(flatten)]
     pub summary: EventSummary,
     pub tiers: Vec<EventTierStat>,
+}
+
+#[derive(Debug, Error)]
+#[error("{message}")]
+pub struct EventValidationError {
+    message: String,
+}
+
+fn validation_error(message: impl Into<String>) -> anyhow::Error {
+    EventValidationError {
+        message: message.into(),
+    }
+    .into()
 }
 
 /// Parse event_date strings in either "YYYY-MM-DDTHH:MM:SS" or "YYYY-MM-DDTHH:MM" format.
@@ -228,34 +242,42 @@ pub async fn create_event_with_product_and_prices(
     req: &CreateEventRequest,
 ) -> anyhow::Result<Event> {
     if req.title.trim().is_empty() {
-        anyhow::bail!("title is required");
+        return Err(validation_error("title is required"));
     }
     if req.title.len() > 200 {
-        anyhow::bail!("title must be 200 characters or fewer");
+        return Err(validation_error("title must be 200 characters or fewer"));
     }
     if let Some(ref d) = req.description {
         if d.len() > 2000 {
-            anyhow::bail!("description must be 2000 characters or fewer");
+            return Err(validation_error(
+                "description must be 2000 characters or fewer",
+            ));
         }
     }
     if let Some(ref loc) = req.event_location {
         if loc.len() > 300 {
-            anyhow::bail!("event_location must be 300 characters or fewer");
+            return Err(validation_error(
+                "event_location must be 300 characters or fewer",
+            ));
         }
     }
     if let Some(ref date) = req.event_date {
         if date.len() > 30 {
-            anyhow::bail!("event_date must be 30 characters or fewer");
+            return Err(validation_error(
+                "event_date must be 30 characters or fewer",
+            ));
         }
         if parse_event_datetime(date).is_none() {
-            anyhow::bail!("event_date must be a valid date (YYYY-MM-DDTHH:MM)");
+            return Err(validation_error(
+                "event_date must be a valid date (YYYY-MM-DDTHH:MM)",
+            ));
         }
     }
     if req.prices.is_empty() {
-        anyhow::bail!("at least one price is required");
+        return Err(validation_error("at least one price is required"));
     }
     if req.prices.len() > 20 {
-        anyhow::bail!("maximum 20 price tiers per event");
+        return Err(validation_error("maximum 20 price tiers per event"));
     }
 
     let mut tx = pool.begin().await?;
@@ -279,19 +301,24 @@ pub async fn create_event_with_product_and_prices(
     for p in &req.prices {
         let currency = p.currency.to_uppercase();
         if !crate::prices::SUPPORTED_CURRENCIES.contains(&currency.as_str()) {
-            anyhow::bail!("Unsupported currency: {}", currency);
+            return Err(validation_error(format!(
+                "Unsupported currency: {}",
+                currency
+            )));
         }
         if p.unit_amount <= 0.0 {
-            anyhow::bail!("unit_amount must be > 0");
+            return Err(validation_error("unit_amount must be > 0"));
         }
         if let Some(ref label) = p.label {
             if label.len() > 100 {
-                anyhow::bail!("price label must be 100 characters or fewer");
+                return Err(validation_error(
+                    "price label must be 100 characters or fewer",
+                ));
             }
         }
         if let Some(max_q) = p.max_quantity {
             if max_q <= 0 {
-                anyhow::bail!("max_quantity must be > 0");
+                return Err(validation_error("max_quantity must be > 0"));
             }
         }
 
@@ -406,33 +433,41 @@ pub async fn update_event(
     };
 
     if status == "cancelled" {
-        anyhow::bail!("cannot edit a cancelled event");
+        return Err(validation_error("cannot edit a cancelled event"));
     }
 
     if let Some(ref t) = req.title {
         if t.trim().is_empty() {
-            anyhow::bail!("title is required");
+            return Err(validation_error("title is required"));
         }
         if t.len() > 200 {
-            anyhow::bail!("title must be 200 characters or fewer");
+            return Err(validation_error("title must be 200 characters or fewer"));
         }
     }
     if let Some(ref d) = req.description {
         if d.len() > 2000 {
-            anyhow::bail!("description must be 2000 characters or fewer");
+            return Err(validation_error(
+                "description must be 2000 characters or fewer",
+            ));
         }
     }
     if let Some(ref loc) = req.event_location {
         if loc.len() > 300 {
-            anyhow::bail!("event_location must be 300 characters or fewer");
+            return Err(validation_error(
+                "event_location must be 300 characters or fewer",
+            ));
         }
     }
     if let Some(ref date) = req.event_date {
         if date.len() > 30 {
-            anyhow::bail!("event_date must be 30 characters or fewer");
+            return Err(validation_error(
+                "event_date must be 30 characters or fewer",
+            ));
         }
         if parse_event_datetime(date).is_none() {
-            anyhow::bail!("event_date must be a valid date (YYYY-MM-DDTHH:MM)");
+            return Err(validation_error(
+                "event_date must be a valid date (YYYY-MM-DDTHH:MM)",
+            ));
         }
     }
 
