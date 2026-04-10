@@ -98,7 +98,6 @@ Privacy-preserving Zcash payment gateway. Non-custodial, shielded-only.
 - [ ] **Embeddable widget** (JS snippet for any website)
   - `<script src="https://pay.cipherpay.app/widget.js">`
   - Drop-in payment button with modal checkout
-- [ ] Email notifications (payment confirmations, invoice reminders, subscription renewals — privacy-conscious: no PII in body)
 - [ ] **Blog** (`/blog`) — product updates, integration guides, campaign spotlights, privacy commentary. MDX-based, built into Next.js app.
 - [ ] **Developer changelog** (`/changelog`) — running log of features, fixes, and updates. Signals active development.
 - [ ] **Use cases page** (`/use-cases`) — e-commerce, donations, ticketing, AI agents, subscriptions. Conversion page for new visitors.
