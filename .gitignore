@@ -8,6 +8,7 @@
 .bizdev-outreach.md
 .cursor/
 .cargo-home/
+.DS_Store
 
 # Internal docs (referral program, strategy)
 docs/REFERRAL-*
