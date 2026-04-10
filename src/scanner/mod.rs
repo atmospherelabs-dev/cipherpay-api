@@ -715,6 +715,25 @@ async fn on_invoice_confirmed(
                     new_period_end = %sub.current_period_end,
                     "Subscription advanced on payment confirmation"
                 );
+                // Dispatch subscription.renewed webhook
+                let payload = serde_json::json!({
+                    "subscription_id": sub.id,
+                    "invoice_id": invoice.id,
+                    "new_period_start": sub.current_period_start,
+                    "new_period_end": sub.current_period_end,
+                });
+                if let Err(e) = crate::webhooks::dispatch_event(
+                    pool,
+                    http,
+                    &invoice.merchant_id,
+                    "subscription.renewed",
+                    payload,
+                    &config.encryption_key,
+                )
+                .await
+                {
+                    tracing::error!(sub_id, error = %e, "Failed to dispatch subscription.renewed webhook");
+                }
             }
             Ok(None) => {
                 tracing::warn!(sub_id, "Subscription not found for confirmed invoice");
