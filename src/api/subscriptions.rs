@@ -210,3 +210,46 @@ pub async fn simulate_period_end(
         "hint": "Use with_payment: true to simulate a confirmed renewal payment"
     }))
 }
+
+/// Testnet-only: trigger the process_renewals job manually
+/// POST /api/subscriptions/trigger-renewals
+pub async fn trigger_renewals(
+    req: HttpRequest,
+    pool: web::Data<SqlitePool>,
+    config: web::Data<Config>,
+) -> HttpResponse {
+    if !config.is_testnet() {
+        return HttpResponse::Forbidden().json(serde_json::json!({
+            "error": "Simulation endpoints are only available on testnet"
+        }));
+    }
+
+    // Require authentication (any merchant)
+    if super::auth::require_merchant_or_session(&req, pool.get_ref()).await.is_err() {
+        return HttpResponse::Unauthorized().json(serde_json::json!({
+            "error": "Authentication required"
+        }));
+    }
+
+    let http = reqwest::Client::new();
+    // Empty UFVKs map — renewal invoice creation will skip address generation
+    // but past_due and cancel logic will still work for testing
+    let empty_ufvks = std::collections::HashMap::new();
+    match subscriptions::process_renewals(
+        pool.get_ref(),
+        &http,
+        &config.encryption_key,
+        &empty_ufvks,
+        None,
+    )
+    .await
+    {
+        Ok(actions) => HttpResponse::Ok().json(serde_json::json!({
+            "message": "process_renewals completed",
+            "actions": actions,
+        })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": e.to_string()
+        })),
+    }
+}
