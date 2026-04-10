@@ -365,7 +365,6 @@ pub async fn create_session_request(
         merchant_id: merchant_id.to_string(),
         deposit_address: derived.ua_string,
         diversifier_index: div_index,
-        expires_at: String::new(), // filled by DB
     })
 }
 
@@ -374,8 +373,8 @@ pub async fn get_session_request(
     pool: &SqlitePool,
     request_id: &str,
 ) -> Result<Option<SessionRequest>> {
-    let row = sqlx::query_as::<_, (String, String, String, i64, String)>(
-        "SELECT id, merchant_id, deposit_address, diversifier_index, expires_at
+    let row = sqlx::query_as::<_, (String, String, String, i64)>(
+        "SELECT id, merchant_id, deposit_address, diversifier_index
          FROM session_requests WHERE id = ? AND status = 'pending'
          AND expires_at >= strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
     )
@@ -388,7 +387,6 @@ pub async fn get_session_request(
         merchant_id: r.1,
         deposit_address: r.2,
         diversifier_index: r.3 as u32,
-        expires_at: r.4,
     }))
 }
 
@@ -406,7 +404,6 @@ pub struct SessionRequest {
     pub merchant_id: String,
     pub deposit_address: String,
     pub diversifier_index: u32,
-    pub expires_at: String,
 }
 
 fn generate_token() -> String {
