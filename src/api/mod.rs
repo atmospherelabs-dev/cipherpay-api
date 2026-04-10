@@ -194,7 +194,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/admin/merchants", web::get().to(admin::merchants))
             .route("/admin/billing", web::get().to(admin::billing))
             .route("/admin/webhooks", web::get().to(admin::webhooks))
-            .route("/admin/system", web::get().to(admin::system)),
+            .route("/admin/system", web::get().to(admin::system))
+            .route("/admin/test-email", web::post().to(admin::test_email)),
     );
 
     cfg.route("/.well-known/payment", web::get().to(well_known_payment));

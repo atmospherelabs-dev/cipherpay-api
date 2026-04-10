@@ -58,11 +58,27 @@ pub struct BillingSummary {
     pub settlement_invoice_status: Option<String>,
 }
 
+/// Returns the effective fee rate for a merchant (per-merchant override or global default).
+pub async fn get_effective_fee_rate(
+    pool: &SqlitePool,
+    merchant_id: &str,
+    config: &Config,
+) -> anyhow::Result<f64> {
+    let merchant_rate: Option<f64> =
+        sqlx::query_scalar("SELECT fee_rate FROM merchants WHERE id = ?")
+            .bind(merchant_id)
+            .fetch_optional(pool)
+            .await?
+            .flatten();
+    Ok(merchant_rate.unwrap_or(config.fee_rate))
+}
+
 pub async fn create_fee_entry(
     pool: &SqlitePool,
     invoice_id: &str,
     merchant_id: &str,
     fee_amount_zec: f64,
+    fee_rate_applied: f64,
 ) -> anyhow::Result<()> {
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
@@ -76,14 +92,15 @@ pub async fn create_fee_entry(
     .await?;
 
     sqlx::query(
-        "INSERT OR IGNORE INTO fee_ledger (id, invoice_id, merchant_id, fee_amount_zec, fee_amount_zatoshis, billing_cycle_id, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)"
+        "INSERT OR IGNORE INTO fee_ledger (id, invoice_id, merchant_id, fee_amount_zec, fee_amount_zatoshis, fee_rate_applied, billing_cycle_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
     )
     .bind(&id)
     .bind(invoice_id)
     .bind(merchant_id)
     .bind(fee_amount_zec)
     .bind(fee_amount_zatoshis)
+    .bind(fee_rate_applied)
     .bind(&cycle_id)
     .bind(&now)
     .execute(pool)
@@ -200,8 +217,10 @@ pub async fn get_billing_summary(
         _ => None,
     };
 
+    let effective_fee_rate = get_effective_fee_rate(pool, merchant_id, config).await?;
+
     Ok(BillingSummary {
-        fee_rate: config.fee_rate,
+        fee_rate: effective_fee_rate,
         trust_tier,
         billing_status,
         current_cycle,
@@ -375,7 +394,7 @@ pub async fn create_settlement_invoice(
     Ok(id)
 }
 
-/// Runs billing cycle processing: close expired cycles, enforce, upgrade tiers.
+/// Runs billing cycle processing: close expired cycles, enforce, upgrade tiers, send notifications.
 pub async fn process_billing_cycles(
     pool: &SqlitePool,
     config: &Config,
@@ -387,6 +406,7 @@ pub async fn process_billing_cycles(
     }
 
     let now_str = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let enc_key = &config.encryption_key;
 
     // 1. Close expired open cycles
     let expired_cycles = sqlx::query_as::<_, BillingCycle>(
@@ -449,9 +469,69 @@ pub async fn process_billing_cycles(
                 grace_until = %grace_until,
                 "Settlement invoice generated"
             );
+
+            if let Some(email) =
+                crate::email::get_merchant_email(pool, &cycle.merchant_id, enc_key).await
+            {
+                let _ = crate::email::send_settlement_invoice_email(
+                    pool,
+                    config,
+                    &email,
+                    &cycle.merchant_id,
+                    &cycle.id,
+                    cycle.outstanding_zec,
+                    &grace_until,
+                    grace_days,
+                )
+                .await;
+            }
         }
 
         ensure_billing_cycle(pool, &cycle.merchant_id, config).await?;
+    }
+
+    // 1b. Grace period reminders (3 days before grace expires)
+    let reminder_threshold = (Utc::now() + Duration::days(3))
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+    let invoiced_cycles = sqlx::query_as::<_, BillingCycle>(
+        "SELECT * FROM billing_cycles WHERE status = 'invoiced' AND grace_until <= ? AND grace_until > ?",
+    )
+    .bind(&reminder_threshold)
+    .bind(&now_str)
+    .fetch_all(pool)
+    .await?;
+
+    for cycle in &invoiced_cycles {
+        if let Some(ref grace_until) = cycle.grace_until {
+            if let Some(email) =
+                crate::email::get_merchant_email(pool, &cycle.merchant_id, enc_key).await
+            {
+                let days_left = {
+                    let grace_dt = chrono::NaiveDateTime::parse_from_str(
+                        grace_until,
+                        "%Y-%m-%dT%H:%M:%SZ",
+                    );
+                    match grace_dt {
+                        Ok(dt) => {
+                            (dt - Utc::now().naive_utc()).num_days().max(1)
+                        }
+                        Err(_) => 3,
+                    }
+                };
+                let _ = crate::email::send_billing_reminder_email(
+                    pool,
+                    config,
+                    &email,
+                    &cycle.merchant_id,
+                    &cycle.id,
+                    cycle.outstanding_zec,
+                    grace_until,
+                    days_left,
+                )
+                .await;
+            }
+        }
     }
 
     // 2. Enforce past due
@@ -484,6 +564,20 @@ pub async fn process_billing_cycles(
             .execute(pool)
             .await?;
         tracing::warn!(merchant_id = %cycle.merchant_id, outstanding = cycle.outstanding_zec, "Merchant billing past due");
+
+        if let Some(email) =
+            crate::email::get_merchant_email(pool, &cycle.merchant_id, enc_key).await
+        {
+            let _ = crate::email::send_past_due_email(
+                pool,
+                config,
+                &email,
+                &cycle.merchant_id,
+                &cycle.id,
+                cycle.outstanding_zec,
+            )
+            .await;
+        }
     }
 
     // 3. Enforce suspension (7 days after past_due for new, 14 for standard/trusted)
@@ -514,12 +608,81 @@ pub async fn process_billing_cycles(
                         .execute(pool)
                         .await?;
                     tracing::warn!(merchant_id = %cycle.merchant_id, "Merchant suspended for non-payment");
+
+                    if let Some(email) =
+                        crate::email::get_merchant_email(pool, &cycle.merchant_id, enc_key).await
+                    {
+                        let _ = crate::email::send_suspended_email(
+                            pool,
+                            config,
+                            &email,
+                            &cycle.merchant_id,
+                            &cycle.id,
+                            cycle.outstanding_zec,
+                        )
+                        .await;
+                    }
                 }
             }
         }
     }
 
-    // 4. Upgrade trust tiers: 3+ consecutive paid on time
+    // 4. Expire referral fee discounts
+    let expiring_merchants: Vec<(String, Option<f64>)> = sqlx::query_as(
+        "SELECT id, fee_rate FROM merchants WHERE fee_discount_until IS NOT NULL AND fee_discount_until < ?",
+    )
+    .bind(&now_str)
+    .fetch_all(pool)
+    .await?;
+
+    for (merchant_id, _old_rate) in &expiring_merchants {
+        sqlx::query(
+            "UPDATE merchants SET fee_rate = NULL, fee_discount_until = NULL WHERE id = ?",
+        )
+        .bind(merchant_id)
+        .execute(pool)
+        .await?;
+        tracing::info!(merchant_id, "Fee discount expired, reverted to standard rate");
+
+        if let Some(email) = crate::email::get_merchant_email(pool, merchant_id, enc_key).await {
+            let _ = crate::email::send_discount_expired_email(
+                pool,
+                config,
+                &email,
+                merchant_id,
+                config.fee_rate,
+            )
+            .await;
+        }
+    }
+
+    // 4b. Warn merchants whose discount expires in 7 days
+    let warning_threshold = (Utc::now() + Duration::days(7))
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+    let warning_merchants: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT id, fee_discount_until FROM merchants
+         WHERE fee_discount_until IS NOT NULL AND fee_discount_until > ? AND fee_discount_until <= ?",
+    )
+    .bind(&now_str)
+    .bind(&warning_threshold)
+    .fetch_all(pool)
+    .await?;
+
+    for (merchant_id, discount_until) in &warning_merchants {
+        if let Some(ref until) = discount_until {
+            if let Some(email) =
+                crate::email::get_merchant_email(pool, merchant_id, enc_key).await
+            {
+                let _ = crate::email::send_discount_expiry_warning_email(
+                    pool, config, &email, merchant_id, config.fee_rate, until,
+                )
+                .await;
+            }
+        }
+    }
+
+    // 5. Upgrade trust tiers: 3+ consecutive paid on time
     let merchants_for_upgrade: Vec<(String, String)> = sqlx::query_as(
         "SELECT id, COALESCE(trust_tier, 'new') FROM merchants WHERE trust_tier != 'trusted'",
     )
@@ -571,7 +734,10 @@ pub async fn process_billing_cycles(
 }
 
 /// Check if a settlement invoice was paid and restore merchant access.
-pub async fn check_settlement_payments(pool: &SqlitePool) -> anyhow::Result<()> {
+pub async fn check_settlement_payments(
+    pool: &SqlitePool,
+    config: &Config,
+) -> anyhow::Result<()> {
     let settled = sqlx::query_as::<_, BillingCycle>(
         "SELECT bc.* FROM billing_cycles bc
          JOIN invoices i ON i.id = bc.settlement_invoice_id
@@ -580,6 +746,8 @@ pub async fn check_settlement_payments(pool: &SqlitePool) -> anyhow::Result<()> 
     )
     .fetch_all(pool)
     .await?;
+
+    let enc_key = &config.encryption_key;
 
     for cycle in &settled {
         sqlx::query(
@@ -595,6 +763,15 @@ pub async fn check_settlement_payments(pool: &SqlitePool) -> anyhow::Result<()> 
             .execute(pool)
             .await?;
         tracing::info!(merchant_id = %cycle.merchant_id, "Settlement paid, merchant restored");
+
+        if let Some(email) =
+            crate::email::get_merchant_email(pool, &cycle.merchant_id, enc_key).await
+        {
+            let _ = crate::email::send_payment_confirmed_email(
+                pool, config, &email, &cycle.merchant_id, &cycle.id,
+            )
+            .await;
+        }
     }
 
     Ok(())

@@ -1,5 +1,6 @@
 use actix_web::web;
 use hmac::{Hmac, Mac};
+use serde::Deserialize;
 use sha2::Sha256;
 use sqlx::SqlitePool;
 use subtle::ConstantTimeEq;
@@ -516,4 +517,145 @@ pub async fn system(
         "fee_enabled": config.fee_enabled(),
         "fee_rate": config.fee_rate,
     }))
+}
+
+#[derive(Deserialize)]
+pub struct TestEmailRequest {
+    pub to: String,
+    pub template: Option<String>,
+}
+
+/// POST /api/admin/test-email -- send a test billing email to verify email delivery
+pub async fn test_email(
+    req: actix_web::HttpRequest,
+    pool: web::Data<SqlitePool>,
+    config: web::Data<crate::config::Config>,
+    body: web::Json<TestEmailRequest>,
+) -> actix_web::HttpResponse {
+    if !authenticate_admin(&req) {
+        return unauthorized();
+    }
+
+    if !config.smtp_configured() {
+        return actix_web::HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "Email not configured (SMTP_FROM and SMTP_PASS required)"
+        }));
+    }
+
+    let template = body.template.as_deref().unwrap_or("settlement_invoice");
+    let test_cycle_id = "test-email-verification";
+
+    // Delete any previous test email event so the test can be repeated
+    sqlx::query("DELETE FROM email_events WHERE merchant_id = 'test' AND entity_id = ?")
+        .bind(test_cycle_id)
+        .execute(pool.get_ref())
+        .await
+        .ok();
+
+    let result = match template {
+        "settlement_invoice" => {
+            crate::email::send_settlement_invoice_email(
+                pool.get_ref(),
+                &config,
+                &body.to,
+                "test",
+                test_cycle_id,
+                0.12345678,
+                "2026-04-20T00:00:00Z",
+                7,
+            )
+            .await
+        }
+        "grace_reminder" => {
+            crate::email::send_billing_reminder_email(
+                pool.get_ref(),
+                &config,
+                &body.to,
+                "test",
+                test_cycle_id,
+                0.12345678,
+                "2026-04-20T00:00:00Z",
+                3,
+            )
+            .await
+        }
+        "past_due" => {
+            crate::email::send_past_due_email(
+                pool.get_ref(),
+                &config,
+                &body.to,
+                "test",
+                test_cycle_id,
+                0.12345678,
+            )
+            .await
+        }
+        "suspended" => {
+            crate::email::send_suspended_email(
+                pool.get_ref(),
+                &config,
+                &body.to,
+                "test",
+                test_cycle_id,
+                0.12345678,
+            )
+            .await
+        }
+        "payment_confirmed" => {
+            crate::email::send_payment_confirmed_email(
+                pool.get_ref(),
+                &config,
+                &body.to,
+                "test",
+                test_cycle_id,
+            )
+            .await
+        }
+        "discount_expiry_warning" => {
+            crate::email::send_discount_expiry_warning_email(
+                pool.get_ref(),
+                &config,
+                &body.to,
+                "test",
+                0.01,
+                "2026-04-20",
+            )
+            .await
+        }
+        "discount_expired" => {
+            crate::email::send_discount_expired_email(
+                pool.get_ref(),
+                &config,
+                &body.to,
+                "test",
+                0.01,
+            )
+            .await
+        }
+        _ => {
+            return actix_web::HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "Unknown template",
+                "valid_templates": [
+                    "settlement_invoice", "grace_reminder", "past_due",
+                    "suspended", "payment_confirmed",
+                    "discount_expiry_warning", "discount_expired"
+                ]
+            }));
+        }
+    };
+
+    match result {
+        Ok(true) => actix_web::HttpResponse::Ok().json(serde_json::json!({
+            "sent": true,
+            "template": template,
+            "to": body.to,
+        })),
+        Ok(false) => actix_web::HttpResponse::Ok().json(serde_json::json!({
+            "sent": false,
+            "reason": "Skipped (idempotency or no email configured)"
+        })),
+        Err(e) => actix_web::HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Email send failed: {}", e)
+        })),
+    }
 }

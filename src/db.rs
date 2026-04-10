@@ -623,6 +623,8 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
         "ALTER TABLE merchants ADD COLUMN trust_tier TEXT NOT NULL DEFAULT 'new'",
         "ALTER TABLE merchants ADD COLUMN billing_status TEXT NOT NULL DEFAULT 'active'",
         "ALTER TABLE merchants ADD COLUMN billing_started_at TEXT",
+        "ALTER TABLE merchants ADD COLUMN fee_rate REAL",
+        "ALTER TABLE merchants ADD COLUMN fee_discount_until TEXT",
     ];
     for sql in &billing_upgrades {
         sqlx::query(sql).execute(&pool).await.ok();
@@ -661,6 +663,10 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
     .await
     .ok();
     sqlx::query("ALTER TABLE fee_ledger ADD COLUMN fee_amount_zatoshis INTEGER NOT NULL DEFAULT 0")
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE fee_ledger ADD COLUMN fee_rate_applied REAL")
         .execute(&pool)
         .await
         .ok();
@@ -790,6 +796,21 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
         .ok();
         tracing::info!("billing_cycles migration complete");
     }
+
+    // Email events: idempotency tracking for billing notifications
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS email_events (
+            id TEXT PRIMARY KEY,
+            merchant_id TEXT NOT NULL,
+            template TEXT NOT NULL,
+            entity_id TEXT NOT NULL,
+            sent_at TEXT NOT NULL,
+            UNIQUE(merchant_id, template, entity_id)
+        )",
+    )
+    .execute(&pool)
+    .await
+    .ok();
 
     // Prices table: separate pricing from products (Stripe pattern)
     sqlx::query(
@@ -1544,6 +1565,7 @@ async fn validate_schema_state(pool: &SqlitePool) -> anyhow::Result<()> {
         "agent_sessions",
         "session_requests",
         "recovery_tokens",
+        "email_events",
     ];
     for table in required_tables {
         ensure_table_exists(pool, table).await?;
@@ -1562,6 +1584,8 @@ async fn validate_schema_state(pool: &SqlitePool) -> anyhow::Result<()> {
             "billing_status",
             "billing_started_at",
             "recovery_email_hash",
+            "fee_rate",
+            "fee_discount_until",
         ],
     )
     .await?;
@@ -1595,7 +1619,7 @@ async fn validate_schema_state(pool: &SqlitePool) -> anyhow::Result<()> {
         ],
     )
     .await?;
-    ensure_columns(pool, "fee_ledger", &["fee_amount_zatoshis"]).await?;
+    ensure_columns(pool, "fee_ledger", &["fee_amount_zatoshis", "fee_rate_applied"]).await?;
     ensure_columns(
         pool,
         "billing_cycles",
