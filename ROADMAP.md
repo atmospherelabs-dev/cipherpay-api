@@ -84,8 +84,10 @@ Privacy-preserving Zcash payment gateway. Non-custodial, shielded-only.
 - [x] **Subscriptions / recurring payments**
   - Full CRUD API for subscription lifecycle (create, cancel, pause, resume)
   - Automatic period advancement on payment confirmation
-  - Renewal invoice generation in scanner loop
-  - Dashboard management for merchants
+  - Renewal invoice generation in scanner loop (3 days before period end)
+  - Reliable webhook events: `invoice.created`, `subscription.renewed`, `subscription.past_due`, `subscription.canceled`
+  - Testnet simulation endpoints for lifecycle testing (`simulate-period-end`, `trigger-renewals`)
+  - Dashboard management for merchants (pending)
 - [x] **Luma event ticketing integration**
   - Merchants link Luma events to CipherPay products
   - On payment confirmation: auto-register buyer on Luma via API
