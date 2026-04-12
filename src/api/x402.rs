@@ -96,13 +96,40 @@ pub async fn verify(
     if let Some(received_zatoshis) =
         get_existing_verified(pool.get_ref(), &merchant.id, &body.txid, protocol).await
     {
-        return HttpResponse::Ok().json(VerifyResponse {
-            valid: true,
-            received_zec: received_zatoshis as f64 / 100_000_000.0,
-            received_zatoshis,
-            previously_verified: true,
-            reason: None,
-        });
+        // Re-check amount against the current request to prevent replay across price tiers:
+        // a $5 txid verified once must not pass as proof for a $500 resource.
+        let expected_zatoshis = match zec_to_zatoshis(body.expected_amount_zec) {
+            Some(amount) => amount,
+            None => {
+                return HttpResponse::BadRequest().json(serde_json::json!({
+                    "error": "expected_amount_zec must be representable in zatoshis"
+                }));
+            }
+        };
+        let min_acceptable = (expected_zatoshis as f64 * SLIPPAGE_TOLERANCE) as u64;
+
+        if received_zatoshis >= min_acceptable {
+            return HttpResponse::Ok().json(VerifyResponse {
+                valid: true,
+                received_zec: received_zatoshis as f64 / 100_000_000.0,
+                received_zatoshis,
+                previously_verified: true,
+                reason: None,
+            });
+        } else {
+            let reason = format!(
+                "Previously verified amount insufficient: received {} ZEC, expected {} ZEC",
+                received_zatoshis as f64 / 100_000_000.0,
+                body.expected_amount_zec
+            );
+            return HttpResponse::Ok().json(VerifyResponse {
+                valid: false,
+                received_zec: received_zatoshis as f64 / 100_000_000.0,
+                received_zatoshis,
+                previously_verified: true,
+                reason: Some(reason),
+            });
+        }
     }
 
     let previously_verified = false;

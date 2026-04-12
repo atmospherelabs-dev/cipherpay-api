@@ -177,7 +177,7 @@ pub async fn process_renewals(
     // 1. Cancel subscriptions marked for end-of-period cancellation
     // First, select the ones we're about to cancel (before updating) so we dispatch webhooks only for these
     let q = format!(
-        "SELECT {} FROM subscriptions WHERE cancel_at_period_end = 1 AND current_period_end <= ? AND status = 'active'",
+        "SELECT {} FROM subscriptions WHERE cancel_at_period_end = 1 AND current_period_end <= ? AND status = 'active' LIMIT 500",
         SUB_COLS
     );
     let to_cancel: Vec<Subscription> = sqlx::query_as::<_, Subscription>(&q)
@@ -225,7 +225,7 @@ pub async fn process_renewals(
         .to_string();
 
     let q = format!(
-        "SELECT {} FROM subscriptions WHERE status = 'active' AND current_period_end <= ? AND cancel_at_period_end = 0",
+        "SELECT {} FROM subscriptions WHERE status = 'active' AND current_period_end <= ? AND cancel_at_period_end = 0 LIMIT 500",
         SUB_COLS
     );
     let due_subs: Vec<Subscription> = sqlx::query_as::<_, Subscription>(&q)
@@ -334,7 +334,7 @@ pub async fn process_renewals(
     // Note: subscription.renewed webhook is dispatched by the scanner on payment confirmation.
     // This step is a fallback for edge cases (e.g., server restart during scan).
     let q = format!(
-        "SELECT {} FROM subscriptions WHERE status = 'active' AND current_period_end <= ? AND cancel_at_period_end = 0",
+        "SELECT {} FROM subscriptions WHERE status = 'active' AND current_period_end <= ? AND cancel_at_period_end = 0 LIMIT 500",
         SUB_COLS
     );
     let past_due_candidates: Vec<Subscription> = sqlx::query_as::<_, Subscription>(&q)

@@ -259,7 +259,8 @@ pub async fn retry_failed(
          JOIN merchants m ON wd.merchant_id = m.id
          WHERE wd.status = 'pending'
          AND wd.attempts < 5
-         AND (wd.next_retry_at IS NULL OR wd.next_retry_at <= ?)",
+         AND (wd.next_retry_at IS NULL OR wd.next_retry_at <= ?)
+         LIMIT 200",
     )
     .bind(&now)
     .fetch_all(pool)
