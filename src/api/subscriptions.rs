@@ -87,6 +87,52 @@ pub async fn cancel(
     }
 }
 
+/// Verify a subscription's current status.
+/// GET /api/subscriptions/{id}/status
+pub async fn status(
+    req: HttpRequest,
+    pool: web::Data<SqlitePool>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    let merchant = match super::auth::require_merchant_or_session(&req, pool.get_ref()).await {
+        Ok(merchant) => merchant,
+        Err(response) => return response,
+    };
+
+    let sub_id = path.into_inner();
+
+    match subscriptions::get_subscription(pool.get_ref(), &sub_id).await {
+        Ok(Some(sub)) if sub.merchant_id == merchant.id => {
+            let now = chrono::Utc::now();
+            let period_end = chrono::DateTime::parse_from_rfc3339(&sub.current_period_end)
+                .or_else(|_| chrono::NaiveDateTime::parse_from_str(&sub.current_period_end, "%Y-%m-%dT%H:%M:%SZ")
+                    .map(|dt| dt.and_utc().fixed_offset()))
+                .ok();
+
+            let is_active = sub.status == "active"
+                && period_end.map_or(false, |end| now < end);
+
+            HttpResponse::Ok().json(serde_json::json!({
+                "subscription_id": sub.id,
+                "active": is_active,
+                "status": sub.status,
+                "current_period_end": sub.current_period_end,
+                "cancel_at_period_end": sub.cancel_at_period_end != 0,
+            }))
+        }
+        Ok(Some(_)) => {
+            HttpResponse::NotFound().json(serde_json::json!({"error": "Subscription not found"}))
+        }
+        Ok(None) => {
+            HttpResponse::NotFound().json(serde_json::json!({"error": "Subscription not found"}))
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to get subscription status");
+            HttpResponse::InternalServerError().json(serde_json::json!({"error": "Internal error"}))
+        }
+    }
+}
+
 /// Testnet-only: simulate subscription period ending (fast-forward for testing)
 /// POST /api/subscriptions/{id}/simulate-period-end
 #[derive(serde::Deserialize)]

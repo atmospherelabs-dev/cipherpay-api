@@ -114,6 +114,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/subscriptions", web::post().to(subscriptions::create))
             .route("/subscriptions", web::get().to(subscriptions::list))
             .route(
+                "/subscriptions/{id}/status",
+                web::get().to(subscriptions::status),
+            )
+            .route(
                 "/subscriptions/{id}/cancel",
                 web::post().to(subscriptions::cancel),
             )
