@@ -34,6 +34,12 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .finish()
         .expect("Failed to build session rate limiter");
 
+    let checkout_rate_limit = GovernorConfigBuilder::default()
+        .seconds_per_request(2)
+        .burst_size(10)
+        .finish()
+        .expect("Failed to build checkout rate limiter");
+
     let public_read_limit = GovernorConfigBuilder::default()
         .seconds_per_request(2)
         .burst_size(15)
@@ -132,7 +138,9 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             )
             .route(
                 "/payment-links/{slug}/checkout",
-                web::post().to(payment_links::resolve),
+                web::post()
+                    .to(payment_links::resolve)
+                    .wrap(Governor::new(&checkout_rate_limit)),
             )
             .route(
                 "/payment-links/{slug}/info",

@@ -28,6 +28,7 @@ pub struct Config {
     pub billing_cycle_days_standard: i64,
     pub admin_key: Option<String>,
     pub cipherscan_service_key: Option<String>,
+    pub checkout_service_key: Option<String>,
 }
 
 impl Config {
@@ -82,6 +83,9 @@ impl Config {
                 .parse()?,
             admin_key: env::var("ADMIN_KEY").ok().filter(|s| !s.is_empty()),
             cipherscan_service_key: env::var("CIPHERSCAN_SERVICE_KEY")
+                .ok()
+                .filter(|s| !s.is_empty()),
+            checkout_service_key: env::var("CHECKOUT_SERVICE_KEY")
                 .ok()
                 .filter(|s| !s.is_empty()),
         })

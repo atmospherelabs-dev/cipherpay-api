@@ -1,4 +1,5 @@
 use actix_web::{web, HttpRequest, HttpResponse};
+use subtle::ConstantTimeEq;
 use sqlx::SqlitePool;
 
 use crate::payment_links::{
@@ -227,16 +228,32 @@ pub async fn info(
     HttpResponse::Ok().json(response)
 }
 
-/// Public endpoint: resolve a payment link by slug and create an invoice.
-/// Rate limited to prevent invoice flooding.
+/// Resolve a payment link by slug and create an invoice.
+/// When CHECKOUT_SERVICE_KEY is set, requires X-Checkout-Key header (server-to-server only).
 /// For donation links, amount + currency come from the request body.
 pub async fn resolve(
+    req: HttpRequest,
     pool: web::Data<SqlitePool>,
     config: web::Data<crate::config::Config>,
     price_service: web::Data<crate::invoices::pricing::PriceService>,
     path: web::Path<String>,
     body: web::Json<serde_json::Value>,
 ) -> HttpResponse {
+    if let Some(ref expected) = config.checkout_service_key {
+        let provided = req
+            .headers()
+            .get("X-Checkout-Key")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if provided.is_empty()
+            || !bool::from(expected.as_bytes().ct_eq(provided.as_bytes()))
+        {
+            return HttpResponse::Forbidden().json(serde_json::json!({
+                "error": "Invalid or missing checkout key"
+            }));
+        }
+    }
+
     let slug = path.into_inner();
 
     let link = match payment_links::get_by_slug(pool.get_ref(), &slug).await {
