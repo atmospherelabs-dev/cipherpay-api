@@ -1,6 +1,7 @@
 pub mod admin;
 pub mod auth;
 pub mod billing_routes;
+pub mod passkey;
 pub mod events;
 pub mod invoice_routes;
 pub mod invoices;
@@ -90,7 +91,26 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                     .route("/session", web::post().to(auth::create_session))
                     .route("/logout", web::post().to(auth::logout))
                     .route("/recover", web::post().to(auth::recover))
-                    .route("/recover/confirm", web::post().to(auth::recover_confirm)),
+                    .route("/recover/confirm", web::post().to(auth::recover_confirm))
+                    .route(
+                        "/passkey/register/begin",
+                        web::post().to(passkey::register_begin),
+                    )
+                    .route(
+                        "/passkey/register/complete",
+                        web::post().to(passkey::register_complete),
+                    )
+                    .route(
+                        "/passkey/login/begin",
+                        web::post().to(passkey::login_begin),
+                    )
+                    .route(
+                        "/passkey/login/complete",
+                        web::post().to(passkey::login_complete),
+                    )
+                    .route("/passkey/reauth", web::post().to(passkey::reauth))
+                    .route("/passkeys", web::get().to(passkey::list_passkeys))
+                    .route("/passkeys/{id}", web::delete().to(passkey::delete_passkey)),
             )
             // Product endpoints (dashboard auth)
             .route("/products", web::post().to(products::create))

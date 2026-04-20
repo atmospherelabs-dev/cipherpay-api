@@ -51,16 +51,22 @@ pub async fn run_data_purge(pool: &SqlitePool, purge_days: i64) -> anyhow::Resul
     .execute(pool)
     .await?;
 
+    let passkey_challenges = crate::api::passkey::purge_expired_challenges(pool)
+        .await
+        .unwrap_or(0);
+
     let total = agent_sessions_purged
         + tokens.rows_affected()
         + webhooks.rows_affected()
-        + tickets.rows_affected();
+        + tickets.rows_affected()
+        + passkey_challenges;
     if total > 0 {
         tracing::info!(
             agent_sessions = agent_sessions_purged,
             tokens = tokens.rows_affected(),
             webhooks = webhooks.rows_affected(),
             tickets = tickets.rows_affected(),
+            passkey_challenges = passkey_challenges,
             "Data purge completed"
         );
     }

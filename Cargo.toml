@@ -35,6 +35,9 @@ orchard = { version = "0.11", default-features = false, features = ["std"] }
 zcash_address = "0.10"
 zcash_protocol = "0.7"
 
+# WebAuthn / Passkeys
+webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
+
 # Crypto / hashing
 sha2 = "0.10"
 hmac = "0.12"
