@@ -64,5 +64,52 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
     })
     .await?;
 
+    run_tracked_migration(&pool, "passkey_auth_v2026_04_20", || async {
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS passkey_credentials (
+                id TEXT PRIMARY KEY,
+                merchant_id TEXT NOT NULL REFERENCES merchants(id) ON DELETE CASCADE,
+                credential_json TEXT NOT NULL,
+                label TEXT NOT NULL DEFAULT '',
+                last_used_at TEXT,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            )",
+        )
+        .execute(&pool)
+        .await
+        .ok();
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_passkey_creds_merchant ON passkey_credentials(merchant_id)",
+        )
+        .execute(&pool)
+        .await
+        .ok();
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS passkey_challenges (
+                id TEXT PRIMARY KEY,
+                merchant_id TEXT,
+                flow_type TEXT NOT NULL CHECK(flow_type IN ('register', 'login')),
+                state_json TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            )",
+        )
+        .execute(&pool)
+        .await
+        .ok();
+
+        for sql in &[
+            "ALTER TABLE sessions ADD COLUMN reauth_at TEXT",
+            "ALTER TABLE merchants ADD COLUMN last_token_login_at TEXT",
+        ] {
+            sqlx::query(sql).execute(&pool).await.ok();
+        }
+
+        Ok(())
+    })
+    .await?;
+
     Ok(pool)
 }
