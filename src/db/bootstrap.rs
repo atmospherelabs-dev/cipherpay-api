@@ -1474,6 +1474,59 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
         tracing::info!("payment_links migration complete (price_id now nullable)");
     }
 
+    // Passkey credentials for WebAuthn authentication
+    if let Err(e) = sqlx::query(
+        "CREATE TABLE IF NOT EXISTS passkey_credentials (
+            id TEXT PRIMARY KEY,
+            merchant_id TEXT NOT NULL REFERENCES merchants(id) ON DELETE CASCADE,
+            credential_json TEXT NOT NULL,
+            label TEXT NOT NULL DEFAULT '',
+            last_used_at TEXT,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        )",
+    )
+    .execute(&pool)
+    .await
+    {
+        tracing::warn!(error = %e, "passkey_credentials table creation failed (may already exist)");
+    }
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_passkey_creds_merchant ON passkey_credentials(merchant_id)",
+    )
+    .execute(&pool)
+    .await
+    .ok();
+
+    // Temporary challenge storage for WebAuthn ceremonies
+    if let Err(e) = sqlx::query(
+        "CREATE TABLE IF NOT EXISTS passkey_challenges (
+            id TEXT PRIMARY KEY,
+            merchant_id TEXT,
+            flow_type TEXT NOT NULL CHECK(flow_type IN ('register', 'login')),
+            state_json TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        )",
+    )
+    .execute(&pool)
+    .await
+    {
+        tracing::warn!(error = %e, "passkey_challenges table creation failed (may already exist)");
+    }
+
+    // Re-auth timestamp on sessions for privileged actions
+    sqlx::query("ALTER TABLE sessions ADD COLUMN reauth_at TEXT")
+        .execute(&pool)
+        .await
+        .ok();
+
+    // Track last token-based login for auth metadata
+    sqlx::query("ALTER TABLE merchants ADD COLUMN last_token_login_at TEXT")
+        .execute(&pool)
+        .await
+        .ok();
+
     validate_schema_state(&pool).await?;
     tracing::info!("Database ready (SQLite)");
     Ok(())

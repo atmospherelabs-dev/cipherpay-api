@@ -64,6 +64,14 @@ pub async fn create_session(
         }));
     }
 
+    // Track last token login timestamp
+    let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let _ = sqlx::query("UPDATE merchants SET last_token_login_at = ? WHERE id = ?")
+        .bind(&now)
+        .bind(&merchant.id)
+        .execute(pool.get_ref())
+        .await;
+
     let cookie = build_session_cookie(&session_id, &config, false);
 
     HttpResponse::Ok().cookie(cookie).json(serde_json::json!({
@@ -140,6 +148,17 @@ pub async fn me(req: HttpRequest, pool: web::Data<SqlitePool>) -> HttpResponse {
             .map(|k| !k.is_empty())
             .unwrap_or(false);
 
+    let has_passkeys = super::passkey::has_passkeys(pool.get_ref(), &merchant.id).await;
+
+    let last_token_login: Option<String> = sqlx::query_scalar(
+        "SELECT last_token_login_at FROM merchants WHERE id = ?",
+    )
+    .bind(&merchant.id)
+    .fetch_optional(pool.get_ref())
+    .await
+    .ok()
+    .flatten();
+
     HttpResponse::Ok().json(serde_json::json!({
         "id": merchant.id,
         "name": merchant.name,
@@ -151,6 +170,8 @@ pub async fn me(req: HttpRequest, pool: web::Data<SqlitePool>) -> HttpResponse {
         "created_at": merchant.created_at,
         "stats": stats,
         "has_luma_key": has_luma_key,
+        "has_passkeys": has_passkeys,
+        "last_token_login_at": last_token_login,
     }))
 }
 
@@ -468,7 +489,7 @@ pub async fn require_api_key_or_session(
     }
 }
 
-fn build_session_cookie<'a>(value: &str, config: &Config, clear: bool) -> Cookie<'a> {
+pub fn build_session_cookie<'a>(value: &str, config: &Config, clear: bool) -> Cookie<'a> {
     let has_domain = config.cookie_domain.is_some();
     let is_deployed = has_domain
         || config

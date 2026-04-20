@@ -29,6 +29,8 @@ pub struct Config {
     pub admin_key: Option<String>,
     pub cipherscan_service_key: Option<String>,
     pub checkout_service_key: Option<String>,
+    pub webauthn_rp_id: String,
+    pub webauthn_rp_origin: String,
 }
 
 impl Config {
@@ -88,6 +90,15 @@ impl Config {
             checkout_service_key: env::var("CHECKOUT_SERVICE_KEY")
                 .ok()
                 .filter(|s| !s.is_empty()),
+            webauthn_rp_id: env::var("WEBAUTHN_RP_ID")
+                .unwrap_or_else(|_| "localhost".into()),
+            webauthn_rp_origin: env::var("WEBAUTHN_RP_ORIGIN").unwrap_or_else(|_| {
+                // Derive from FRONTEND_URL if set, otherwise default to localhost
+                env::var("FRONTEND_URL")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "http://localhost:3001".into())
+            }),
         })
     }
 
