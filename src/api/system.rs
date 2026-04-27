@@ -18,6 +18,7 @@ pub async fn well_known_payment(config: web::Data<crate::config::Config>) -> Htt
         .insert_header(("Cache-Control", "public, max-age=3600"))
         .json(serde_json::json!({
             "version": "1.0",
+            "x402Version": 2,
             "methods": ["zcash"],
             "currencies": ["ZEC"],
             "network": network,

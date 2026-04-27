@@ -223,8 +223,12 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/luma/import", web::post().to(luma::import_event))
             .route("/luma/sync/{event_id}", web::post().to(luma::sync_event))
             .route("/invoices/{id}/luma-pass", web::get().to(luma::luma_pass))
-            // x402 facilitator
+            // x402 facilitator (v1 compat)
             .route("/x402/verify", web::post().to(x402::verify))
+            // x402 V2 spec-compliant facilitator
+            .route("/x402/v2/verify", web::post().to(x402::verify_v2))
+            .route("/x402/v2/settle", web::post().to(x402::settle_v2))
+            .route("/x402/supported", web::get().to(x402::supported))
             // Session endpoints (agentic prepaid credit)
             .service(
                 web::scope("/sessions")
