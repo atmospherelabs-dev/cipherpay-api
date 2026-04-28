@@ -14,6 +14,15 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo install cargo-audit --locked
-      # core2 yanked by author (not a vulnerability) — all zcash crates depend on it.
-      # Waiting for upstream migration to zcash/corez. Track: https://github.com/zcash/corez
-      - run: cargo audit --deny warnings --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0097
+      # --deny unmaintained,unsound but NOT yanked:
+      #   core2 is yanked but all zcash crates depend on it — upstream issue.
+      #   Track: https://github.com/zcash/corez
+      # RUSTSEC-2023-0071: Marvin Attack on rsa (transitive, no direct exposure)
+      # RUSTSEC-2026-0097: (previous advisory, retained for safety)
+      # RUSTSEC-2026-0105: core2 unmaintained — zcash upstream dependency
+      - run: >-
+          cargo audit
+          --deny unmaintained --deny unsound
+          --ignore RUSTSEC-2023-0071
+          --ignore RUSTSEC-2026-0097
+          --ignore RUSTSEC-2026-0105
