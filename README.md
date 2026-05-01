@@ -160,6 +160,10 @@ Signature = HMAC-SHA256(`timestamp.body`, `webhook_secret`)
 | `GET` | `/api/merchants/me/billing` | Session | Billing summary |
 | `GET` | `/api/merchants/me/billing/history` | Session | Billing history |
 | `POST` | `/api/merchants/me/billing/settle` | Session | Settle outstanding fees |
+| **API Keys** | | | |
+| `GET` | `/api/merchants/me/keys` | Full / Session | List full + restricted API keys |
+| `POST` | `/api/merchants/me/keys` | Full / Session | Mint a new key (`{type, label}`) — returns raw key once |
+| `DELETE` | `/api/merchants/me/keys/{id}` | Full / Session | Revoke a key immediately |
 | **x402** | | | |
 | `POST` | `/api/x402/verify` | API key | Verify HTTP 402 payment |
 | `GET` | `/api/merchants/me/x402/history` | Session | x402 verification history |

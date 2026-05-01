@@ -97,7 +97,9 @@ pub async fn update(
     path: web::Path<String>,
     body: web::Json<UpdatePaymentLinkRequest>,
 ) -> HttpResponse {
-    let merchant = match super::auth::require_merchant_or_session(&req, pool.get_ref()).await {
+    // Restricted keys can create payment links but not modify existing ones —
+    // changing a live storefront link is account-config territory.
+    let merchant = match super::auth::require_full_or_session(&req, pool.get_ref()).await {
         Ok(merchant) => merchant,
         Err(response) => return response,
     };
@@ -127,7 +129,8 @@ pub async fn delete(
     pool: web::Data<SqlitePool>,
     path: web::Path<String>,
 ) -> HttpResponse {
-    let merchant = match super::auth::require_merchant_or_session(&req, pool.get_ref()).await {
+    // Restricted keys cannot delete payment links — same rationale as update.
+    let merchant = match super::auth::require_full_or_session(&req, pool.get_ref()).await {
         Ok(merchant) => merchant,
         Err(response) => return response,
     };

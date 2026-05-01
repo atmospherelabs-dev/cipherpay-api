@@ -40,6 +40,22 @@ pub struct CreateMerchantResponse {
     pub webhook_secret: String,
 }
 
+/// Distinguishes how a request was authenticated. Used by scope checks to reject
+/// restricted keys at endpoints that mutate account-level configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyKind {
+    /// Legacy `merchants.api_key_hash`, or a row in `merchant_api_keys` with
+    /// `key_type='full'`. Equivalent to a Stripe `sk_live_` key.
+    Full,
+    /// A row in `merchant_api_keys` with `key_type='restricted'`. Allowed for
+    /// invoice/x402/session operations; denied for account settings, key
+    /// management, billing actions, and account deletion.
+    Restricted,
+    /// Resolved via the dashboard session cookie. Effectively full access — the
+    /// human owner is logged in.
+    Session,
+}
+
 fn generate_api_key() -> String {
     let bytes: [u8; 32] = rand::random();
     format!("cpay_sk_{}", hex::encode(bytes))
@@ -230,13 +246,67 @@ pub async fn get_merchant_by_id(
     Ok(row.map(|r| row_to_merchant(r, encryption_key)))
 }
 
+/// Authenticate a bearer API key. Backwards-compatible wrapper around
+/// [`authenticate_with_kind`] for callers that don't need scope information.
 pub async fn authenticate(
     pool: &SqlitePool,
     api_key: &str,
     encryption_key: &str,
 ) -> anyhow::Result<Option<Merchant>> {
+    Ok(authenticate_with_kind(pool, api_key, encryption_key)
+        .await?
+        .map(|(m, _)| m))
+}
+
+/// Authenticate a bearer API key and report which credential type matched.
+///
+/// Lookup order:
+/// 1. `merchant_api_keys` table (new restricted-keys infrastructure). If the
+///    row is not revoked, returns the merchant + the row's `key_type`.
+/// 2. Legacy `merchants.api_key_hash` column. Treated as [`KeyKind::Full`] for
+///    backwards compatibility — every existing key keeps working unchanged.
+pub async fn authenticate_with_kind(
+    pool: &SqlitePool,
+    api_key: &str,
+    encryption_key: &str,
+) -> anyhow::Result<Option<(Merchant, KeyKind)>> {
     let key_hash = hash_key(api_key);
 
+    // 1. New per-key table. Only non-revoked rows match (covered by the partial index).
+    let key_row: Option<(String, String, String)> = sqlx::query_as(
+        "SELECT id, merchant_id, key_type FROM merchant_api_keys
+         WHERE key_hash = ? AND revoked_at IS NULL",
+    )
+    .bind(&key_hash)
+    .fetch_optional(pool)
+    .await?;
+
+    if let Some((key_id, merchant_id, key_type)) = key_row {
+        // Best-effort touch of last_used_at; never block the request.
+        let pool_clone = pool.clone();
+        let key_id_clone = key_id.clone();
+        tokio::spawn(async move {
+            let _ = sqlx::query(
+                "UPDATE merchant_api_keys
+                 SET last_used_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+                 WHERE id = ?",
+            )
+            .bind(&key_id_clone)
+            .execute(&pool_clone)
+            .await;
+        });
+
+        let merchant = get_merchant_by_id(pool, &merchant_id, encryption_key).await?;
+        let kind = if key_type == "restricted" {
+            KeyKind::Restricted
+        } else {
+            KeyKind::Full
+        };
+        return Ok(merchant.map(|m| (m, kind)));
+    }
+
+    // 2. Legacy primary key column. Same access semantics as a `Full` key in the
+    //    new table — kept so existing integrations don't have to migrate.
     let row = sqlx::query_as::<_, MerchantRow>(&format!(
         "SELECT {MERCHANT_COLS} FROM merchants WHERE api_key_hash = ?"
     ))
@@ -244,7 +314,7 @@ pub async fn authenticate(
     .fetch_optional(pool)
     .await?;
 
-    Ok(row.map(|r| row_to_merchant(r, encryption_key)))
+    Ok(row.map(|r| (row_to_merchant(r, encryption_key), KeyKind::Full)))
 }
 
 pub async fn authenticate_dashboard(

@@ -423,25 +423,37 @@ pub async fn resolve_session(req: &HttpRequest, pool: &SqlitePool) -> Option<mer
         .ok()?
 }
 
-/// Resolve a merchant from either API key (Bearer token) or session cookie.
-pub async fn resolve_merchant_or_session(
+/// Resolve a merchant from either API key (Bearer token) or session cookie,
+/// alongside which credential type matched. Used by scope-aware helpers.
+pub async fn resolve_with_kind(
     req: &HttpRequest,
     pool: &SqlitePool,
-) -> Option<merchants::Merchant> {
+) -> Option<(merchants::Merchant, merchants::KeyKind)> {
     let config = req.app_data::<web::Data<crate::config::Config>>()?;
 
     if let Some(auth) = req.headers().get("Authorization") {
         if let Ok(auth_str) = auth.to_str() {
             let key = auth_str.strip_prefix("Bearer ").unwrap_or(auth_str).trim();
-            if key.starts_with("cpay_sk_") || key.starts_with("cpay_") {
-                return merchants::authenticate(pool, key, &config.encryption_key)
+            if key.starts_with("cpay_sk_") || key.starts_with("cpay_rk_") || key.starts_with("cpay_")
+            {
+                return merchants::authenticate_with_kind(pool, key, &config.encryption_key)
                     .await
                     .ok()?;
             }
         }
     }
 
-    resolve_session(req, pool).await
+    let m = resolve_session(req, pool).await?;
+    Some((m, merchants::KeyKind::Session))
+}
+
+/// Resolve a merchant from either API key (Bearer token) or session cookie.
+/// Backwards-compatible wrapper that drops the credential kind.
+pub async fn resolve_merchant_or_session(
+    req: &HttpRequest,
+    pool: &SqlitePool,
+) -> Option<merchants::Merchant> {
+    resolve_with_kind(req, pool).await.map(|(m, _)| m)
 }
 
 pub async fn require_session(
@@ -460,6 +472,32 @@ pub async fn require_merchant_or_session(
     resolve_merchant_or_session(req, pool)
         .await
         .ok_or_else(not_authenticated_response)
+}
+
+/// Reject restricted API keys. Use for endpoints that mutate account-level
+/// configuration: PATCH /me, key/secret rotation, billing actions, account
+/// deletion, key management. Restricted keys get 403 with a clear error code.
+pub async fn require_full_or_session(
+    req: &HttpRequest,
+    pool: &SqlitePool,
+) -> Result<merchants::Merchant, HttpResponse> {
+    match resolve_with_kind(req, pool).await {
+        Some((m, kind)) => {
+            if matches!(kind, merchants::KeyKind::Restricted) {
+                Err(restricted_key_forbidden_response())
+            } else {
+                Ok(m)
+            }
+        }
+        None => Err(not_authenticated_response()),
+    }
+}
+
+pub fn restricted_key_forbidden_response() -> HttpResponse {
+    HttpResponse::Forbidden().json(serde_json::json!({
+        "error": "This endpoint requires a full-access API key. Restricted keys cannot perform account-management actions.",
+        "code": "restricted_key_forbidden",
+    }))
 }
 
 pub async fn require_api_key_or_session(
