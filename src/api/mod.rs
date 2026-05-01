@@ -181,17 +181,15 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 "/payment-links/{id}",
                 web::delete().to(payment_links::delete),
             )
-            .route(
-                "/payment-links/{slug}/checkout",
-                web::post()
-                    .to(payment_links::resolve)
-                    .wrap(Governor::new(&checkout_rate_limit)),
+            .service(
+                web::resource("/payment-links/{slug}/checkout")
+                    .wrap(Governor::new(&checkout_rate_limit))
+                    .route(web::post().to(payment_links::resolve)),
             )
-            .route(
-                "/payment-links/{slug}/info",
-                web::get()
-                    .to(payment_links::info)
-                    .wrap(Governor::new(&public_read_limit)),
+            .service(
+                web::resource("/payment-links/{slug}/info")
+                    .wrap(Governor::new(&public_read_limit))
+                    .route(web::get().to(payment_links::info)),
             )
             // Donation links (merchant auth)
             .route(
@@ -253,17 +251,15 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             // Session endpoints (agentic prepaid credit)
             .service(
                 web::scope("/sessions")
-                    .route(
-                        "/prepare",
-                        web::post()
-                            .to(sessions::prepare)
-                            .wrap(Governor::new(&session_rate_limit)),
+                    .service(
+                        web::resource("/prepare")
+                            .wrap(Governor::new(&session_rate_limit))
+                            .route(web::post().to(sessions::prepare)),
                     )
-                    .route(
-                        "/open",
-                        web::post()
-                            .to(sessions::open)
-                            .wrap(Governor::new(&session_rate_limit)),
+                    .service(
+                        web::resource("/open")
+                            .wrap(Governor::new(&session_rate_limit))
+                            .route(web::post().to(sessions::open)),
                     )
                     .route("/validate", web::get().to(sessions::validate))
                     .route("/deduct", web::post().to(sessions::deduct))
