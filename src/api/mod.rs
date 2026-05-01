@@ -5,6 +5,7 @@ pub mod passkey;
 pub mod events;
 pub mod invoice_routes;
 pub mod invoices;
+pub mod keys;
 pub mod luma;
 pub mod merchants;
 pub mod payment_links;
@@ -35,6 +36,13 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .finish()
         .expect("Failed to build session rate limiter");
 
+    let registration_rate_limit = GovernorConfigBuilder::default()
+        .seconds_per_request(30)
+        .burst_size(3)
+        .use_headers()
+        .finish()
+        .expect("Failed to build registration rate limiter");
+
     let checkout_rate_limit = GovernorConfigBuilder::default()
         .seconds_per_request(2)
         .burst_size(10)
@@ -50,9 +58,19 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("/api")
             .route("/health", web::get().to(system::health))
+            // Registration POST is a Resource (not a Route inside the parent
+            // scope) so the rate limiter actually runs. actix-web 4's
+            // `Route::wrap` is a no-op for short-circuiting middleware like
+            // Governor; only Scope/Resource wraps are honored. We register the
+            // resource BEFORE the parent /merchants scope so `POST /merchants`
+            // matches here first instead of falling through.
+            .service(
+                web::resource("/merchants")
+                    .wrap(Governor::new(&registration_rate_limit))
+                    .route(web::post().to(merchants::create)),
+            )
             .service(
                 web::scope("/merchants")
-                    .route("", web::post().to(merchants::create))
                     .route("/me", web::get().to(auth::me))
                     .route("/me", web::patch().to(auth::update_me))
                     .route("/me/invoices", web::get().to(auth::my_invoices))
@@ -83,7 +101,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                     .route("/me/delete", web::post().to(billing_routes::delete_account))
                     .route("/me/webhooks", web::get().to(auth::my_webhooks))
                     .route("/me/x402/history", web::get().to(x402::history))
-                    .route("/me/sessions", web::get().to(sessions::history)),
+                    .route("/me/sessions", web::get().to(sessions::history))
+                    .route("/me/keys", web::post().to(keys::create))
+                    .route("/me/keys", web::get().to(keys::list))
+                    .route("/me/keys/{id}", web::delete().to(keys::delete)),
             )
             .service(
                 web::scope("/auth")

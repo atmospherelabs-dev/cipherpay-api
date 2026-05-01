@@ -111,5 +111,64 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
     })
     .await?;
 
+    // Drop the deposit-gated programmatic registration scaffolding. The flow was
+    // never deployed; this migration only affects local dev DBs that ran the
+    // earlier programmatic_registration_v2026_04_28 migration. Production never
+    // had it, so this is a no-op there. SQLite's DROP COLUMN requires sqlite >= 3.35.
+    run_tracked_migration(&pool, "remove_programmatic_registration_v2026_05_01", || async {
+        sqlx::query("DROP TABLE IF EXISTS registration_requests")
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("ALTER TABLE merchants DROP COLUMN merchant_type")
+            .execute(&pool)
+            .await
+            .ok();
+        Ok(())
+    })
+    .await?;
+
+    // Restricted API keys: per-merchant scoped credentials. A row with key_type='full'
+    // grants the same access as the legacy merchants.api_key_hash column (which we
+    // keep for backwards compat). A row with key_type='restricted' is rejected on a
+    // small deny-list of account-management endpoints (see crate::api_keys::scope).
+    run_tracked_migration(&pool, "merchant_api_keys_v2026_05_01", || async {
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS merchant_api_keys (
+                id TEXT PRIMARY KEY,
+                merchant_id TEXT NOT NULL REFERENCES merchants(id) ON DELETE CASCADE,
+                key_hash TEXT NOT NULL UNIQUE,
+                key_prefix TEXT NOT NULL,
+                key_type TEXT NOT NULL CHECK (key_type IN ('full', 'restricted')),
+                label TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                last_used_at TEXT,
+                revoked_at TEXT
+            )",
+        )
+        .execute(&pool)
+        .await
+        .ok();
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_merchant_api_keys_hash_active
+             ON merchant_api_keys(key_hash) WHERE revoked_at IS NULL",
+        )
+        .execute(&pool)
+        .await
+        .ok();
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_merchant_api_keys_merchant
+             ON merchant_api_keys(merchant_id)",
+        )
+        .execute(&pool)
+        .await
+        .ok();
+
+        Ok(())
+    })
+    .await?;
+
     Ok(pool)
 }
