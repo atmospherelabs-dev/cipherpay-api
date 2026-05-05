@@ -310,7 +310,13 @@ pub async fn billing(
     ).fetch_one(pool.get_ref()).await.unwrap_or(0.0);
 
     let total_collected: f64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(total_fees_zec), 0.0) FROM billing_cycles WHERE status = 'paid'",
+        "SELECT COALESCE(SUM(total_fees_zec), 0.0) FROM billing_cycles WHERE status = 'paid'"
+    )
+    .fetch_one(pool.get_ref())
+    .await
+    .unwrap_or(0.0)
+    + sqlx::query_scalar::<_, f64>(
+        "SELECT COALESCE(SUM(auto_collected_zec), 0.0) FROM billing_cycles WHERE status IN ('open', 'invoiced', 'past_due')"
     )
     .fetch_one(pool.get_ref())
     .await
