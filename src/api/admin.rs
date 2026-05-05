@@ -665,3 +665,98 @@ pub async fn test_email(
         })),
     }
 }
+
+/// POST /api/admin/rescan-fees -- re-scan historical transactions to detect
+/// ZIP 321 fee outputs that were missed by the mempool scanner bug.
+pub async fn rescan_fees(
+    req: actix_web::HttpRequest,
+    pool: web::Data<SqlitePool>,
+    config: web::Data<crate::config::Config>,
+    http: web::Data<reqwest::Client>,
+) -> actix_web::HttpResponse {
+    if !authenticate_admin(&req) {
+        return unauthorized();
+    }
+
+    let fee_ufvk = match &config.fee_ufvk {
+        Some(u) => u.clone(),
+        None => {
+            return actix_web::HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "Fee UFVK not configured"
+            }));
+        }
+    };
+
+    let rows: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT fl.invoice_id, i.detected_txid
+         FROM fee_ledger fl
+         JOIN invoices i ON i.id = fl.invoice_id
+         WHERE fl.auto_collected = 0 AND i.status = 'confirmed' AND i.detected_txid IS NOT NULL",
+    )
+    .fetch_all(pool.get_ref())
+    .await
+    .unwrap_or_default();
+
+    let total = rows.len();
+    let mut collected = 0u32;
+    let mut skipped = 0u32;
+    let mut errors = 0u32;
+    let mut details: Vec<serde_json::Value> = Vec::new();
+
+    for (invoice_id, txid_opt) in &rows {
+        let txid = match txid_opt {
+            Some(t) => t,
+            None => {
+                skipped += 1;
+                continue;
+            }
+        };
+
+        let raw_hex = match crate::scanner::mempool::fetch_raw_tx(
+            http.get_ref(),
+            &config.cipherscan_api_url,
+            txid,
+        )
+        .await
+        {
+            Ok(hex) => hex,
+            Err(e) => {
+                errors += 1;
+                tracing::debug!(invoice_id, txid, error = %e, "Rescan: failed to fetch raw tx");
+                continue;
+            }
+        };
+
+        let fee_memo_prefix = format!("FEE-{}", invoice_id);
+        match crate::scanner::decrypt::try_decrypt_all_outputs(&raw_hex, &fee_ufvk) {
+            Ok(outputs) => {
+                let found = outputs.iter().any(|o| o.memo.starts_with(&fee_memo_prefix));
+                if found {
+                    if let Ok(()) = crate::billing::mark_fee_collected(pool.get_ref(), invoice_id).await {
+                        collected += 1;
+                        details.push(serde_json::json!({
+                            "invoice_id": invoice_id,
+                            "txid": txid,
+                            "action": "collected",
+                        }));
+                    }
+                } else {
+                    skipped += 1;
+                }
+            }
+            Err(_) => {
+                skipped += 1;
+            }
+        }
+    }
+
+    tracing::info!(total, collected, skipped, errors, "Fee rescan completed");
+
+    actix_web::HttpResponse::Ok().json(serde_json::json!({
+        "total_uncollected": total,
+        "collected": collected,
+        "skipped": skipped,
+        "errors": errors,
+        "details": details,
+    }))
+}
