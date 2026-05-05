@@ -273,7 +273,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/admin/billing", web::get().to(admin::billing))
             .route("/admin/webhooks", web::get().to(admin::webhooks))
             .route("/admin/system", web::get().to(admin::system))
-            .route("/admin/test-email", web::post().to(admin::test_email)),
+            .route("/admin/test-email", web::post().to(admin::test_email))
+            .route("/admin/rescan-fees", web::post().to(admin::rescan_fees)),
     );
 
     cfg.route(
