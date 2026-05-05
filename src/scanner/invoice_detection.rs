@@ -56,13 +56,16 @@ pub(super) fn collect_mempool_invoice_totals(
     invoice_totals
 }
 
+/// Returns list of invoice IDs that were newly marked as detected (for fee scanning).
 pub(super) async fn apply_mempool_invoice_totals(
     pool: &SqlitePool,
     http: &reqwest::Client,
     config: &Config,
     txid: &str,
     invoice_totals: &InvoiceTotals,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<String>> {
+    let mut newly_detected = Vec::new();
+
     for (invoice_id, (invoice, tx_total)) in invoice_totals {
         let dust_min = std::cmp::max(
             (invoice.price_zatoshis as f64 * super::decrypt::DUST_THRESHOLD_FRACTION) as i64,
@@ -84,6 +87,7 @@ pub(super) async fn apply_mempool_invoice_totals(
         if new_received >= min {
             let changed = invoices::mark_detected(pool, invoice_id, txid, new_received).await?;
             if changed {
+                newly_detected.push(invoice_id.clone());
                 let overpaid = new_received > invoice.price_zatoshis + 1000;
                 super::spawn_payment_webhook(
                     pool,
@@ -113,5 +117,5 @@ pub(super) async fn apply_mempool_invoice_totals(
         }
     }
 
-    Ok(())
+    Ok(newly_detected)
 }

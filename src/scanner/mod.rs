@@ -346,8 +346,12 @@ async fn scan_mempool(
             &invoice_index,
             invoice_detection::MempoolSource::Polling,
         );
-        invoice_detection::apply_mempool_invoice_totals(pool, http, config, txid, &invoice_totals)
-            .await?;
+        let detected =
+            invoice_detection::apply_mempool_invoice_totals(pool, http, config, txid, &invoice_totals)
+                .await?;
+        for invoice_id in &detected {
+            try_detect_fee(pool, config, raw_hex, invoice_id).await;
+        }
     }
 
     Ok(())
@@ -383,7 +387,7 @@ async fn process_ws_mempool_tx(
         &invoice_index,
         invoice_detection::MempoolSource::WebSocket,
     );
-    invoice_detection::apply_mempool_invoice_totals(
+    let detected = invoice_detection::apply_mempool_invoice_totals(
         pool,
         http,
         config,
@@ -391,6 +395,9 @@ async fn process_ws_mempool_tx(
         &invoice_totals,
     )
     .await?;
+    for invoice_id in &detected {
+        try_detect_fee(pool, config, &push.raw_hex, invoice_id).await;
+    }
 
     Ok(())
 }
@@ -436,6 +443,18 @@ async fn scan_blocks(
                                 &config.encryption_key,
                             );
                             on_invoice_confirmed(pool, http, config, invoice).await;
+
+                            // Scan for ZIP 321 fee output that mempool path may have missed
+                            if config.fee_enabled() {
+                                match mempool::fetch_raw_tx(http, &config.cipherscan_api_url, txid).await {
+                                    Ok(raw_hex) => {
+                                        try_detect_fee(pool, config, &raw_hex, &invoice.id).await;
+                                    }
+                                    Err(e) => {
+                                        tracing::debug!(txid, error = %e, "Could not fetch raw tx for fee scan");
+                                    }
+                                }
+                            }
                         }
                     }
                     Ok(false) => {}
