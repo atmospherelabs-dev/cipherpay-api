@@ -163,6 +163,14 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 web::post().to(subscriptions::cancel),
             )
             .route(
+                "/subscriptions/{id}/pause",
+                web::post().to(subscriptions::pause),
+            )
+            .route(
+                "/subscriptions/{id}/resume",
+                web::post().to(subscriptions::resume),
+            )
+            .route(
                 "/subscriptions/{id}/simulate-period-end",
                 web::post().to(subscriptions::simulate_period_end),
             )

@@ -118,6 +118,7 @@ pub async fn status(
                 "status": sub.status,
                 "current_period_end": sub.current_period_end,
                 "cancel_at_period_end": sub.cancel_at_period_end != 0,
+                "pause_at_period_end": sub.pause_at_period_end != 0,
             }))
         }
         Ok(Some(_)) => {
@@ -129,6 +130,91 @@ pub async fn status(
         Err(e) => {
             tracing::error!(error = %e, "Failed to get subscription status");
             HttpResponse::InternalServerError().json(serde_json::json!({"error": "Internal error"}))
+        }
+    }
+}
+
+/// Schedule a subscription to pause at the end of the current billing period.
+/// POST /api/subscriptions/{id}/pause
+pub async fn pause(
+    req: HttpRequest,
+    pool: web::Data<SqlitePool>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    let merchant = match super::auth::require_merchant_or_session(&req, pool.get_ref()).await {
+        Ok(merchant) => merchant,
+        Err(response) => return response,
+    };
+
+    let sub_id = path.into_inner();
+
+    match subscriptions::pause_subscription(pool.get_ref(), &sub_id, &merchant.id).await {
+        Ok(Some(sub)) => HttpResponse::Ok().json(sub),
+        Ok(None) => {
+            HttpResponse::NotFound().json(serde_json::json!({"error": "Subscription not found"}))
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("already confirmed") {
+                HttpResponse::Conflict().json(serde_json::json!({"error": msg}))
+            } else if msg.contains("does not belong") {
+                HttpResponse::NotFound()
+                    .json(serde_json::json!({"error": "Subscription not found"}))
+            } else {
+                HttpResponse::BadRequest().json(serde_json::json!({"error": msg}))
+            }
+        }
+    }
+}
+
+/// Resume a paused subscription or cancel a pending pause.
+/// POST /api/subscriptions/{id}/resume
+pub async fn resume(
+    req: HttpRequest,
+    pool: web::Data<SqlitePool>,
+    config: web::Data<Config>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    let merchant = match super::auth::require_merchant_or_session(&req, pool.get_ref()).await {
+        Ok(merchant) => merchant,
+        Err(response) => return response,
+    };
+
+    let sub_id = path.into_inner();
+
+    match subscriptions::resume_subscription(pool.get_ref(), &sub_id, &merchant.id).await {
+        Ok((Some(sub), was_paused)) => {
+            if was_paused {
+                let http = reqwest::Client::new();
+                let payload = serde_json::json!({
+                    "subscription_id": sub.id,
+                    "price_id": sub.price_id,
+                    "new_period_start": sub.current_period_start,
+                    "new_period_end": sub.current_period_end,
+                });
+                let _ = crate::webhooks::dispatch_event(
+                    pool.get_ref(),
+                    &http,
+                    &merchant.id,
+                    "subscription.resumed",
+                    payload,
+                    &config.encryption_key,
+                )
+                .await;
+            }
+            HttpResponse::Ok().json(sub)
+        }
+        Ok((None, _)) => {
+            HttpResponse::NotFound().json(serde_json::json!({"error": "Subscription not found"}))
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("does not belong") {
+                HttpResponse::NotFound()
+                    .json(serde_json::json!({"error": "Subscription not found"}))
+            } else {
+                HttpResponse::BadRequest().json(serde_json::json!({"error": msg}))
+            }
         }
     }
 }
