@@ -170,5 +170,18 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
     })
     .await?;
 
+    // Subscription pause/resume: add flag to schedule pause at period end.
+    // The 'paused' status already exists in the subscriptions CHECK constraint.
+    run_tracked_migration(&pool, "subscription_pause_v2026_05_08", || async {
+        sqlx::query(
+            "ALTER TABLE subscriptions ADD COLUMN pause_at_period_end INTEGER NOT NULL DEFAULT 0",
+        )
+        .execute(&pool)
+        .await
+        .ok();
+        Ok(())
+    })
+    .await?;
+
     Ok(pool)
 }
