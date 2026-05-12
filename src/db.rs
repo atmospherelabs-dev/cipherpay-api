@@ -183,5 +183,18 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
     })
     .await?;
 
+    run_tracked_migration(&pool, "pos_pin_v2026_05_11", || async {
+      sqlx::query("ALTER TABLE merchants ADD COLUMN pos_pin_hash TEXT")
+          .execute(&pool)
+          .await
+          .ok();
+      sqlx::query("ALTER TABLE sessions ADD COLUMN pos_scoped INTEGER NOT NULL DEFAULT 0")
+          .execute(&pool)
+          .await
+          .ok();
+      Ok(())
+  })
+  .await?;
+
     Ok(pool)
 }
