@@ -9,6 +9,7 @@ pub mod keys;
 pub mod luma;
 pub mod merchants;
 pub mod payment_links;
+pub mod pos;
 pub mod prices;
 pub mod products;
 pub mod rates;
@@ -104,12 +105,15 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                     .route("/me/sessions", web::get().to(sessions::history))
                     .route("/me/keys", web::post().to(keys::create))
                     .route("/me/keys", web::get().to(keys::list))
-                    .route("/me/keys/{id}", web::delete().to(keys::delete)),
+                    .route("/me/keys/{id}", web::delete().to(keys::delete))
+                    .route("/me/pos-pin", web::put().to(pos::set_pin))
+                    .route("/me/pos-pin", web::get().to(pos::has_pin)),
             )
             .service(
                 web::scope("/auth")
                     .wrap(Governor::new(&auth_rate_limit))
                     .route("/session", web::post().to(auth::create_session))
+                    .route("/pos-session", web::post().to(pos::create_pos_session))
                     .route("/logout", web::post().to(auth::logout))
                     .route("/recover", web::post().to(auth::recover))
                     .route("/recover/confirm", web::post().to(auth::recover_confirm))
