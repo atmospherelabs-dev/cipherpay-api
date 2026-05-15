@@ -394,6 +394,139 @@ pub struct MyWebhookQuery {
     pub offset: Option<u32>,
 }
 
+/// POST /api/merchants/me/webhooks/{id}/retry — manually retry a failed webhook delivery
+pub async fn retry_webhook(
+    req: HttpRequest,
+    pool: web::Data<SqlitePool>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    let merchant = match resolve_session(&req, &pool).await {
+        Some(m) => m,
+        None => return not_authenticated_response(),
+    };
+
+    let config = match req.app_data::<web::Data<crate::config::Config>>() {
+        Some(c) => c,
+        None => {
+            return HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": "Server config unavailable"}));
+        }
+    };
+
+    let delivery_id = path.into_inner();
+
+    let row = sqlx::query_as::<_, (String, String, String)>(
+        "SELECT wd.url, wd.payload, m.webhook_secret
+         FROM webhook_deliveries wd
+         JOIN merchants m ON wd.merchant_id = m.id
+         WHERE wd.id = ? AND wd.merchant_id = ? AND wd.status = 'failed'",
+    )
+    .bind(&delivery_id)
+    .bind(&merchant.id)
+    .fetch_optional(pool.get_ref())
+    .await;
+
+    let (url, payload, raw_secret) = match row {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return HttpResponse::NotFound()
+                .json(serde_json::json!({"error": "Delivery not found or not failed"}));
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to fetch delivery for retry");
+            return HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": "Internal error"}));
+        }
+    };
+
+    let secret = match crate::crypto::decrypt_webhook_secret(&raw_secret, &config.encryption_key) {
+        Ok(s) => s,
+        Err(_) => {
+            return HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": "Failed to decrypt webhook secret"}));
+        }
+    };
+
+    if let Err(reason) = crate::validation::resolve_and_check_host(&url) {
+        return HttpResponse::BadRequest()
+            .json(serde_json::json!({"error": format!("Blocked: {reason}")}));
+    }
+
+    let ts = chrono::Utc::now()
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+    let mut body: serde_json::Value = match serde_json::from_str(&payload) {
+        Ok(v) => v,
+        Err(_) => {
+            return HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": "Corrupt payload"}));
+        }
+    };
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert(
+            "timestamp".to_string(),
+            serde_json::Value::String(ts.clone()),
+        );
+    }
+
+    let updated_payload = body.to_string();
+    let signature = crate::webhooks::sign_payload_public(&secret, &ts, &updated_payload);
+
+    let http = reqwest::Client::new();
+    let result = http
+        .post(&url)
+        .header("X-CipherPay-Signature", &signature)
+        .header("X-CipherPay-Timestamp", &ts)
+        .header("X-CipherPay-Delivery-Id", &delivery_id)
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await;
+
+    match result {
+        Ok(resp) if resp.status().is_success() => {
+            let status_code = resp.status().as_u16() as i32;
+            let _ = sqlx::query(
+                "UPDATE webhook_deliveries SET status = 'delivered', response_status = ?, response_error = NULL, last_attempt_at = ? WHERE id = ?",
+            )
+            .bind(status_code)
+            .bind(&ts)
+            .bind(&delivery_id)
+            .execute(pool.get_ref())
+            .await;
+            tracing::info!(delivery_id = %delivery_id, "Manual webhook retry delivered");
+            HttpResponse::Ok().json(serde_json::json!({"status": "delivered"}))
+        }
+        Ok(resp) => {
+            let status_code = resp.status().as_u16() as i32;
+            let error_text = format!("HTTP {}", resp.status());
+            let _ = sqlx::query(
+                "UPDATE webhook_deliveries SET response_status = ?, response_error = ?, last_attempt_at = ? WHERE id = ?",
+            )
+            .bind(status_code)
+            .bind(&error_text)
+            .bind(&ts)
+            .bind(&delivery_id)
+            .execute(pool.get_ref())
+            .await;
+            HttpResponse::Ok().json(serde_json::json!({"status": "failed", "error": error_text}))
+        }
+        Err(e) => {
+            let error_text = e.to_string();
+            let _ = sqlx::query(
+                "UPDATE webhook_deliveries SET response_status = 0, response_error = ?, last_attempt_at = ? WHERE id = ?",
+            )
+            .bind(&error_text)
+            .bind(&ts)
+            .bind(&delivery_id)
+            .execute(pool.get_ref())
+            .await;
+            HttpResponse::Ok()
+                .json(serde_json::json!({"status": "failed", "error": error_text}))
+        }
+    }
+}
+
 /// Extract the session ID from the session cookie (__Host- prefixed or legacy)
 pub fn extract_session_id(req: &HttpRequest) -> Option<String> {
     req.cookie(SESSION_COOKIE)

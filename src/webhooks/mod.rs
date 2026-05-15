@@ -6,6 +6,10 @@ use uuid::Uuid;
 
 type HmacSha256 = Hmac<Sha256>;
 
+pub fn sign_payload_public(secret: &str, timestamp: &str, payload: &str) -> String {
+    sign_payload(secret, timestamp, payload)
+}
+
 fn sign_payload(secret: &str, timestamp: &str, payload: &str) -> String {
     let message = format!("{}.{}", timestamp, payload);
     let mut mac =

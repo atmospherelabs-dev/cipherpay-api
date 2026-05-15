@@ -101,6 +101,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                     )
                     .route("/me/delete", web::post().to(billing_routes::delete_account))
                     .route("/me/webhooks", web::get().to(auth::my_webhooks))
+                    .route("/me/webhooks/{id}/retry", web::post().to(auth::retry_webhook))
                     .route("/me/x402/history", web::get().to(x402::history))
                     .route("/me/sessions", web::get().to(sessions::history))
                     .route("/me/keys", web::post().to(keys::create))
