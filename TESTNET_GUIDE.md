@@ -13,17 +13,17 @@ You can use the same wallet app for both (different accounts), or two different 
 
 ## Step 1: Get Testnet Wallets
 
-### Option A: YWallet (recommended — has UFVK export)
+### Option A: zkool (recommended — has UFVK export)
 
-1. Download YWallet from [ywallet.app](https://ywallet.app)
+1. Download zkool from [zkool.app](https://zkool.app)
 2. Create a **new wallet** and select **Testnet**
 3. Go to **Backup → Seed & Keys** to find your UFVK (`uviewtest1...`)
 4. Your payment address is your Unified Address (`utest1...`)
 5. Create a second account (or second wallet) for the "buyer" role
 
-### Option B: Zashi
+### Option B: ZODL
 
-1. Download Zashi from [zashi.app](https://electriccoin.co/zashi)
+1. Download ZODL from [zodl.org](https://zodl.org)
 2. Switch to testnet in settings (if available)
 3. Your receiving address is the Unified Address
 4. Note: UFVK export may require advanced settings
