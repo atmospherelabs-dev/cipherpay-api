@@ -588,6 +588,7 @@ pub async fn check_settlement_payments(pool: &SqlitePool, config: &Config) -> an
     let enc_key = &config.encryption_key;
 
     for cycle in &settled {
+        let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
         sqlx::query(
             "UPDATE billing_cycles
              SET status = 'paid', outstanding_zec = 0.0, outstanding_zatoshis = 0
@@ -596,6 +597,36 @@ pub async fn check_settlement_payments(pool: &SqlitePool, config: &Config) -> an
         .bind(&cycle.id)
         .execute(pool)
         .await?;
+
+        // Mark fee_ledger rows as collected so admin overview stats stay consistent.
+        // This covers both fees accrued in this cycle and any carried-over fees
+        // whose ledger rows still reference this cycle or the merchant.
+        sqlx::query(
+            "UPDATE fee_ledger SET collected_at = ?
+             WHERE billing_cycle_id = ? AND auto_collected = 0 AND collected_at IS NULL",
+        )
+        .bind(&now)
+        .bind(&cycle.id)
+        .execute(pool)
+        .await?;
+
+        // Also mark ledger rows from carried-over cycles that fed into this one.
+        // These rows reference old cycle IDs with status='carried_over' whose debt
+        // was rolled into this cycle and is now settled.
+        sqlx::query(
+            "UPDATE fee_ledger SET collected_at = ?
+             WHERE merchant_id = ? AND auto_collected = 0 AND collected_at IS NULL
+               AND billing_cycle_id IN (
+                   SELECT id FROM billing_cycles
+                   WHERE merchant_id = ? AND status = 'carried_over'
+               )",
+        )
+        .bind(&now)
+        .bind(&cycle.merchant_id)
+        .bind(&cycle.merchant_id)
+        .execute(pool)
+        .await?;
+
         sqlx::query("UPDATE merchants SET billing_status = 'active' WHERE id = ?")
             .bind(&cycle.merchant_id)
             .execute(pool)
