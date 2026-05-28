@@ -126,19 +126,18 @@ pub async fn stats(
             .await
             .unwrap_or(0);
 
-    let total_fees_collected: f64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(fee_amount_zec), 0.0) FROM fee_ledger WHERE auto_collected = 1 OR collected_at IS NOT NULL"
-    ).fetch_one(pool.get_ref()).await.unwrap_or(0.0);
-
-    let total_fees_outstanding: f64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(fee_amount_zec), 0.0) FROM fee_ledger WHERE auto_collected = 0 AND collected_at IS NULL"
-    ).fetch_one(pool.get_ref()).await.unwrap_or(0.0);
-
     let total_fees_all: f64 =
         sqlx::query_scalar("SELECT COALESCE(SUM(fee_amount_zec), 0.0) FROM fee_ledger")
             .fetch_one(pool.get_ref())
             .await
             .unwrap_or(0.0);
+
+    // Use billing_cycles as single source of truth (same as billing tab).
+    let total_fees_outstanding: f64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(outstanding_zec), 0.0) FROM billing_cycles WHERE status IN ('open', 'invoiced', 'past_due')"
+    ).fetch_one(pool.get_ref()).await.unwrap_or(0.0);
+
+    let total_fees_collected: f64 = total_fees_all - total_fees_outstanding;
 
     // Invoices in the last 24 hours
     let invoices_24h: i64 = sqlx::query_scalar(
