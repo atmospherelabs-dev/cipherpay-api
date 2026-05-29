@@ -178,6 +178,23 @@ pub async fn stats(
         "SELECT COALESCE(SUM(price_zec), 0.0) FROM invoices WHERE status = 'confirmed' AND confirmed_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-30 days')"
     ).fetch_one(pool.get_ref()).await.unwrap_or(0.0);
 
+    // Prior periods for trend comparison
+    let invoices_prior_7d: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM invoices WHERE created_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-14 days') AND created_at <= strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-7 days')"
+    ).fetch_one(pool.get_ref()).await.unwrap_or(0);
+
+    let confirmed_prior_7d: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM invoices WHERE status = 'confirmed' AND confirmed_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-14 days') AND confirmed_at <= strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-7 days')"
+    ).fetch_one(pool.get_ref()).await.unwrap_or(0);
+
+    let volume_prior_7d: f64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(price_zec), 0.0) FROM invoices WHERE status = 'confirmed' AND confirmed_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-14 days') AND confirmed_at <= strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-7 days')"
+    ).fetch_one(pool.get_ref()).await.unwrap_or(0.0);
+
+    let merchants_inactive: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM merchants m WHERE NOT EXISTS (SELECT 1 FROM invoices i WHERE i.merchant_id = m.id)"
+    ).fetch_one(pool.get_ref()).await.unwrap_or(0);
+
     actix_web::HttpResponse::Ok().json(serde_json::json!({
         "merchants": merchant_count,
         "products": product_count,
@@ -216,6 +233,12 @@ pub async fn stats(
             "confirmed": confirmed_30d,
             "volume_zec": volume_30d,
         },
+        "prior_7d": {
+            "invoices": invoices_prior_7d,
+            "confirmed": confirmed_prior_7d,
+            "volume_zec": volume_prior_7d,
+        },
+        "merchants_inactive": merchants_inactive,
     }))
 }
 
@@ -318,20 +341,61 @@ pub async fn billing(
     .unwrap_or(0.0);
     let total_collected: f64 = total_earned_billing - total_outstanding;
 
-    // Recent billing cycles
-    let recent_cycles: Vec<(String, String, String, String, f64, f64, String, Option<String>)> = sqlx::query_as(
+    let total_cycles: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM billing_cycles")
+            .fetch_one(pool.get_ref())
+            .await
+            .unwrap_or(0);
+
+    let carried_over_cycles: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM billing_cycles WHERE status = 'carried_over'")
+            .fetch_one(pool.get_ref())
+            .await
+            .unwrap_or(0);
+
+    // Active cycles sorted by outstanding (default view — excludes carried_over/paid)
+    let active_cycles: Vec<(String, String, String, String, f64, f64, String, Option<String>)> = sqlx::query_as(
         "SELECT bc.id, bc.merchant_id, m.name, bc.period_end, bc.total_fees_zec, bc.outstanding_zec, bc.status, bc.grace_until
          FROM billing_cycles bc
          JOIN merchants m ON m.id = bc.merchant_id
-         ORDER BY bc.created_at DESC LIMIT 20"
+         WHERE bc.status IN ('open', 'invoiced', 'past_due')
+         ORDER BY bc.outstanding_zec DESC, bc.period_end ASC
+         LIMIT 50"
     )
     .fetch_all(pool.get_ref())
     .await
     .unwrap_or_default();
 
-    let cycles_json: Vec<serde_json::Value> = recent_cycles
-        .iter()
-        .map(|c| {
+    // All cycles for history view
+    let all_cycles: Vec<(String, String, String, String, f64, f64, String, Option<String>)> = sqlx::query_as(
+        "SELECT bc.id, bc.merchant_id, m.name, bc.period_end, bc.total_fees_zec, bc.outstanding_zec, bc.status, bc.grace_until
+         FROM billing_cycles bc
+         JOIN merchants m ON m.id = bc.merchant_id
+         ORDER BY bc.created_at DESC
+         LIMIT 50"
+    )
+    .fetch_all(pool.get_ref())
+    .await
+    .unwrap_or_default();
+
+    // Outstanding aggregated per merchant (reconciles with totals.outstanding_zec)
+    let outstanding_by_merchant: Vec<(String, String, f64, String, String)> = sqlx::query_as(
+        "SELECT m.id, m.name,
+                COALESCE(SUM(bc.outstanding_zec), 0.0),
+                COALESCE(m.billing_status, 'active'),
+                MIN(bc.period_end)
+         FROM billing_cycles bc
+         JOIN merchants m ON m.id = bc.merchant_id
+         WHERE bc.status IN ('open', 'invoiced', 'past_due') AND bc.outstanding_zec > 0.0000001
+         GROUP BY m.id, m.name, m.billing_status
+         ORDER BY SUM(bc.outstanding_zec) DESC"
+    )
+    .fetch_all(pool.get_ref())
+    .await
+    .unwrap_or_default();
+
+    fn cycles_to_json(cycles: &[(String, String, String, String, f64, f64, String, Option<String>)]) -> Vec<serde_json::Value> {
+        cycles.iter().map(|c| {
             serde_json::json!({
                 "id": c.0,
                 "merchant_id": c.1,
@@ -341,6 +405,19 @@ pub async fn billing(
                 "outstanding_zec": c.5,
                 "status": c.6,
                 "grace_until": c.7,
+            })
+        }).collect()
+    }
+
+    let outstanding_merchants_json: Vec<serde_json::Value> = outstanding_by_merchant
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "merchant_id": r.0,
+                "merchant_name": r.1,
+                "outstanding_zec": r.2,
+                "billing_status": r.3,
+                "period_end": r.4,
             })
         })
         .collect();
@@ -359,8 +436,13 @@ pub async fn billing(
         "totals": {
             "outstanding_zec": total_outstanding,
             "collected_zec": total_collected,
+            "earned_zec": total_earned_billing,
         },
-        "recent_cycles": cycles_json,
+        "total_cycles": total_cycles,
+        "carried_over_cycles": carried_over_cycles,
+        "outstanding_by_merchant": outstanding_merchants_json,
+        "active_cycles": cycles_to_json(&active_cycles),
+        "all_cycles": cycles_to_json(&all_cycles),
     }))
 }
 
