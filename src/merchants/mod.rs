@@ -188,18 +188,18 @@ const MERCHANT_COLS: &str = "id, name, api_key_hash, dashboard_token_hash, ufvk,
 
 fn row_to_merchant(r: MerchantRow, encryption_key: &str) -> Merchant {
     let ufvk = crate::crypto::decrypt_or_plaintext(&r.4, encryption_key).unwrap_or_else(|e| {
-        tracing::error!(error = %e, "Failed to decrypt UFVK, using raw value");
-        r.4.clone()
+        tracing::error!(merchant_id = %r.0, error = %e, "UFVK decryption failed — merchant disabled until key material is fixed");
+        String::new()
     });
     let webhook_secret = crate::crypto::decrypt_webhook_secret(&r.7, encryption_key)
         .unwrap_or_else(|e| {
-            tracing::error!(error = %e, "Failed to decrypt webhook secret, using raw value");
-            r.7.clone()
+            tracing::error!(merchant_id = %r.0, error = %e, "Webhook secret decryption failed — webhooks disabled for this merchant");
+            String::new()
         });
     let recovery_email = r.8.as_deref().map(|e| {
         crate::crypto::decrypt_email(e, encryption_key).unwrap_or_else(|err| {
-            tracing::error!(error = %err, "Failed to decrypt recovery email");
-            e.to_string()
+            tracing::error!(merchant_id = %r.0, error = %err, "Recovery email decryption failed");
+            String::new()
         })
     });
     Merchant {
@@ -339,6 +339,25 @@ pub async fn get_by_session(
     session_id: &str,
     encryption_key: &str,
 ) -> anyhow::Result<Option<Merchant>> {
+    get_by_session_with_scope(pool, session_id, encryption_key)
+        .await
+        .map(|opt| opt.map(|(m, _pos_scoped)| m))
+}
+
+pub async fn get_by_session_with_scope(
+    pool: &SqlitePool,
+    session_id: &str,
+    encryption_key: &str,
+) -> anyhow::Result<Option<(Merchant, bool)>> {
+    let pos_scoped: bool = sqlx::query_scalar::<_, i32>(
+        "SELECT COALESCE(pos_scoped, 0) FROM sessions WHERE id = ? AND expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
+    )
+    .bind(session_id)
+    .fetch_optional(pool)
+    .await?
+    .map(|v| v != 0)
+    .unwrap_or(false);
+
     let cols = MERCHANT_COLS
         .replace("id,", "m.id,")
         .replace(", ", ", m.")
@@ -352,7 +371,7 @@ pub async fn get_by_session(
     .fetch_optional(pool)
     .await?;
 
-    Ok(row.map(|r| row_to_merchant(r, encryption_key)))
+    Ok(row.map(|r| (row_to_merchant(r, encryption_key), pos_scoped)))
 }
 
 pub async fn regenerate_api_key(pool: &SqlitePool, merchant_id: &str) -> anyhow::Result<String> {

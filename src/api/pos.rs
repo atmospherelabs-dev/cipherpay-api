@@ -23,7 +23,7 @@ pub async fn set_pin(
     pool: web::Data<SqlitePool>,
     body: web::Json<SetPinRequest>,
 ) -> HttpResponse {
-    let merchant = match super::auth::resolve_session(&req, &pool).await {
+    let merchant = match super::auth::resolve_full_session(&req, &pool).await {
         Some(m) => m,
         None => return super::auth::not_authenticated_response(),
     };

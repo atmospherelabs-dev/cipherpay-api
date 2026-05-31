@@ -988,6 +988,10 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
         .execute(&pool)
         .await
         .ok();
+    sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_sessions_deposit_txid ON agent_sessions(deposit_txid)")
+        .execute(&pool)
+        .await
+        .ok();
 
     // Session deposit requests (address-based, memo-free session opening)
     sqlx::query(

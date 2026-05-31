@@ -70,7 +70,7 @@ pub async fn billing_settle(
     config: web::Data<crate::config::Config>,
     price_service: web::Data<crate::invoices::pricing::PriceService>,
 ) -> actix_web::HttpResponse {
-    let merchant = match auth::require_session(&req, pool.get_ref()).await {
+    let merchant = match auth::require_full_session(&req, pool.get_ref()).await {
         Ok(merchant) => merchant,
         Err(response) => return response,
     };
@@ -173,7 +173,7 @@ pub async fn delete_account(
     pool: web::Data<SqlitePool>,
     config: web::Data<crate::config::Config>,
 ) -> actix_web::HttpResponse {
-    let merchant = match auth::require_session(&req, pool.get_ref()).await {
+    let merchant = match auth::require_full_session(&req, pool.get_ref()).await {
         Ok(merchant) => merchant,
         Err(response) => return response,
     };

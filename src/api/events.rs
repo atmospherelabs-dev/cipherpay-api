@@ -4,7 +4,7 @@ use sqlx::SqlitePool;
 use crate::events::{CreateEventRequest, UpdateEventRequest};
 
 pub async fn list(req: HttpRequest, pool: web::Data<SqlitePool>) -> HttpResponse {
-    let merchant = match super::auth::require_session(&req, pool.get_ref()).await {
+    let merchant = match super::auth::require_full_session(&req, pool.get_ref()).await {
         Ok(merchant) => merchant,
         Err(response) => return response,
     };
@@ -25,7 +25,7 @@ pub async fn create(
     pool: web::Data<SqlitePool>,
     body: web::Json<CreateEventRequest>,
 ) -> HttpResponse {
-    let merchant = match super::auth::require_session(&req, pool.get_ref()).await {
+    let merchant = match super::auth::require_full_session(&req, pool.get_ref()).await {
         Ok(merchant) => merchant,
         Err(response) => return response,
     };
@@ -56,7 +56,7 @@ pub async fn get(
     pool: web::Data<SqlitePool>,
     path: web::Path<String>,
 ) -> HttpResponse {
-    let merchant = match super::auth::require_session(&req, pool.get_ref()).await {
+    let merchant = match super::auth::require_full_session(&req, pool.get_ref()).await {
         Ok(merchant) => merchant,
         Err(response) => return response,
     };
@@ -82,7 +82,7 @@ pub async fn update(
     path: web::Path<String>,
     body: web::Json<UpdateEventRequest>,
 ) -> HttpResponse {
-    let merchant = match super::auth::require_session(&req, pool.get_ref()).await {
+    let merchant = match super::auth::require_full_session(&req, pool.get_ref()).await {
         Ok(merchant) => merchant,
         Err(response) => return response,
     };
@@ -115,7 +115,7 @@ pub async fn archive(
     pool: web::Data<SqlitePool>,
     path: web::Path<String>,
 ) -> HttpResponse {
-    let merchant = match super::auth::require_session(&req, pool.get_ref()).await {
+    let merchant = match super::auth::require_full_session(&req, pool.get_ref()).await {
         Ok(merchant) => merchant,
         Err(response) => return response,
     };

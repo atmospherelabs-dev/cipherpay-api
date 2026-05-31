@@ -344,7 +344,7 @@ pub async fn close(
 }
 
 pub async fn history(req: HttpRequest, pool: web::Data<SqlitePool>) -> HttpResponse {
-    let merchant = match crate::api::auth::require_session(&req, pool.get_ref()).await {
+    let merchant = match crate::api::auth::require_full_session(&req, pool.get_ref()).await {
         Ok(merchant) => merchant,
         Err(response) => return response,
     };

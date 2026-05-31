@@ -130,7 +130,7 @@ pub async fn register_begin(
     pool: web::Data<SqlitePool>,
     config: web::Data<Config>,
 ) -> HttpResponse {
-    let merchant = match super::auth::require_session(&req, pool.get_ref()).await {
+    let merchant = match super::auth::require_full_session(&req, pool.get_ref()).await {
         Ok(m) => m,
         Err(r) => return r,
     };
@@ -227,7 +227,7 @@ pub async fn register_complete(
     config: web::Data<Config>,
     body: web::Json<RegisterCompleteRequest>,
 ) -> HttpResponse {
-    let merchant = match super::auth::require_session(&req, pool.get_ref()).await {
+    let merchant = match super::auth::require_full_session(&req, pool.get_ref()).await {
         Ok(m) => m,
         Err(r) => return r,
     };
@@ -522,7 +522,7 @@ pub async fn reauth(
     config: web::Data<Config>,
     body: web::Json<ReauthRequest>,
 ) -> HttpResponse {
-    let merchant = match super::auth::require_session(&req, pool.get_ref()).await {
+    let merchant = match super::auth::require_full_session(&req, pool.get_ref()).await {
         Ok(m) => m,
         Err(r) => return r,
     };
@@ -632,7 +632,7 @@ pub async fn reauth(
 
 /// GET /api/auth/passkeys
 pub async fn list_passkeys(req: HttpRequest, pool: web::Data<SqlitePool>) -> HttpResponse {
-    let merchant = match super::auth::require_session(&req, pool.get_ref()).await {
+    let merchant = match super::auth::require_full_session(&req, pool.get_ref()).await {
         Ok(m) => m,
         Err(r) => return r,
     };
@@ -668,7 +668,7 @@ pub async fn delete_passkey(
     pool: web::Data<SqlitePool>,
     path: web::Path<String>,
 ) -> HttpResponse {
-    let merchant = match super::auth::require_session(&req, pool.get_ref()).await {
+    let merchant = match super::auth::require_full_session(&req, pool.get_ref()).await {
         Ok(m) => m,
         Err(r) => return r,
     };

@@ -177,7 +177,7 @@ pub async fn me(req: HttpRequest, pool: web::Data<SqlitePool>) -> HttpResponse {
 
 /// GET /api/merchants/me/invoices -- list invoices for the authenticated merchant
 pub async fn my_invoices(req: HttpRequest, pool: web::Data<SqlitePool>) -> HttpResponse {
-    let merchant = match resolve_session(&req, &pool).await {
+    let merchant = match resolve_full_session(&req, &pool).await {
         Some(m) => m,
         None => {
             return HttpResponse::Unauthorized().json(serde_json::json!({
@@ -294,7 +294,7 @@ pub async fn my_webhooks(
     pool: web::Data<SqlitePool>,
     query: web::Query<MyWebhookQuery>,
 ) -> HttpResponse {
-    let merchant = match resolve_session(&req, &pool).await {
+    let merchant = match resolve_full_session(&req, &pool).await {
         Some(m) => m,
         None => {
             return HttpResponse::Unauthorized().json(serde_json::json!({
@@ -400,7 +400,7 @@ pub async fn retry_webhook(
     pool: web::Data<SqlitePool>,
     path: web::Path<String>,
 ) -> HttpResponse {
-    let merchant = match resolve_session(&req, &pool).await {
+    let merchant = match resolve_full_session(&req, &pool).await {
         Some(m) => m,
         None => return not_authenticated_response(),
     };
@@ -556,6 +556,20 @@ pub async fn resolve_session(req: &HttpRequest, pool: &SqlitePool) -> Option<mer
         .ok()?
 }
 
+/// Resolve a merchant from session cookie, rejecting POS-scoped sessions.
+/// Use for account-management endpoints that must not be accessible via PIN.
+pub async fn resolve_full_session(req: &HttpRequest, pool: &SqlitePool) -> Option<merchants::Merchant> {
+    let session_id = extract_session_id(req)?;
+    let config = req.app_data::<web::Data<crate::config::Config>>()?;
+    let (merchant, pos_scoped) = merchants::get_by_session_with_scope(pool, &session_id, &config.encryption_key)
+        .await
+        .ok()??;
+    if pos_scoped {
+        return None;
+    }
+    Some(merchant)
+}
+
 /// Resolve a merchant from either API key (Bearer token) or session cookie,
 /// alongside which credential type matched. Used by scope-aware helpers.
 pub async fn resolve_with_kind(
@@ -598,6 +612,16 @@ pub async fn require_session(
         .ok_or_else(not_authenticated_response)
 }
 
+/// Like require_session but rejects POS-scoped sessions.
+pub async fn require_full_session(
+    req: &HttpRequest,
+    pool: &SqlitePool,
+) -> Result<merchants::Merchant, HttpResponse> {
+    resolve_full_session(req, pool)
+        .await
+        .ok_or_else(not_authenticated_response)
+}
+
 pub async fn require_merchant_or_session(
     req: &HttpRequest,
     pool: &SqlitePool,
@@ -607,9 +631,9 @@ pub async fn require_merchant_or_session(
         .ok_or_else(not_authenticated_response)
 }
 
-/// Reject restricted API keys. Use for endpoints that mutate account-level
-/// configuration: PATCH /me, key/secret rotation, billing actions, account
-/// deletion, key management. Restricted keys get 403 with a clear error code.
+/// Reject restricted API keys AND POS-scoped sessions. Use for endpoints that
+/// mutate account-level configuration: PATCH /me, key/secret rotation, billing
+/// actions, account deletion, key management.
 pub async fn require_full_or_session(
     req: &HttpRequest,
     pool: &SqlitePool,
@@ -618,12 +642,23 @@ pub async fn require_full_or_session(
         Some((m, kind)) => {
             if matches!(kind, merchants::KeyKind::Restricted) {
                 Err(restricted_key_forbidden_response())
+            } else if matches!(kind, merchants::KeyKind::Session) {
+                resolve_full_session(req, pool)
+                    .await
+                    .ok_or_else(pos_session_forbidden_response)
             } else {
                 Ok(m)
             }
         }
         None => Err(not_authenticated_response()),
     }
+}
+
+fn pos_session_forbidden_response() -> HttpResponse {
+    HttpResponse::Forbidden().json(serde_json::json!({
+        "error": "POS sessions cannot access account management endpoints.",
+        "code": "pos_session_forbidden",
+    }))
 }
 
 pub fn restricted_key_forbidden_response() -> HttpResponse {
@@ -721,7 +756,7 @@ pub async fn update_me(
     config: web::Data<Config>,
     body: web::Json<UpdateMerchantRequest>,
 ) -> HttpResponse {
-    let merchant = match resolve_session(&req, &pool).await {
+    let merchant = match resolve_full_session(&req, &pool).await {
         Some(m) => m,
         None => {
             return HttpResponse::Unauthorized().json(serde_json::json!({
@@ -827,7 +862,7 @@ pub async fn update_me(
 
 /// POST /api/merchants/me/regenerate-api-key
 pub async fn regenerate_api_key(req: HttpRequest, pool: web::Data<SqlitePool>) -> HttpResponse {
-    let merchant = match resolve_session(&req, &pool).await {
+    let merchant = match resolve_full_session(&req, &pool).await {
         Some(m) => m,
         None => {
             return HttpResponse::Unauthorized()
@@ -850,7 +885,7 @@ pub async fn regenerate_dashboard_token(
     req: HttpRequest,
     pool: web::Data<SqlitePool>,
 ) -> HttpResponse {
-    let merchant = match resolve_session(&req, &pool).await {
+    let merchant = match resolve_full_session(&req, &pool).await {
         Some(m) => m,
         None => {
             return HttpResponse::Unauthorized()
@@ -876,7 +911,7 @@ pub async fn regenerate_webhook_secret(
     pool: web::Data<SqlitePool>,
     config: web::Data<Config>,
 ) -> HttpResponse {
-    let merchant = match resolve_session(&req, &pool).await {
+    let merchant = match resolve_full_session(&req, &pool).await {
         Some(m) => m,
         None => {
             return HttpResponse::Unauthorized()

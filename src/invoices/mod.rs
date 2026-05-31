@@ -549,12 +549,12 @@ pub async fn finalize_invoice(
         )
     };
 
-    sqlx::query(
+    let result = sqlx::query(
         "UPDATE invoices SET status = 'pending',
          price_zec = ?, price_eur = ?, price_usd = ?,
          zec_rate_at_creation = ?, price_zatoshis = ?,
          zcash_uri = ?, expires_at = ?
-         WHERE id = ?",
+         WHERE id = ? AND status IN ('draft', 'expired')",
     )
     .bind(price_zec)
     .bind(price_eur)
@@ -566,6 +566,10 @@ pub async fn finalize_invoice(
     .bind(invoice_id)
     .execute(pool)
     .await?;
+
+    if result.rows_affected() == 0 {
+        anyhow::bail!("Invoice status changed concurrently, finalization aborted");
+    }
 
     tracing::info!(
         invoice_id,

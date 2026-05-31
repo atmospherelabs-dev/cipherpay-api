@@ -256,7 +256,7 @@ pub async fn cancel_invoice(
     pool: web::Data<SqlitePool>,
     path: web::Path<String>,
 ) -> actix_web::HttpResponse {
-    let merchant = match auth::require_session(&req, pool.get_ref()).await {
+    let merchant = match auth::require_full_session(&req, pool.get_ref()).await {
         Ok(merchant) => merchant,
         Err(response) => return response,
     };
@@ -294,7 +294,7 @@ pub async fn refund_invoice(
     path: web::Path<String>,
     body: web::Json<serde_json::Value>,
 ) -> actix_web::HttpResponse {
-    let merchant = match auth::require_session(&req, pool.get_ref()).await {
+    let merchant = match auth::require_full_session(&req, pool.get_ref()).await {
         Ok(merchant) => merchant,
         Err(response) => return response,
     };

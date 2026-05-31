@@ -15,7 +15,7 @@ pub async fn list_events(
     pool: web::Data<SqlitePool>,
     config: web::Data<Config>,
 ) -> HttpResponse {
-    let merchant = match super::auth::require_session(&req, pool.get_ref()).await {
+    let merchant = match super::auth::require_full_session(&req, pool.get_ref()).await {
         Ok(merchant) => merchant,
         Err(response) => return response,
     };
@@ -102,7 +102,7 @@ pub async fn import_event(
     config: web::Data<Config>,
     body: web::Json<ImportRequest>,
 ) -> HttpResponse {
-    let merchant = match super::auth::require_session(&req, pool.get_ref()).await {
+    let merchant = match super::auth::require_full_session(&req, pool.get_ref()).await {
         Ok(merchant) => merchant,
         Err(response) => return response,
     };
@@ -344,7 +344,7 @@ pub async fn sync_event(
 ) -> HttpResponse {
     let event_id = path.into_inner();
 
-    let merchant = match super::auth::require_session(&req, pool.get_ref()).await {
+    let merchant = match super::auth::require_full_session(&req, pool.get_ref()).await {
         Ok(merchant) => merchant,
         Err(response) => return response,
     };

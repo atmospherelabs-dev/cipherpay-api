@@ -9,7 +9,7 @@ pub async fn create(
     pool: web::Data<SqlitePool>,
     body: web::Json<CreateProductRequest>,
 ) -> HttpResponse {
-    let merchant = match super::auth::require_session(&req, pool.get_ref()).await {
+    let merchant = match super::auth::require_full_session(&req, pool.get_ref()).await {
         Ok(merchant) => merchant,
         Err(response) => return response,
     };
@@ -91,7 +91,7 @@ pub async fn create(
 }
 
 pub async fn list(req: HttpRequest, pool: web::Data<SqlitePool>) -> HttpResponse {
-    let merchant = match super::auth::require_session(&req, pool.get_ref()).await {
+    let merchant = match super::auth::require_full_session(&req, pool.get_ref()).await {
         Ok(merchant) => merchant,
         Err(response) => return response,
     };
@@ -133,7 +133,7 @@ pub async fn update(
     path: web::Path<String>,
     body: web::Json<UpdateProductRequest>,
 ) -> HttpResponse {
-    let merchant = match super::auth::require_session(&req, pool.get_ref()).await {
+    let merchant = match super::auth::require_full_session(&req, pool.get_ref()).await {
         Ok(merchant) => merchant,
         Err(response) => return response,
     };
@@ -195,7 +195,7 @@ pub async fn deactivate(
     pool: web::Data<SqlitePool>,
     path: web::Path<String>,
 ) -> HttpResponse {
-    let merchant = match super::auth::require_session(&req, pool.get_ref()).await {
+    let merchant = match super::auth::require_full_session(&req, pool.get_ref()).await {
         Ok(merchant) => merchant,
         Err(response) => return response,
     };

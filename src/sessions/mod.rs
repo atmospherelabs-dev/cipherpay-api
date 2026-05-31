@@ -55,7 +55,7 @@ pub async fn create_session(
     let id = uuid::Uuid::new_v4().to_string();
     let bearer_token = generate_token();
 
-    sqlx::query(
+    match sqlx::query(
         "INSERT INTO agent_sessions (id, merchant_id, deposit_txid, bearer_token, balance_zatoshis, balance_remaining, cost_per_request, requests_made, refund_address, status, expires_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, 'active', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '+' || ? || ' hours'))"
     )
@@ -69,7 +69,13 @@ pub async fn create_session(
     .bind(refund_address)
     .bind(SESSION_EXPIRY_HOURS)
     .execute(pool)
-    .await?;
+    .await {
+        Ok(_) => {}
+        Err(sqlx::Error::Database(ref db_err)) if db_err.message().contains("UNIQUE constraint") => {
+            anyhow::bail!("This transaction has already been used to open a session");
+        }
+        Err(e) => return Err(e.into()),
+    }
 
     let session = get_session(pool, &id)
         .await?
