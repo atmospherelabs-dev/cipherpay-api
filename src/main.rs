@@ -71,19 +71,33 @@ async fn main() -> anyhow::Result<()> {
         })
         .await?;
     }
-    let mut default_headers = reqwest::header::HeaderMap::new();
-    default_headers.insert(
+    // Internal client for CipherScan (carries X-Service-Key)
+    let mut scanner_headers = reqwest::header::HeaderMap::new();
+    scanner_headers.insert(
         "User-Agent",
         reqwest::header::HeaderValue::from_static("CipherPay/1.0"),
     );
     if let Some(ref key) = config.cipherscan_service_key {
         if let Ok(val) = reqwest::header::HeaderValue::from_str(key) {
-            default_headers.insert("X-Service-Key", val);
+            scanner_headers.insert("X-Service-Key", val);
         }
     }
+    let scanner_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .default_headers(scanner_headers)
+        .build()?;
+
+    // Outbound client for merchant webhooks, Luma, email, etc.
+    // No service keys. Redirects disabled to prevent SSRF bypass.
+    let mut outbound_headers = reqwest::header::HeaderMap::new();
+    outbound_headers.insert(
+        "User-Agent",
+        reqwest::header::HeaderValue::from_static("CipherPay/1.0"),
+    );
     let http_client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
-        .default_headers(default_headers)
+        .default_headers(outbound_headers)
+        .redirect(reqwest::redirect::Policy::none())
         .build()?;
 
     let price_service =
@@ -98,9 +112,9 @@ async fn main() -> anyhow::Result<()> {
 
     let scanner_config = config.clone();
     let scanner_pool = pool.clone();
-    let scanner_http = http_client.clone();
+    let scanner_webhook_http = http_client.clone();
     tokio::spawn(async move {
-        scanner::run(scanner_config, scanner_pool, scanner_http).await;
+        scanner::run(scanner_config, scanner_pool, scanner_client, scanner_webhook_http).await;
     });
 
     let retry_pool = pool.clone();

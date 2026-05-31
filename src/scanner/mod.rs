@@ -27,7 +27,10 @@ struct KeyCache {
     merchant_ids: Vec<String>,
 }
 
-pub async fn run(config: Config, pool: SqlitePool, http: reqwest::Client) {
+pub async fn run(config: Config, pool: SqlitePool, scanner_http: reqwest::Client, webhook_http: reqwest::Client) {
+    // scanner_http: internal client for CipherScan API calls (carries X-Service-Key)
+    // webhook_http: outbound client for merchant webhooks (no service keys, no redirects)
+    let http = scanner_http;
     let circuit_breaker = Arc::new(blocks::CircuitBreaker::new());
     let seen_txids: SeenTxids = Arc::new(RwLock::new(HashMap::new()));
 
@@ -61,6 +64,7 @@ pub async fn run(config: Config, pool: SqlitePool, http: reqwest::Client) {
     let mempool_config = config.clone();
     let mempool_pool = pool.clone();
     let mempool_http = http.clone();
+    let mempool_webhook_http = webhook_http.clone();
     let mempool_seen = seen_txids.clone();
     let mempool_cb = circuit_breaker.clone();
     let has_ws = ws_rx.is_some();
@@ -99,7 +103,7 @@ pub async fn run(config: Config, pool: SqlitePool, http: reqwest::Client) {
                                 seen_set.insert(push.txid.clone(), Instant::now());
                             }
                             if let Err(e) = process_ws_mempool_tx(
-                                &mempool_config, &mempool_pool, &mempool_http,
+                                &mempool_config, &mempool_pool, &mempool_http, &mempool_webhook_http,
                                 &push, &mut key_cache,
                             ).await {
                                 tracing::error!(error = %e, txid = %push.txid, "WS mempool tx error");
@@ -116,7 +120,7 @@ pub async fn run(config: Config, pool: SqlitePool, http: reqwest::Client) {
                         tracing::debug!("CipherScan circuit breaker open, skipping mempool scan");
                         continue;
                     }
-                    match scan_mempool(&mempool_config, &mempool_pool, &mempool_http, &mempool_seen, &mut key_cache).await {
+                    match scan_mempool(&mempool_config, &mempool_pool, &mempool_http, &mempool_webhook_http, &mempool_seen, &mut key_cache).await {
                         Ok(_) => mempool_cb.record_success(),
                         Err(e) => {
                             mempool_cb.record_failure();
@@ -132,9 +136,12 @@ pub async fn run(config: Config, pool: SqlitePool, http: reqwest::Client) {
         }
     });
 
+    let retry_webhook_http = webhook_http.clone();
+
     let block_config = config.clone();
     let block_pool = pool.clone();
     let block_http = http.clone();
+    let block_webhook_http = webhook_http;
     let block_seen = seen_txids.clone();
     let block_cb = circuit_breaker.clone();
 
@@ -155,6 +162,7 @@ pub async fn run(config: Config, pool: SqlitePool, http: reqwest::Client) {
                 &block_config,
                 &block_pool,
                 &block_http,
+                &block_webhook_http,
                 &block_seen,
                 &last_height,
                 &mut key_cache,
@@ -189,12 +197,11 @@ pub async fn run(config: Config, pool: SqlitePool, http: reqwest::Client) {
 
     let retry_config = config.clone();
     let retry_pool = pool.clone();
-    let retry_http = http.clone();
     let luma_retry_handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
         loop {
             interval.tick().await;
-            retry_due_luma_registrations(&retry_config, &retry_pool, &retry_http).await;
+            retry_due_luma_registrations(&retry_config, &retry_pool, &retry_webhook_http).await;
         }
     });
 
@@ -251,7 +258,7 @@ fn refresh_key_cache<'a>(
 /// Fire a payment webhook without blocking the scan loop.
 fn spawn_payment_webhook(
     pool: &SqlitePool,
-    http: &reqwest::Client,
+    webhook_http: &reqwest::Client,
     invoice_id: &str,
     event: &str,
     txid: &str,
@@ -261,7 +268,7 @@ fn spawn_payment_webhook(
     encryption_key: &str,
 ) {
     let pool = pool.clone();
-    let http = http.clone();
+    let http = webhook_http.clone();
     let invoice_id = invoice_id.to_string();
     let event = event.to_string();
     let txid = txid.to_string();
@@ -289,6 +296,7 @@ async fn scan_mempool(
     config: &Config,
     pool: &SqlitePool,
     http: &reqwest::Client,
+    webhook_http: &reqwest::Client,
     seen: &SeenTxids,
     key_cache: &mut Option<KeyCache>,
 ) -> anyhow::Result<()> {
@@ -347,7 +355,7 @@ async fn scan_mempool(
             invoice_detection::MempoolSource::Polling,
         );
         let detected =
-            invoice_detection::apply_mempool_invoice_totals(pool, http, config, txid, &invoice_totals)
+            invoice_detection::apply_mempool_invoice_totals(pool, webhook_http, config, txid, &invoice_totals)
                 .await?;
         for invoice_id in &detected {
             try_detect_fee(pool, config, raw_hex, invoice_id).await;
@@ -362,7 +370,8 @@ async fn scan_mempool(
 async fn process_ws_mempool_tx(
     config: &Config,
     pool: &SqlitePool,
-    http: &reqwest::Client,
+    _http: &reqwest::Client,
+    webhook_http: &reqwest::Client,
     push: &ws::MempoolPush,
     key_cache: &mut Option<KeyCache>,
 ) -> anyhow::Result<()> {
@@ -389,7 +398,7 @@ async fn process_ws_mempool_tx(
     );
     let detected = invoice_detection::apply_mempool_invoice_totals(
         pool,
-        http,
+        webhook_http,
         config,
         &push.txid,
         &invoice_totals,
@@ -410,6 +419,7 @@ async fn scan_blocks(
     config: &Config,
     pool: &SqlitePool,
     http: &reqwest::Client,
+    webhook_http: &reqwest::Client,
     seen: &SeenTxids,
     last_height: &Arc<RwLock<Option<u64>>>,
     key_cache: &mut Option<KeyCache>,
@@ -433,7 +443,7 @@ async fn scan_blocks(
                                 invoice.received_zatoshis > invoice.price_zatoshis + 1000;
                             spawn_payment_webhook(
                                 pool,
-                                http,
+                                webhook_http,
                                 &invoice.id,
                                 "confirmed",
                                 txid,
@@ -442,7 +452,7 @@ async fn scan_blocks(
                                 overpaid,
                                 &config.encryption_key,
                             );
-                            on_invoice_confirmed(pool, http, config, invoice).await;
+                            on_invoice_confirmed(pool, webhook_http, config, invoice).await;
 
                             // Scan for ZIP 321 fee output that mempool path may have missed
                             if config.fee_enabled() {
@@ -558,7 +568,7 @@ async fn scan_blocks(
                             let overpaid = new_received > invoice.price_zatoshis + 1000;
                             spawn_payment_webhook(
                                 pool,
-                                http,
+                                webhook_http,
                                 invoice_id,
                                 "confirmed",
                                 txid,
@@ -567,7 +577,7 @@ async fn scan_blocks(
                                 overpaid,
                                 &config.encryption_key,
                             );
-                            on_invoice_confirmed(pool, http, config, invoice).await;
+                            on_invoice_confirmed(pool, webhook_http, config, invoice).await;
                         }
                         try_detect_fee(pool, config, &raw_hex, invoice_id).await;
                     }
@@ -575,7 +585,7 @@ async fn scan_blocks(
                     invoices::mark_underpaid(pool, invoice_id, new_received, txid).await?;
                     spawn_payment_webhook(
                         pool,
-                        http,
+                        webhook_http,
                         invoice_id,
                         "underpaid",
                         txid,
@@ -605,7 +615,7 @@ async fn scan_blocks(
 /// campaign totals for donation invoices.
 async fn on_invoice_confirmed(
     pool: &SqlitePool,
-    http: &reqwest::Client,
+    outbound_http: &reqwest::Client,
     config: &Config,
     invoice: &invoices::Invoice,
 ) {
@@ -654,7 +664,7 @@ async fn on_invoice_confirmed(
                     // Luma path: register guest on Luma, skip create_ticket
                     handle_luma_registration(
                         pool,
-                        http,
+                        outbound_http,
                         config,
                         invoice,
                         luma_eid,
@@ -689,14 +699,14 @@ async fn on_invoice_confirmed(
                                 "event_location": event_ctx.as_ref().and_then(|e| e.event_location.clone()),
                             });
                             let pool = pool.clone();
-                            let http = http.clone();
+                            let wh_http = outbound_http.clone();
                             let merchant_id = invoice.merchant_id.clone();
                             let enc_key = config.encryption_key.clone();
                             let inv_id = invoice.id.clone();
                             tokio::spawn(async move {
                                 if let Err(e) = webhooks::dispatch_event(
                                     &pool,
-                                    &http,
+                                    &wh_http,
                                     &merchant_id,
                                     "ticket.created",
                                     payload,
@@ -763,7 +773,7 @@ async fn on_invoice_confirmed(
                     });
                     if let Err(e) = crate::webhooks::dispatch_event(
                         pool,
-                        http,
+                        outbound_http,
                         &invoice.merchant_id,
                         "subscription.renewed",
                         payload,
@@ -822,7 +832,7 @@ async fn on_invoice_confirmed(
 /// Decrypts stored PII, calls Luma add_guest + get_guest, stores result, then wipes PII.
 async fn handle_luma_registration(
     pool: &SqlitePool,
-    http: &reqwest::Client,
+    outbound_http: &reqwest::Client,
     config: &Config,
     invoice: &invoices::Invoice,
     luma_event_id: &str,
@@ -929,7 +939,7 @@ async fn handle_luma_registration(
 
     // Call Luma add_guest
     match crate::luma::add_guest(
-        http,
+        outbound_http,
         &api_key,
         luma_event_id,
         &email,
@@ -959,7 +969,7 @@ async fn handle_luma_registration(
     }
 
     // Call Luma get_guest to retrieve check-in QR and full guest record
-    let guest_data = match crate::luma::get_guest(http, &api_key, luma_event_id, &email).await {
+    let guest_data = match crate::luma::get_guest(outbound_http, &api_key, luma_event_id, &email).await {
         Ok(Some(g)) => serde_json::to_string(&g).unwrap_or_else(|_| "{}".into()),
         Ok(None) => {
             tracing::warn!(invoice_id = %invoice.id, "Luma get_guest returned empty after add");
@@ -991,14 +1001,14 @@ async fn handle_luma_registration(
         "luma_registered": true,
     });
     let pool = pool.clone();
-    let http = http.clone();
+    let wh_http = outbound_http.clone();
     let merchant_id = invoice.merchant_id.clone();
     let enc_key = config.encryption_key.clone();
     let inv_id = invoice.id.clone();
     tokio::spawn(async move {
         if let Err(e) = webhooks::dispatch_event(
             &pool,
-            &http,
+            &wh_http,
             &merchant_id,
             "luma.registered",
             payload,
@@ -1067,7 +1077,11 @@ async fn schedule_luma_retry(pool: &SqlitePool, invoice_id: &str) {
     .ok();
 }
 
-async fn retry_due_luma_registrations(config: &Config, pool: &SqlitePool, http: &reqwest::Client) {
+async fn retry_due_luma_registrations(
+    config: &Config,
+    pool: &SqlitePool,
+    outbound_http: &reqwest::Client,
+) {
     let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string();
 
     let rows: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
@@ -1119,7 +1133,7 @@ async fn retry_due_luma_registrations(config: &Config, pool: &SqlitePool, http: 
             tracing::info!(invoice_id = %invoice.id, attempt = "retry", "Retrying Luma registration");
             handle_luma_registration(
                 pool,
-                http,
+                outbound_http,
                 config,
                 &invoice,
                 luma_eid,
