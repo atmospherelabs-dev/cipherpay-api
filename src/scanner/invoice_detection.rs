@@ -29,9 +29,9 @@ pub(super) fn collect_mempool_invoice_totals(
                 for output in &outputs {
                     let recipient_hex = hex::encode(output.recipient_raw);
                     match source {
-                        MempoolSource::Polling => tracing::info!(txid, "Decrypted mempool output"),
+                        MempoolSource::Polling => tracing::debug!(txid, "Decrypted mempool output"),
                         MempoolSource::WebSocket => {
-                            tracing::info!(txid = %txid, "[WS] Decrypted mempool output");
+                            tracing::debug!(txid = %txid, "[WS] Decrypted mempool output");
                         }
                     }
                     tracing::debug!(
@@ -87,6 +87,7 @@ pub(super) async fn apply_mempool_invoice_totals(
         if new_received >= min {
             let changed = invoices::mark_detected(pool, invoice_id, txid, new_received).await?;
             if changed {
+                super::metrics::global().record_payment_detected();
                 newly_detected.push(invoice_id.clone());
                 let overpaid = new_received > invoice.price_zatoshis + 1000;
                 super::spawn_payment_webhook(

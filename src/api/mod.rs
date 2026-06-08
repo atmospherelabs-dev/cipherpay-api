@@ -287,7 +287,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/admin/webhooks", web::get().to(admin::webhooks))
             .route("/admin/system", web::get().to(admin::system))
             .route("/admin/test-email", web::post().to(admin::test_email))
-            .route("/admin/rescan-fees", web::post().to(admin::rescan_fees)),
+            .route("/admin/rescan-fees", web::post().to(admin::rescan_fees))
+            .route("/admin/scanner-metrics", web::get().to(admin::scanner_metrics)),
     );
 
     cfg.route(

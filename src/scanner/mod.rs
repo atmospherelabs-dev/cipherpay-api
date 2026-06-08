@@ -2,6 +2,7 @@ pub mod blocks;
 pub mod decrypt;
 mod invoice_detection;
 pub mod mempool;
+pub mod metrics;
 pub mod ws;
 
 use sqlx::SqlitePool;
@@ -48,6 +49,11 @@ pub async fn run(config: Config, pool: SqlitePool, scanner_http: reqwest::Client
         block_interval = config.block_poll_interval_secs,
         "Scanner started"
     );
+
+    metrics::global().mark_started().await;
+    if let Some(h) = persisted_height {
+        metrics::global().set_last_block_height(h);
+    }
 
     // Spawn WS client if service key is configured
     let mut ws_rx: Option<tokio::sync::mpsc::Receiver<ws::MempoolPush>> = None;
@@ -120,10 +126,15 @@ pub async fn run(config: Config, pool: SqlitePool, scanner_http: reqwest::Client
                         tracing::debug!("CipherScan circuit breaker open, skipping mempool scan");
                         continue;
                     }
+                    let mempool_start = Instant::now();
                     match scan_mempool(&mempool_config, &mempool_pool, &mempool_http, &mempool_webhook_http, &mempool_seen, &mut key_cache).await {
-                        Ok(_) => mempool_cb.record_success(),
+                        Ok(_) => {
+                            mempool_cb.record_success();
+                            metrics::global().set_last_mempool_scan_ms(mempool_start.elapsed().as_millis() as u64);
+                        }
                         Err(e) => {
                             mempool_cb.record_failure();
+                            metrics::global().record_scan_error();
                             tracing::error!(error = %e, "Mempool scan error");
                         }
                     }
@@ -158,6 +169,7 @@ pub async fn run(config: Config, pool: SqlitePool, scanner_http: reqwest::Client
                 tracing::debug!("CipherScan circuit breaker open, skipping block scan");
                 continue;
             }
+            let block_start = Instant::now();
             match scan_blocks(
                 &block_config,
                 &block_pool,
@@ -169,9 +181,13 @@ pub async fn run(config: Config, pool: SqlitePool, scanner_http: reqwest::Client
             )
             .await
             {
-                Ok(_) => block_cb.record_success(),
+                Ok(_) => {
+                    block_cb.record_success();
+                    metrics::global().set_last_block_scan_ms(block_start.elapsed().as_millis() as u64);
+                }
                 Err(e) => {
                     block_cb.record_failure();
+                    metrics::global().record_scan_error();
                     tracing::error!(error = %e, "Block scan error");
                 }
             }
@@ -327,6 +343,7 @@ async fn scan_mempool(
         return Ok(());
     }
 
+    metrics::global().record_mempool_txs(new_txids.len() as u64);
     tracing::debug!(count = new_txids.len(), "New mempool transactions");
 
     {
@@ -476,6 +493,8 @@ async fn scan_blocks(
 
     // Always track chain height so the scanner never falls behind during idle periods
     let current_height = blocks::get_chain_height(http, &config.cipherscan_api_url).await?;
+    metrics::global().set_chain_tip(current_height);
+
     let start_height = {
         let last = last_height.read().await;
         match *last {
@@ -563,6 +582,7 @@ async fn scan_blocks(
                     let detected =
                         invoices::mark_detected(pool, invoice_id, txid, new_received).await?;
                     if detected {
+                        metrics::global().record_payment_detected();
                         let confirmed = invoices::mark_confirmed(pool, invoice_id).await?;
                         if confirmed {
                             let overpaid = new_received > invoice.price_zatoshis + 1000;
@@ -603,6 +623,10 @@ async fn scan_blocks(
 
     // Always persist height progress — even when idle, keeps the scanner near chain tip
     *last_height.write().await = Some(batch_end);
+    metrics::global().set_last_block_height(batch_end);
+    if start_height <= batch_end {
+        metrics::global().record_blocks_scanned(batch_end - start_height + 1);
+    }
     if let Err(e) = crate::db::set_scanner_state(pool, "last_height", &batch_end.to_string()).await
     {
         tracing::warn!(error = %e, "Failed to persist last_height");

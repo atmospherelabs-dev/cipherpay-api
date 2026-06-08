@@ -838,3 +838,28 @@ pub async fn rescan_fees(
         "details": details,
     }))
 }
+
+/// GET /api/admin/scanner-metrics -- scanner health and performance counters
+pub async fn scanner_metrics(req: actix_web::HttpRequest) -> actix_web::HttpResponse {
+    if !authenticate_admin(&req) {
+        return unauthorized();
+    }
+
+    let m = crate::scanner::metrics::global();
+    let snap = m.snapshot();
+    let uptime = m.uptime_secs().await;
+
+    actix_web::HttpResponse::Ok().json(serde_json::json!({
+        "status": snap.status(),
+        "uptime_secs": uptime,
+        "blocks_scanned": snap.blocks_scanned,
+        "last_block_height": snap.last_block_height,
+        "chain_tip_height": snap.chain_tip_height,
+        "blocks_behind": snap.blocks_behind(),
+        "payments_detected": snap.payments_detected,
+        "mempool_txs_checked": snap.mempool_txs_checked,
+        "scan_errors": snap.scan_errors,
+        "last_block_scan_ms": snap.last_block_scan_ms,
+        "last_mempool_scan_ms": snap.last_mempool_scan_ms,
+    }))
+}

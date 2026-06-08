@@ -155,7 +155,7 @@ pub fn try_decrypt_with_keys(raw_hex: &str, keys: &CachedKeys) -> Result<Vec<Dec
                 let amount_zec = amount_zatoshis as f64 / 100_000_000.0;
 
                 if !memo_text.trim().is_empty() {
-                    tracing::info!(
+                    tracing::debug!(
                         has_memo = true,
                         memo_len = memo_text.len(),
                         amount_zec,
@@ -255,7 +255,7 @@ pub fn try_decrypt_all_outputs_ivk(raw_hex: &str, key_str: &str) -> Result<Vec<D
             let amount_zec = amount_zatoshis as f64 / 100_000_000.0;
 
             if !memo_text.trim().is_empty() {
-                tracing::info!(
+                tracing::debug!(
                     has_memo = true,
                     memo_len = memo_text.len(),
                     amount_zec,
@@ -332,7 +332,7 @@ pub fn try_decrypt_all_outputs(raw_hex: &str, ufvk_str: &str) -> Result<Vec<Decr
                 let amount_zec = amount_zatoshis as f64 / 100_000_000.0;
 
                 if !memo_text.trim().is_empty() {
-                    tracing::info!(
+                    tracing::debug!(
                         has_memo = true,
                         memo_len = memo_text.len(),
                         amount_zec,
