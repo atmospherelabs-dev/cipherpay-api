@@ -8,7 +8,7 @@ use orchard::{
 use zcash_address::unified::{Container, Encoding, Fvk, Ivk, Ufvk, Uivk};
 use zcash_note_encryption::try_note_decryption;
 use zcash_primitives::transaction::Transaction;
-use zcash_protocol::consensus::NetworkType;
+use zcash_protocol::consensus::{BranchId, NetworkType};
 
 /// Accept payments within 0.5% of invoice price to account for
 /// wallet rounding and network fee differences.
@@ -119,7 +119,7 @@ pub fn try_decrypt_with_keys(raw_hex: &str, keys: &CachedKeys) -> Result<Vec<Dec
     }
 
     let mut cursor = Cursor::new(&tx_bytes[..]);
-    let tx = match Transaction::read(&mut cursor, zcash_primitives::consensus::BranchId::Nu5) {
+    let tx = match Transaction::read(&mut cursor, BranchId::Nu6_2) {
         Ok(tx) => tx,
         Err(_) => return Ok(vec![]),
     };
@@ -220,7 +220,7 @@ pub fn try_decrypt_all_outputs_ivk(raw_hex: &str, key_str: &str) -> Result<Vec<D
     let prepared_ivk = PreparedIncomingViewingKey::new(&ivk);
 
     let mut cursor = Cursor::new(&tx_bytes[..]);
-    let tx = match Transaction::read(&mut cursor, zcash_primitives::consensus::BranchId::Nu5) {
+    let tx = match Transaction::read(&mut cursor, BranchId::Nu6_2) {
         Ok(tx) => tx,
         Err(_) => return Ok(vec![]),
     };
@@ -292,7 +292,7 @@ pub fn try_decrypt_all_outputs(raw_hex: &str, ufvk_str: &str) -> Result<Vec<Decr
     };
 
     let mut cursor = Cursor::new(&tx_bytes[..]);
-    let tx = match Transaction::read(&mut cursor, zcash_primitives::consensus::BranchId::Nu5) {
+    let tx = match Transaction::read(&mut cursor, BranchId::Nu6_2) {
         Ok(tx) => tx,
         Err(_) => return Ok(vec![]),
     };
