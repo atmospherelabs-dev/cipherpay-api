@@ -70,6 +70,12 @@ async fn main() -> anyhow::Result<()> {
             db::migrate_blind_index_to_hmac(&pool, &config.encryption_key).await
         })
         .await?;
+        db::run_tracked_migration(
+            &pool,
+            "data_blind_index_fix_key_decode_v2026_06_12",
+            || async { db::migrate_blind_index_to_hmac(&pool, &config.encryption_key).await },
+        )
+        .await?;
     }
     // Internal client for CipherScan (carries X-Service-Key)
     let mut scanner_headers = reqwest::header::HeaderMap::new();

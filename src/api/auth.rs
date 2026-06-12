@@ -472,7 +472,13 @@ pub async fn retry_webhook(
     let updated_payload = body.to_string();
     let signature = crate::webhooks::sign_payload_public(&secret, &ts, &updated_payload);
 
-    let http = reqwest::Client::new();
+    let http = match req.app_data::<web::Data<reqwest::Client>>() {
+        Some(c) => c.clone(),
+        None => {
+            return HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": "HTTP client unavailable"}));
+        }
+    };
     let result = http
         .post(&url)
         .header("X-CipherPay-Signature", &signature)

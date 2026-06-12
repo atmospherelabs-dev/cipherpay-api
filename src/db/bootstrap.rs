@@ -1525,12 +1525,34 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
         .await
         .ok();
 
+
+
     // Track last token-based login for auth metadata
     sqlx::query("ALTER TABLE merchants ADD COLUMN last_token_login_at TEXT")
         .execute(&pool)
         .await
         .ok();
 
+        sqlx::query(
+          "CREATE TABLE IF NOT EXISTS invoice_payments (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              invoice_id TEXT NOT NULL REFERENCES invoices(id),
+              txid TEXT NOT NULL,
+              zatoshis INTEGER NOT NULL,
+              created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+              UNIQUE(invoice_id, txid)
+          )",
+      )
+      .execute(&pool)
+      .await
+      .ok();
+  
+      sqlx::query("CREATE INDEX IF NOT EXISTS idx_invoice_payments_invoice ON invoice_payments(invoice_id)")
+          .execute(&pool)
+          .await
+          .ok();
+
+        
     validate_schema_state(&pool).await?;
     tracing::info!("Database ready (SQLite)");
     Ok(())

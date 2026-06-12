@@ -218,6 +218,15 @@ pub async fn mark_detected(
     txid: &str,
     received_zatoshis: i64,
 ) -> anyhow::Result<bool> {
+    sqlx::query(
+        "INSERT OR IGNORE INTO invoice_payments (invoice_id, txid, zatoshis) VALUES (?, ?, ?)",
+    )
+    .bind(invoice_id)
+    .bind(txid)
+    .bind(received_zatoshis)
+    .execute(pool)
+    .await?;
+
     let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let new_expires = (Utc::now() + Duration::minutes(30))
         .format("%Y-%m-%dT%H:%M:%SZ")
@@ -314,6 +323,15 @@ pub async fn mark_underpaid(
     received_zatoshis: i64,
     txid: &str,
 ) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT OR IGNORE INTO invoice_payments (invoice_id, txid, zatoshis) VALUES (?, ?, ?)",
+    )
+    .bind(invoice_id)
+    .bind(txid)
+    .bind(received_zatoshis)
+    .execute(pool)
+    .await?;
+
     let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let new_expires = (Utc::now() + Duration::minutes(10))
         .format("%Y-%m-%dT%H:%M:%SZ")
@@ -335,45 +353,53 @@ pub async fn mark_underpaid(
     Ok(())
 }
 
-/// Add additional zatoshis to an underpaid invoice and extend its expiry.
+/// Record a payment against an invoice, idempotent on (invoice_id, txid).
+/// If this txid was already recorded for this invoice, the INSERT is ignored
+/// and the existing total is returned unchanged — preventing double-counting
+/// after scanner restarts or seen_txids eviction.
 /// Returns the new total received_zatoshis.
-/// Only operates on invoices in 'underpaid' status to prevent race conditions.
-pub async fn accumulate_payment(
+pub async fn record_payment(
     pool: &SqlitePool,
     invoice_id: &str,
-    additional_zatoshis: i64,
+    txid: &str,
+    zatoshis: i64,
 ) -> anyhow::Result<i64> {
+    let result = sqlx::query(
+        "INSERT OR IGNORE INTO invoice_payments (invoice_id, txid, zatoshis) VALUES (?, ?, ?)",
+    )
+    .bind(invoice_id)
+    .bind(txid)
+    .bind(zatoshis)
+    .execute(pool)
+    .await?;
+
+    if result.rows_affected() == 0 {
+        tracing::debug!(invoice_id, txid, "Payment txid already recorded, skipping");
+    } else {
+        tracing::info!(invoice_id, txid, zatoshis, "Payment recorded");
+    }
+
+    let total: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(zatoshis), 0) FROM invoice_payments WHERE invoice_id = ?",
+    )
+    .bind(invoice_id)
+    .fetch_one(pool)
+    .await?;
+
     let new_expires = (Utc::now() + Duration::minutes(10))
         .format("%Y-%m-%dT%H:%M:%SZ")
         .to_string();
-    let row: Option<(i64,)> = sqlx::query_as(
-        "UPDATE invoices SET received_zatoshis = received_zatoshis + ?, expires_at = ?
-         WHERE id = ? AND status = 'underpaid' RETURNING received_zatoshis",
+    sqlx::query(
+        "UPDATE invoices SET received_zatoshis = ?, expires_at = ?
+         WHERE id = ? AND status IN ('pending', 'underpaid')",
     )
-    .bind(additional_zatoshis)
+    .bind(total)
     .bind(&new_expires)
     .bind(invoice_id)
-    .fetch_optional(pool)
+    .execute(pool)
     .await?;
 
-    match row {
-        Some((total,)) => {
-            tracing::info!(
-                invoice_id,
-                additional_zatoshis,
-                total,
-                "Payment accumulated"
-            );
-            Ok(total)
-        }
-        None => {
-            tracing::warn!(
-                invoice_id,
-                "accumulate_payment: invoice not in underpaid status, skipping"
-            );
-            anyhow::bail!("invoice not in underpaid status")
-        }
-    }
+    Ok(total)
 }
 
 pub async fn update_refund_address(

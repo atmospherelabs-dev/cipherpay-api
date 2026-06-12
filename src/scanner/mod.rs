@@ -569,7 +569,7 @@ async fn scan_blocks(
                 }
 
                 let new_received = if invoice.status == "underpaid" {
-                    invoices::accumulate_payment(pool, invoice_id, *tx_total).await?
+                    invoices::record_payment(pool, invoice_id, txid, *tx_total).await?
                 } else {
                     *tx_total
                 };

@@ -77,7 +77,7 @@ pub(super) async fn apply_mempool_invoice_totals(
         }
 
         let new_received = if invoice.status == "underpaid" {
-            invoices::accumulate_payment(pool, invoice_id, *tx_total).await?
+            invoices::record_payment(pool, invoice_id, txid, *tx_total).await?
         } else {
             *tx_total
         };

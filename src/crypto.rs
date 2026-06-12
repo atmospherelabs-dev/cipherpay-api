@@ -101,9 +101,9 @@ pub fn blind_index(value: &str, key_hex: &str) -> String {
 
     use hmac::{Hmac, Mac};
     type HmacSha256 = Hmac<Sha256>;
-    let key_bytes = key_hex.as_bytes();
+    let key_bytes = hex::decode(key_hex).unwrap_or_else(|_| key_hex.as_bytes().to_vec());
     let mut mac =
-        <HmacSha256 as Mac>::new_from_slice(key_bytes).expect("HMAC accepts any key length");
+        <HmacSha256 as Mac>::new_from_slice(&key_bytes).expect("HMAC accepts any key length");
     mac.update(normalized.as_bytes());
     hex::encode(mac.finalize().into_bytes())
 }
