@@ -15,6 +15,7 @@ pub struct SetPinRequest {
 #[derive(Debug, Deserialize)]
 pub struct VerifyPinRequest {
     pub pin: String,
+    pub merchant_id: Option<String>,
 }
 
 /// PUT /api/merchants/me/pos-pin — set or change POS PIN (requires full dashboard auth)
@@ -104,60 +105,25 @@ pub async fn create_pos_session(
         }));
     }
 
-    // If caller already has a valid full session, resolve merchant from that
-    // to identify which merchant this POS belongs to.
+    // Identify the merchant: either from an existing dashboard session
+    // or from the merchant_id provided by the device (set during POS setup).
     let merchant = if let Some(m) = super::auth::resolve_session(&req, &pool).await {
         m
     } else {
-        // No session cookie — the POS is accessed standalone.
-        // Try to find a merchant by PIN hash across all merchants.
-        // For v1 (single POS per device), this works. Multi-tenant would
-        // need a merchant identifier in the request.
-        let pin_hash = merchants::hash_key(&body.pin);
-        match sqlx::query_scalar::<_, String>(
-            "SELECT id FROM merchants WHERE pos_pin_hash = ?",
-        )
-        .bind(&pin_hash)
-        .fetch_optional(pool.get_ref())
-        .await
-        {
-            Ok(Some(mid)) => {
-                match merchants::get_merchant_by_id(pool.get_ref(), &mid, &config.encryption_key)
-                    .await
-                {
-                    Ok(Some(m)) => m,
-                    _ => {
-                        return HttpResponse::Unauthorized().json(serde_json::json!({
-                            "error": "Invalid PIN"
-                        }));
-                    }
-                }
-            }
-            Ok(None) => {
-                // No merchant found with this PIN — check if any merchant
-                // has a PIN set at all. If not, signal that POS PIN is not configured.
-                let any_pin_set: bool = sqlx::query_scalar::<_, i64>(
-                    "SELECT COUNT(*) FROM merchants WHERE pos_pin_hash IS NOT NULL",
-                )
-                .fetch_one(pool.get_ref())
-                .await
-                .unwrap_or(0)
-                    > 0;
-
-                if !any_pin_set {
-                    return HttpResponse::BadRequest().json(serde_json::json!({
-                        "error": "pos_pin_not_set"
-                    }));
-                }
-
-                return HttpResponse::Unauthorized().json(serde_json::json!({
-                    "error": "Invalid PIN"
+        let mid = match &body.merchant_id {
+            Some(id) if !id.is_empty() => id.clone(),
+            _ => {
+                return HttpResponse::BadRequest().json(serde_json::json!({
+                    "error": "merchant_id is required for standalone POS login"
                 }));
             }
-            Err(e) => {
-                tracing::error!(error = %e, "POS PIN lookup failed");
-                return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": "Internal error"
+        };
+
+        match merchants::get_merchant_by_id(pool.get_ref(), &mid, &config.encryption_key).await {
+            Ok(Some(m)) => m,
+            _ => {
+                return HttpResponse::Unauthorized().json(serde_json::json!({
+                    "error": "Invalid PIN"
                 }));
             }
         }
