@@ -196,5 +196,31 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
   })
   .await?;
 
+  run_tracked_migration(&pool, "invoice_payments_v2026_06_12", || async {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS invoice_payments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            invoice_id TEXT NOT NULL REFERENCES invoices(id),
+            txid TEXT NOT NULL,
+            zatoshis INTEGER NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            UNIQUE(invoice_id, txid)
+        )",
+    )
+    .execute(&pool)
+    .await
+    .ok();
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_invoice_payments_invoice ON invoice_payments(invoice_id)",
+    )
+    .execute(&pool)
+    .await
+    .ok();
+
+    Ok(())
+})
+.await?;
+
     Ok(pool)
 }
