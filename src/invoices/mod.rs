@@ -251,13 +251,22 @@ pub async fn mark_detected(
 }
 
 /// Returns true if the status actually changed (used to gate webhook dispatch).
-pub async fn mark_confirmed(pool: &SqlitePool, invoice_id: &str) -> anyhow::Result<bool> {
+/// Snapshots the ZEC/fiat rate at confirmation time for accounting.
+pub async fn mark_confirmed(
+    pool: &SqlitePool,
+    invoice_id: &str,
+    confirmed_rate: Option<f64>,
+    confirmed_fiat_amount: Option<f64>,
+) -> anyhow::Result<bool> {
     let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let result = sqlx::query(
-        "UPDATE invoices SET status = 'confirmed', confirmed_at = ?
+        "UPDATE invoices SET status = 'confirmed', confirmed_at = ?,
+         confirmed_rate = ?, confirmed_fiat_amount = ?
          WHERE id = ? AND status = 'detected'",
     )
     .bind(&now)
+    .bind(confirmed_rate)
+    .bind(confirmed_fiat_amount)
     .bind(invoice_id)
     .execute(pool)
     .await?;

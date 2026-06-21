@@ -15,6 +15,7 @@ use crate::billing;
 use crate::config::Config;
 use crate::invoices;
 use crate::invoices::matching;
+use crate::invoices::pricing::PriceService;
 use crate::webhooks;
 
 pub type SeenTxids = Arc<RwLock<HashMap<String, Instant>>>;
@@ -28,7 +29,7 @@ struct KeyCache {
     merchant_ids: Vec<String>,
 }
 
-pub async fn run(config: Config, pool: SqlitePool, scanner_http: reqwest::Client, webhook_http: reqwest::Client) {
+pub async fn run(config: Config, pool: SqlitePool, scanner_http: reqwest::Client, webhook_http: reqwest::Client, price_service: PriceService) {
     // scanner_http: internal client for CipherScan API calls (carries X-Service-Key)
     // webhook_http: outbound client for merchant webhooks (no service keys, no redirects)
     let http = scanner_http;
@@ -155,6 +156,7 @@ pub async fn run(config: Config, pool: SqlitePool, scanner_http: reqwest::Client
     let block_webhook_http = webhook_http;
     let block_seen = seen_txids.clone();
     let block_cb = circuit_breaker.clone();
+    let block_prices = price_service.clone();
 
     let block_handle = tokio::spawn(async move {
         let mut key_cache: Option<KeyCache> = None;
@@ -178,6 +180,7 @@ pub async fn run(config: Config, pool: SqlitePool, scanner_http: reqwest::Client
                 &block_seen,
                 &last_height,
                 &mut key_cache,
+                &block_prices,
             )
             .await
             {
@@ -428,6 +431,29 @@ async fn process_ws_mempool_tx(
     Ok(())
 }
 
+/// Fetch the current ZEC/fiat rate for the invoice's currency and compute
+/// the confirmed fiat amount from `price_zec`. Returns `(None, None)` if
+/// the rate fetch fails — we never block confirmation on price data.
+async fn confirmed_fiat(
+    price_service: &PriceService,
+    invoice: &invoices::Invoice,
+) -> (Option<f64>, Option<f64>) {
+    let rates = match price_service.get_rates().await {
+        Ok(r) => r,
+        Err(_) => return (None, None),
+    };
+    let cur = invoice.currency.as_deref().unwrap_or("EUR");
+    let rate = match cur {
+        "USD" => rates.zec_usd,
+        "GBP" => rates.zec_gbp,
+        "CAD" => rates.zec_cad,
+        "BRL" => rates.zec_brl,
+        _ => rates.zec_eur,
+    };
+    let fiat = invoice.price_zec * rate;
+    (Some(rate), Some(fiat))
+}
+
 /// Max blocks to process per iteration. Keeps each call short so the
 /// confirmation check at the top runs every ~block_interval seconds.
 const MAX_BLOCKS_PER_SCAN: u64 = 100;
@@ -440,6 +466,7 @@ async fn scan_blocks(
     seen: &SeenTxids,
     last_height: &Arc<RwLock<Option<u64>>>,
     key_cache: &mut Option<KeyCache>,
+    price_service: &PriceService,
 ) -> anyhow::Result<()> {
     let pending = invoices::get_pending_invoices(pool).await?;
 
@@ -454,7 +481,8 @@ async fn scan_blocks(
             if let Some(txid) = &invoice.detected_txid {
                 match blocks::check_tx_confirmed(http, &config.cipherscan_api_url, txid).await {
                     Ok(true) => {
-                        let changed = invoices::mark_confirmed(pool, &invoice.id).await?;
+                        let (conf_rate, conf_fiat) = confirmed_fiat(price_service, invoice).await;
+                        let changed = invoices::mark_confirmed(pool, &invoice.id, conf_rate, conf_fiat).await?;
                         if changed {
                             let overpaid =
                                 invoice.received_zatoshis > invoice.price_zatoshis + 1000;
@@ -583,7 +611,8 @@ async fn scan_blocks(
                         invoices::mark_detected(pool, invoice_id, txid, new_received).await?;
                     if detected {
                         metrics::global().record_payment_detected();
-                        let confirmed = invoices::mark_confirmed(pool, invoice_id).await?;
+                        let (conf_rate, conf_fiat) = confirmed_fiat(price_service, invoice).await;
+                        let confirmed = invoices::mark_confirmed(pool, invoice_id, conf_rate, conf_fiat).await?;
                         if confirmed {
                             let overpaid = new_received > invoice.price_zatoshis + 1000;
                             spawn_payment_webhook(

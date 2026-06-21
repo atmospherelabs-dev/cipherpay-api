@@ -222,5 +222,40 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
 })
 .await?;
 
+
+
+run_tracked_migration(&pool, "accounting_v2026_06_21", || async {
+  for sql in &[
+      "ALTER TABLE invoices ADD COLUMN confirmed_rate REAL",
+      "ALTER TABLE invoices ADD COLUMN confirmed_fiat_amount REAL",
+  ] {
+      sqlx::query(sql).execute(&pool).await.ok();
+  }
+
+  sqlx::query(
+      "CREATE TABLE IF NOT EXISTS ledger_tokens (
+          id TEXT PRIMARY KEY,
+          merchant_id TEXT NOT NULL REFERENCES merchants(id) ON DELETE CASCADE,
+          label TEXT NOT NULL DEFAULT '',
+          expires_at TEXT,
+          created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+          revoked_at TEXT
+      )",
+  )
+  .execute(&pool)
+  .await
+  .ok();
+
+  sqlx::query(
+      "CREATE INDEX IF NOT EXISTS idx_ledger_tokens_merchant ON ledger_tokens(merchant_id)",
+  )
+  .execute(&pool)
+  .await
+  .ok();
+
+  Ok(())
+})
+.await?;
+
     Ok(pool)
 }

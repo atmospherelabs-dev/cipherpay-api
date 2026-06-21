@@ -119,8 +119,9 @@ async fn main() -> anyhow::Result<()> {
     let scanner_config = config.clone();
     let scanner_pool = pool.clone();
     let scanner_webhook_http = http_client.clone();
+    let scanner_prices = price_service.clone();
     tokio::spawn(async move {
-        scanner::run(scanner_config, scanner_pool, scanner_client, scanner_webhook_http).await;
+        scanner::run(scanner_config, scanner_pool, scanner_client, scanner_webhook_http, scanner_prices).await;
     });
 
     let retry_pool = pool.clone();

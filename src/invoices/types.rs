@@ -40,6 +40,8 @@ pub struct Invoice {
     pub payment_link_id: Option<String>,
     pub is_donation: i32,
     pub campaign_counted: i32,
+    pub confirmed_rate: Option<f64>,
+    pub confirmed_fiat_amount: Option<f64>,
 }
 
 #[derive(Debug, Serialize, FromRow)]

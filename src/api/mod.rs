@@ -101,6 +101,9 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                     )
                     .route("/me/delete", web::post().to(billing_routes::delete_account))
                     .route("/me/webhooks", web::get().to(auth::my_webhooks))
+                    .route("/me/ledger-tokens", web::get().to(invoice_routes::list_ledger_tokens))
+                    .route("/me/ledger-tokens", web::post().to(invoice_routes::create_ledger_token))
+                    .route("/me/ledger-tokens/{token_id}", web::delete().to(invoice_routes::revoke_ledger_token))
                     .route("/me/webhooks/{id}/retry", web::post().to(auth::retry_webhook))
                     .route("/me/x402/history", web::get().to(x402::history))
                     .route("/me/sessions", web::get().to(sessions::history))
@@ -214,6 +217,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             // Invoice endpoints (API key auth)
             .route("/invoices", web::post().to(invoices::create))
             .route("/invoices", web::get().to(invoice_routes::list_invoices))
+            .route("/invoices/export/csv", web::get().to(invoice_routes::export_csv))
             .route(
                 "/invoices/lookup/{memo_code}",
                 web::get().to(invoice_routes::lookup_by_memo),
@@ -241,6 +245,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 web::patch().to(invoice_routes::update_refund_address),
             )
             .route("/invoices/{id}/qr", web::get().to(invoice_routes::qr_code))
+            // Shared ledger (public, token-auth)
+            .route("/ledger/{token}", web::get().to(invoice_routes::ledger_by_token))
             // Ticket endpoints
             .route(
                 "/tickets/invoice/{invoice_id}",
