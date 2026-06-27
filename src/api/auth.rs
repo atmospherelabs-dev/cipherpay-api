@@ -196,7 +196,8 @@ pub async fn my_invoices(req: HttpRequest, pool: web::Data<SqlitePool>) -> HttpR
          confirmed_at, refunded_at, refund_txid, expires_at, purge_after, created_at,
          orchard_receiver_hex, diversifier_index,
          price_zatoshis, received_zatoshis,
-         payment_link_id, is_donation, campaign_counted
+         payment_link_id, is_donation, campaign_counted,
+         confirmed_rate, confirmed_fiat_amount
          FROM invoices WHERE merchant_id = ?
          ORDER BY created_at DESC LIMIT 100",
     )

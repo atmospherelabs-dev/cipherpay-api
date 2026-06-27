@@ -15,7 +15,8 @@ pub async fn get_invoice(pool: &SqlitePool, id: &str) -> anyhow::Result<Option<I
          i.orchard_receiver_hex, i.diversifier_index,
          i.price_zatoshis, i.received_zatoshis,
          i.subscription_id,
-         i.payment_link_id, i.is_donation, i.campaign_counted
+         i.payment_link_id, i.is_donation, i.campaign_counted,
+         i.confirmed_rate, i.confirmed_fiat_amount
          FROM invoices i
          LEFT JOIN merchants m ON m.id = i.merchant_id
          WHERE i.id = ?",
@@ -44,7 +45,8 @@ pub async fn get_invoice_by_memo(
          i.orchard_receiver_hex, i.diversifier_index,
          i.price_zatoshis, i.received_zatoshis,
          i.subscription_id,
-         i.payment_link_id, i.is_donation, i.campaign_counted
+         i.payment_link_id, i.is_donation, i.campaign_counted,
+         i.confirmed_rate, i.confirmed_fiat_amount
          FROM invoices i
          LEFT JOIN merchants m ON m.id = i.merchant_id
          WHERE i.memo_code = ?",
@@ -82,7 +84,8 @@ pub async fn get_pending_invoices(pool: &SqlitePool) -> anyhow::Result<Vec<Invoi
          orchard_receiver_hex, diversifier_index,
          price_zatoshis, received_zatoshis,
          subscription_id,
-         payment_link_id, is_donation, campaign_counted
+         payment_link_id, is_donation, campaign_counted,
+         confirmed_rate, confirmed_fiat_amount
          FROM invoices WHERE status IN ('pending', 'underpaid', 'detected')
          AND expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
     )
