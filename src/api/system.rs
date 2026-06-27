@@ -46,18 +46,24 @@ pub async fn health(
     let scanner_status = snap.status();
     let scan_errors = snap.scan_errors;
     let blocks_behind = snap.blocks_behind();
+    let last_error = m.last_error().await;
 
     if scanner_status == "behind" || (scan_errors > 0 && snap.last_block_height == 0) {
         unhealthy = true;
     } else if scanner_status == "catching_up" || blocks_behind > 5 {
         degraded = true;
     }
-    checks.insert("scanner".into(), serde_json::json!({
+    let mut scanner_json = serde_json::json!({
         "status": scanner_status,
         "blocks_behind": blocks_behind,
         "scan_errors": scan_errors,
         "last_block_height": snap.last_block_height,
-    }));
+    });
+    if let Some((msg, ago_secs)) = last_error {
+        scanner_json["last_error"] = serde_json::json!(msg);
+        scanner_json["last_error_ago_secs"] = serde_json::json!(ago_secs);
+    }
+    checks.insert("scanner".into(), scanner_json);
 
     // 3. Price feed: check if rates are available and fresh
     let price_ok = match price_service.get_rates().await {

@@ -848,8 +848,9 @@ pub async fn scanner_metrics(req: actix_web::HttpRequest) -> actix_web::HttpResp
     let m = crate::scanner::metrics::global();
     let snap = m.snapshot();
     let uptime = m.uptime_secs().await;
+    let last_error = m.last_error().await;
 
-    actix_web::HttpResponse::Ok().json(serde_json::json!({
+    let mut body = serde_json::json!({
         "status": snap.status(),
         "uptime_secs": uptime,
         "blocks_scanned": snap.blocks_scanned,
@@ -861,5 +862,12 @@ pub async fn scanner_metrics(req: actix_web::HttpRequest) -> actix_web::HttpResp
         "scan_errors": snap.scan_errors,
         "last_block_scan_ms": snap.last_block_scan_ms,
         "last_mempool_scan_ms": snap.last_mempool_scan_ms,
-    }))
+    });
+    if let Some((msg, ago_secs)) = last_error {
+        body["last_error"] = serde_json::json!({
+            "message": msg,
+            "seconds_ago": ago_secs,
+        });
+    }
+    actix_web::HttpResponse::Ok().json(body)
 }

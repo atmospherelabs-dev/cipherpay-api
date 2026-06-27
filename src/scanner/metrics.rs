@@ -15,6 +15,7 @@ pub struct ScannerMetrics {
     pub last_block_scan_ms: AtomicU64,
     pub last_mempool_scan_ms: AtomicU64,
     started_at: RwLock<Option<Instant>>,
+    last_error: RwLock<Option<(String, Instant)>>,
 }
 
 impl ScannerMetrics {
@@ -29,6 +30,7 @@ impl ScannerMetrics {
             last_block_scan_ms: AtomicU64::new(0),
             last_mempool_scan_ms: AtomicU64::new(0),
             started_at: RwLock::new(None),
+            last_error: RwLock::new(None),
         }
     }
 
@@ -64,8 +66,17 @@ impl ScannerMetrics {
         self.mempool_txs_checked.fetch_add(count, Ordering::Relaxed);
     }
 
-    pub fn record_scan_error(&self) {
+    pub fn record_scan_error(&self, msg: &str) {
         self.scan_errors.fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut guard) = self.last_error.try_write() {
+            *guard = Some((msg.to_string(), Instant::now()));
+        }
+    }
+
+    pub async fn last_error(&self) -> Option<(String, u64)> {
+        self.last_error.read().await.as_ref().map(|(msg, when)| {
+            (msg.clone(), when.elapsed().as_secs())
+        })
     }
 
     pub fn set_last_block_scan_ms(&self, ms: u64) {

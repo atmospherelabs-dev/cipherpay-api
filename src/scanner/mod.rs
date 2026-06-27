@@ -135,7 +135,7 @@ pub async fn run(config: Config, pool: SqlitePool, scanner_http: reqwest::Client
                         }
                         Err(e) => {
                             mempool_cb.record_failure();
-                            metrics::global().record_scan_error();
+                            metrics::global().record_scan_error(&format!("Mempool: {e}"));
                             tracing::error!(error = %e, "Mempool scan error");
                         }
                     }
@@ -190,7 +190,7 @@ pub async fn run(config: Config, pool: SqlitePool, scanner_http: reqwest::Client
                 }
                 Err(e) => {
                     block_cb.record_failure();
-                    metrics::global().record_scan_error();
+                    metrics::global().record_scan_error(&format!("Block: {e}"));
                     tracing::error!(error = %e, "Block scan error");
                 }
             }
