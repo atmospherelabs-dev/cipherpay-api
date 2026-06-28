@@ -70,23 +70,48 @@ pub async fn get_chain_height(http: &reqwest::Client, api_url: &str) -> anyhow::
         .ok_or_else(|| anyhow::anyhow!("No block height in response"))
 }
 
-/// Fetches txids from a single block.
+const BLOCK_FETCH_RETRIES: u32 = 3;
+const BLOCK_FETCH_BASE_DELAY_MS: u64 = 1000;
+
+/// Fetches txids from a single block with retry + exponential backoff.
 async fn fetch_single_block_txids(
     http: &reqwest::Client,
     api_url: &str,
     height: u64,
 ) -> anyhow::Result<Vec<String>> {
     let url = format!("{}/api/block/{}", api_url, height);
-    let resp: serde_json::Value = http
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to fetch block {}: {}", height, e))?
-        .json()
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to parse block {} response: {}", height, e))?;
+    let mut last_err = None;
 
-    extract_block_txids(&resp, height)
+    for attempt in 0..BLOCK_FETCH_RETRIES {
+        if attempt > 0 {
+            let delay = BLOCK_FETCH_BASE_DELAY_MS * (1 << (attempt - 1));
+            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+        }
+
+        let resp = match http.get(&url).send().await {
+            Ok(r) => match r.json::<serde_json::Value>().await {
+                Ok(v) => v,
+                Err(e) => {
+                    last_err = Some(anyhow::anyhow!("Failed to parse block {} response: {}", height, e));
+                    continue;
+                }
+            },
+            Err(e) => {
+                last_err = Some(anyhow::anyhow!("Failed to fetch block {}: {}", height, e));
+                continue;
+            }
+        };
+
+        match extract_block_txids(&resp, height) {
+            Ok(txids) => return Ok(txids),
+            Err(e) => {
+                last_err = Some(e);
+                continue;
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("Block {} fetch failed after retries", height)))
 }
 
 fn extract_block_txids(resp: &serde_json::Value, height: u64) -> anyhow::Result<Vec<String>> {
@@ -109,12 +134,22 @@ fn extract_block_txids(resp: &serde_json::Value, height: u64) -> anyhow::Result<
             height
         ));
     }
+    // Every block above genesis has at least a coinbase transaction
+    if txids.is_empty() && height > 0 {
+        return Err(anyhow::anyhow!(
+            "Block {} returned empty transaction list (expected at least coinbase)",
+            height
+        ));
+    }
     Ok(txids)
 }
 
 const BLOCK_FETCH_BATCH_SIZE: usize = 10;
 
 /// Fetches transaction IDs from a range of blocks in parallel batches.
+/// Individual block failures are isolated — other blocks in the batch still
+/// get processed. Returns an error only if ANY block failed (so the caller
+/// knows not to advance last_height past the failed block).
 pub async fn fetch_block_txids(
     http: &reqwest::Client,
     api_url: &str,
@@ -123,16 +158,31 @@ pub async fn fetch_block_txids(
 ) -> anyhow::Result<Vec<String>> {
     let heights: Vec<u64> = (start_height..=end_height).collect();
     let mut all_txids = Vec::new();
+    let mut first_failed_height: Option<u64> = None;
+    let mut last_error: Option<anyhow::Error> = None;
 
     for chunk in heights.chunks(BLOCK_FETCH_BATCH_SIZE) {
         let futures: Vec<_> = chunk
             .iter()
-            .map(|&h| fetch_single_block_txids(http, api_url, h))
+            .map(|&h| async move { (h, fetch_single_block_txids(http, api_url, h).await) })
             .collect();
         let results = futures::future::join_all(futures).await;
-        for txids in results {
-            all_txids.extend(txids?);
+        for (h, result) in results {
+            match result {
+                Ok(txids) => all_txids.extend(txids),
+                Err(e) => {
+                    tracing::error!(height = h, error = %e, "Block fetch failed after retries");
+                    if first_failed_height.is_none() {
+                        first_failed_height = Some(h);
+                    }
+                    last_error = Some(e);
+                }
+            }
         }
+    }
+
+    if let Some(e) = last_error {
+        return Err(e);
     }
 
     Ok(all_txids)
@@ -179,5 +229,25 @@ mod tests {
 
         let err = extract_block_txids(&resp, 100).unwrap_err();
         assert!(err.to_string().contains("missing transaction list"));
+    }
+
+    #[test]
+    fn errors_when_transaction_list_empty() {
+        let resp = serde_json::json!({
+            "transactions": []
+        });
+
+        let err = extract_block_txids(&resp, 100).unwrap_err();
+        assert!(err.to_string().contains("empty transaction list"));
+    }
+
+    #[test]
+    fn allows_empty_genesis_block() {
+        let resp = serde_json::json!({
+            "transactions": []
+        });
+
+        let txids = extract_block_txids(&resp, 0).unwrap();
+        assert!(txids.is_empty());
     }
 }
