@@ -228,7 +228,10 @@ pub async fn info(
             serde_json::json!(format!("{}/link/{}", frontend_url, link.slug));
     }
 
-    HttpResponse::Ok().json(response)
+    HttpResponse::Ok()
+        .insert_header(("Access-Control-Allow-Origin", "*"))
+        .insert_header(("Cache-Control", "public, max-age=30"))
+        .json(response)
 }
 
 /// Resolve a payment link by slug and create an invoice.
