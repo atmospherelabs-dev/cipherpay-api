@@ -700,10 +700,17 @@ async fn on_invoice_confirmed(
     config: &Config,
     invoice: &invoices::Invoice,
 ) {
-    // Donation campaign tracking: increment total_raised exactly once per invoice
+    // Donation campaign tracking: increment total_raised exactly once per invoice.
+    // For donations, use actual received ZEC converted at confirmation rate — there's
+    // no overpay/underpay concept, the received amount IS the donation.
     if invoice.is_donation == 1 && invoice.campaign_counted == 0 {
         if let Some(ref link_id) = invoice.payment_link_id {
-            let amount_cents = (invoice.amount.unwrap_or(invoice.price_eur) * 100.0) as i64;
+            let amount_cents = if let Some(rate) = invoice.confirmed_rate {
+                let received_zec = invoice.received_zatoshis as f64 / 100_000_000.0;
+                (received_zec * rate * 100.0) as i64
+            } else {
+                (invoice.amount.unwrap_or(invoice.price_eur) * 100.0) as i64
+            };
             // Atomic: set campaign_counted=1 only if still 0 (belt-and-suspenders idempotency)
             let marked = sqlx::query(
                 "UPDATE invoices SET campaign_counted = 1 WHERE id = ? AND campaign_counted = 0",
