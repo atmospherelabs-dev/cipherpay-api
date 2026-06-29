@@ -13,15 +13,18 @@ pub(super) enum MempoolSource {
 }
 
 type InvoiceTotals = HashMap<String, (invoices::Invoice, i64)>;
+pub(super) type CampaignTotals = HashMap<String, (crate::payment_links::CampaignAddress, i64)>;
 
 pub(super) fn collect_mempool_invoice_totals(
     txid: &str,
     raw_hex: &str,
     cached_keys: &[(String, super::decrypt::CachedKeys)],
     invoice_index: &matching::InvoiceIndex<'_>,
+    campaign_addresses: &[crate::payment_links::CampaignAddress],
     source: MempoolSource,
-) -> InvoiceTotals {
+) -> (InvoiceTotals, CampaignTotals) {
     let mut invoice_totals = HashMap::new();
+    let mut campaign_totals: CampaignTotals = HashMap::new();
 
     for (_merchant_id, keys) in cached_keys {
         match super::decrypt::try_decrypt_with_keys(raw_hex, keys) {
@@ -46,6 +49,11 @@ pub(super) fn collect_mempool_invoice_totals(
                             .entry(invoice.id.clone())
                             .or_insert((invoice.clone(), 0));
                         entry.1 += output.amount_zatoshis as i64;
+                    } else if let Some(campaign) = campaign_addresses.iter().find(|c| c.campaign_address_hex == recipient_hex) {
+                        let entry = campaign_totals
+                            .entry(campaign.link_id.clone())
+                            .or_insert((campaign.clone(), 0));
+                        entry.1 += output.amount_zatoshis as i64;
                     }
                 }
             }
@@ -53,7 +61,7 @@ pub(super) fn collect_mempool_invoice_totals(
         }
     }
 
-    invoice_totals
+    (invoice_totals, campaign_totals)
 }
 
 /// Returns list of invoice IDs that were newly marked as detected (for fee scanning).
@@ -119,4 +127,55 @@ pub(super) async fn apply_mempool_invoice_totals(
     }
 
     Ok(newly_detected)
+}
+
+/// Attribute direct (off-invoice) donations to campaign catch-all addresses.
+/// Uses INSERT OR IGNORE for idempotency — safe from both mempool and block paths.
+pub(super) async fn apply_campaign_totals(
+    pool: &SqlitePool,
+    txid: &str,
+    campaign_totals: &CampaignTotals,
+    price_service: &crate::invoices::pricing::PriceService,
+) {
+    for (link_id, (campaign, zat_total)) in campaign_totals {
+        if *zat_total <= 0 {
+            continue;
+        }
+        let zec_amount = *zat_total as f64 / 100_000_000.0;
+        let rates = price_service.get_rates().await;
+        let cents = match rates {
+            Ok(r) => {
+                let rate = match campaign.currency.as_str() {
+                    "USD" => r.zec_usd,
+                    "GBP" => r.zec_gbp,
+                    "CAD" => r.zec_cad,
+                    "BRL" => r.zec_brl,
+                    _ => r.zec_eur,
+                };
+                (zec_amount * rate * 100.0) as i64
+            }
+            Err(_) => {
+                tracing::warn!(link_id, "No price data for direct donation, skipping");
+                continue;
+            }
+        };
+        match crate::payment_links::record_campaign_donation(
+            pool, link_id, txid, *zat_total, cents, &campaign.currency,
+        ).await {
+            Ok(true) => {
+                tracing::info!(
+                    link_id,
+                    txid,
+                    zatoshis = zat_total,
+                    fiat_cents = cents,
+                    currency = %campaign.currency,
+                    "Direct donation attributed to campaign"
+                );
+            }
+            Ok(false) => {}
+            Err(e) => {
+                tracing::error!(link_id, error = %e, "Failed to record direct campaign donation");
+            }
+        }
+    }
 }

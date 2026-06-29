@@ -1409,9 +1409,33 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
         "ALTER TABLE invoices ADD COLUMN payment_link_id TEXT",
         "ALTER TABLE invoices ADD COLUMN is_donation INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE invoices ADD COLUMN campaign_counted INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE payment_links ADD COLUMN campaign_address_hex TEXT",
+        "ALTER TABLE payment_links ADD COLUMN campaign_diversifier_index INTEGER",
+        "ALTER TABLE payment_links ADD COLUMN campaign_address_ua TEXT",
     ] {
         sqlx::query(sql).execute(&pool).await.ok();
     }
+
+    // Direct (off-invoice) campaign donation tracking
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS campaign_donations (
+            id TEXT PRIMARY KEY,
+            link_id TEXT NOT NULL REFERENCES payment_links(id),
+            txid TEXT NOT NULL,
+            zatoshis INTEGER NOT NULL,
+            fiat_cents INTEGER NOT NULL,
+            currency TEXT NOT NULL DEFAULT 'USD',
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        )"
+    )
+    .execute(&pool)
+    .await
+    .ok();
+
+    sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_donations_txid_link ON campaign_donations(txid, link_id)")
+        .execute(&pool)
+        .await
+        .ok();
 
     // Make price_id nullable for donation mode (donation links have no price).
     // SQLite requires table recreation to change column constraints.

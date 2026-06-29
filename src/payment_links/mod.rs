@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, SqlitePool};
 use uuid::Uuid;
 
-const PL_COLUMNS: &str = "id, merchant_id, price_id, slug, name, success_url, metadata, active, total_created, mode, donation_config, total_raised, created_at";
+const PL_COLUMNS: &str = "id, merchant_id, price_id, slug, name, success_url, metadata, active, total_created, mode, donation_config, total_raised, created_at, campaign_address_hex, campaign_diversifier_index, campaign_address_ua";
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct PaymentLink {
@@ -19,6 +19,9 @@ pub struct PaymentLink {
     pub donation_config: Option<String>,
     pub total_raised: i64,
     pub created_at: String,
+    pub campaign_address_hex: Option<String>,
+    pub campaign_diversifier_index: Option<i64>,
+    pub campaign_address_ua: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -253,6 +256,7 @@ pub async fn create_payment_link(
 pub async fn create_donation_link(
     pool: &SqlitePool,
     merchant_id: &str,
+    merchant_ufvk: &str,
     req: &CreateDonationLinkRequest,
 ) -> anyhow::Result<PaymentLink> {
     if req.name.trim().is_empty() {
@@ -300,9 +304,12 @@ pub async fn create_donation_link(
     let slug_source = req.campaign_name.as_deref().unwrap_or(&req.name);
     let slug = generate_donation_slug(pool, slug_source).await?;
 
+    let div_index = crate::merchants::next_diversifier_index(pool, merchant_id).await?;
+    let derived = crate::addresses::derive_invoice_address(merchant_ufvk, div_index)?;
+
     sqlx::query(
-        "INSERT INTO payment_links (id, merchant_id, slug, name, success_url, mode, donation_config)
-         VALUES (?, ?, ?, ?, ?, 'donation', ?)"
+        "INSERT INTO payment_links (id, merchant_id, slug, name, success_url, mode, donation_config, campaign_address_hex, campaign_diversifier_index, campaign_address_ua)
+         VALUES (?, ?, ?, ?, ?, 'donation', ?, ?, ?, ?)"
     )
     .bind(&id)
     .bind(merchant_id)
@@ -310,10 +317,13 @@ pub async fn create_donation_link(
     .bind(req.name.trim())
     .bind(&req.success_url)
     .bind(&config_json)
+    .bind(&derived.orchard_receiver_hex)
+    .bind(div_index as i64)
+    .bind(&derived.ua_string)
     .execute(pool)
     .await?;
 
-    tracing::info!(link_id = %id, slug = %slug, "Donation link created");
+    tracing::info!(link_id = %id, slug = %slug, campaign_address = %derived.orchard_receiver_hex, "Donation link created with campaign catch-all address");
 
     get_payment_link(pool, &id)
         .await?
@@ -512,4 +522,69 @@ pub async fn increment_raised(
         .await?;
     tracing::info!(link_id = %id, amount_cents, "Campaign total_raised incremented");
     Ok(())
+}
+
+/// Compact struct for scanner to match unmatched payments against campaign catch-all addresses.
+#[derive(Debug, Clone)]
+pub struct CampaignAddress {
+    pub link_id: String,
+    pub merchant_id: String,
+    pub campaign_address_hex: String,
+    pub currency: String,
+}
+
+/// Load all active donation campaigns that have a catch-all address.
+pub async fn get_active_campaign_addresses(pool: &SqlitePool) -> anyhow::Result<Vec<CampaignAddress>> {
+    let rows: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
+        "SELECT id, merchant_id, campaign_address_hex, donation_config FROM payment_links
+         WHERE mode = 'donation' AND active = 1 AND campaign_address_hex IS NOT NULL"
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows.into_iter().map(|(id, mid, addr, config_json)| {
+        let currency = config_json
+            .and_then(|c| serde_json::from_str::<DonationConfig>(&c).ok())
+            .map(|c| c.currency)
+            .unwrap_or_else(|| "USD".to_string());
+        CampaignAddress {
+            link_id: id,
+            merchant_id: mid,
+            campaign_address_hex: addr,
+            currency,
+        }
+    }).collect())
+}
+
+/// Record a direct (off-invoice) donation and atomically increment campaign total.
+/// Uses INSERT OR IGNORE on (txid, link_id) for idempotency — safe to call from
+/// both mempool and block paths without double-counting.
+pub async fn record_campaign_donation(
+    pool: &SqlitePool,
+    link_id: &str,
+    txid: &str,
+    zatoshis: i64,
+    fiat_cents: i64,
+    currency: &str,
+) -> anyhow::Result<bool> {
+    let id = Uuid::new_v4().to_string();
+    let result = sqlx::query(
+        "INSERT OR IGNORE INTO campaign_donations (id, link_id, txid, zatoshis, fiat_cents, currency)
+         VALUES (?, ?, ?, ?, ?, ?)"
+    )
+    .bind(&id)
+    .bind(link_id)
+    .bind(txid)
+    .bind(zatoshis)
+    .bind(fiat_cents)
+    .bind(currency)
+    .execute(pool)
+    .await?;
+
+    if result.rows_affected() > 0 {
+        increment_raised(pool, link_id, fiat_cents).await?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
 }

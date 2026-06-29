@@ -46,7 +46,7 @@ pub async fn create_donation(
         return HttpResponse::BadRequest().json(e.to_json());
     }
 
-    match payment_links::create_donation_link(pool.get_ref(), &merchant.id, &body).await {
+    match payment_links::create_donation_link(pool.get_ref(), &merchant.id, &merchant.ufvk, &body).await {
         Ok(link) => HttpResponse::Created().json(link_response(&link)),
         Err(e) => {
             tracing::error!(error = %e, "Failed to create donation link");
@@ -223,6 +223,9 @@ pub async fn info(
         }
         response["donate_url"] =
             serde_json::json!(format!("{}/en/donate/{}", frontend_url, link.slug));
+        if let Some(ref ua) = link.campaign_address_ua {
+            response["campaign_address"] = serde_json::json!(ua);
+        }
     } else {
         response["checkout_url"] =
             serde_json::json!(format!("{}/link/{}", frontend_url, link.slug));

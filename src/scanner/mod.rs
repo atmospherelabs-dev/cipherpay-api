@@ -74,6 +74,7 @@ pub async fn run(config: Config, pool: SqlitePool, scanner_http: reqwest::Client
     let mempool_webhook_http = webhook_http.clone();
     let mempool_seen = seen_txids.clone();
     let mempool_cb = circuit_breaker.clone();
+    let mempool_price_service = price_service.clone();
     let has_ws = ws_rx.is_some();
 
     let mempool_handle = tokio::spawn(async move {
@@ -111,7 +112,7 @@ pub async fn run(config: Config, pool: SqlitePool, scanner_http: reqwest::Client
                             }
                             if let Err(e) = process_ws_mempool_tx(
                                 &mempool_config, &mempool_pool, &mempool_http, &mempool_webhook_http,
-                                &push, &mut key_cache,
+                                &push, &mut key_cache, &mempool_price_service,
                             ).await {
                                 tracing::error!(error = %e, txid = %push.txid, "WS mempool tx error");
                             }
@@ -128,7 +129,7 @@ pub async fn run(config: Config, pool: SqlitePool, scanner_http: reqwest::Client
                         continue;
                     }
                     let mempool_start = Instant::now();
-                    match scan_mempool(&mempool_config, &mempool_pool, &mempool_http, &mempool_webhook_http, &mempool_seen, &mut key_cache).await {
+                    match scan_mempool(&mempool_config, &mempool_pool, &mempool_http, &mempool_webhook_http, &mempool_seen, &mut key_cache, &mempool_price_service).await {
                         Ok(_) => {
                             mempool_cb.record_success();
                             metrics::global().set_last_mempool_scan_ms(mempool_start.elapsed().as_millis() as u64);
@@ -318,6 +319,7 @@ async fn scan_mempool(
     webhook_http: &reqwest::Client,
     seen: &SeenTxids,
     key_cache: &mut Option<KeyCache>,
+    price_service: &PriceService,
 ) -> anyhow::Result<()> {
     let pending = invoices::get_pending_invoices(pool).await?;
     if pending.is_empty() {
@@ -366,12 +368,17 @@ async fn scan_mempool(
 
     let invoice_index = matching::InvoiceIndex::build(&pending);
 
+    let campaign_addresses = crate::payment_links::get_active_campaign_addresses(pool)
+        .await
+        .unwrap_or_default();
+
     for (txid, raw_hex) in &raw_txs {
-        let invoice_totals = invoice_detection::collect_mempool_invoice_totals(
+        let (invoice_totals, campaign_totals) = invoice_detection::collect_mempool_invoice_totals(
             txid,
             raw_hex,
             cached_keys,
             &invoice_index,
+            &campaign_addresses,
             invoice_detection::MempoolSource::Polling,
         );
         let detected =
@@ -380,6 +387,7 @@ async fn scan_mempool(
         for invoice_id in &detected {
             try_detect_fee(pool, config, raw_hex, invoice_id).await;
         }
+        invoice_detection::apply_campaign_totals(pool, txid, &campaign_totals, price_service).await;
     }
 
     Ok(())
@@ -394,6 +402,7 @@ async fn process_ws_mempool_tx(
     webhook_http: &reqwest::Client,
     push: &ws::MempoolPush,
     key_cache: &mut Option<KeyCache>,
+    price_service: &PriceService,
 ) -> anyhow::Result<()> {
     let pending = invoices::get_pending_invoices(pool).await?;
     if pending.is_empty() {
@@ -409,11 +418,16 @@ async fn process_ws_mempool_tx(
     let cached_keys = refresh_key_cache(key_cache, &merchants, fee_ufvk);
     let invoice_index = matching::InvoiceIndex::build(&pending);
 
-    let invoice_totals = invoice_detection::collect_mempool_invoice_totals(
+    let campaign_addresses = crate::payment_links::get_active_campaign_addresses(pool)
+        .await
+        .unwrap_or_default();
+
+    let (invoice_totals, campaign_totals) = invoice_detection::collect_mempool_invoice_totals(
         &push.txid,
         &push.raw_hex,
         cached_keys,
         &invoice_index,
+        &campaign_addresses,
         invoice_detection::MempoolSource::WebSocket,
     );
     let detected = invoice_detection::apply_mempool_invoice_totals(
@@ -427,6 +441,7 @@ async fn process_ws_mempool_tx(
     for invoice_id in &detected {
         try_detect_fee(pool, config, &push.raw_hex, invoice_id).await;
     }
+    invoice_detection::apply_campaign_totals(pool, &push.txid, &campaign_totals, price_service).await;
 
     Ok(())
 }
@@ -553,6 +568,10 @@ async fn scan_blocks(
 
         let block_invoice_index = matching::InvoiceIndex::build(&pending);
 
+        let campaign_addresses = crate::payment_links::get_active_campaign_addresses(pool)
+            .await
+            .unwrap_or_default();
+
         for txid in &block_txids {
             if seen.read().await.contains_key(txid) {
                 continue;
@@ -565,6 +584,8 @@ async fn scan_blocks(
             };
 
             let mut invoice_totals: HashMap<String, (invoices::Invoice, i64)> = HashMap::new();
+            let mut campaign_totals: HashMap<String, (crate::payment_links::CampaignAddress, i64)> = HashMap::new();
+
             for (_merchant_id, keys) in cached_keys.iter() {
                 if let Ok(outputs) = decrypt::try_decrypt_with_keys(&raw_hex, keys) {
                     for output in &outputs {
@@ -575,6 +596,11 @@ async fn scan_blocks(
                             let entry = invoice_totals
                                 .entry(invoice.id.clone())
                                 .or_insert((invoice.clone(), 0));
+                            entry.1 += output.amount_zatoshis as i64;
+                        } else if let Some(campaign) = campaign_addresses.iter().find(|c| c.campaign_address_hex == recipient_hex) {
+                            let entry = campaign_totals
+                                .entry(campaign.link_id.clone())
+                                .or_insert((campaign.clone(), 0));
                             entry.1 += output.amount_zatoshis as i64;
                         }
                     }
@@ -645,6 +671,8 @@ async fn scan_blocks(
                     );
                 }
             }
+
+            invoice_detection::apply_campaign_totals(pool, txid, &campaign_totals, price_service).await;
 
             seen.write().await.insert(txid.clone(), Instant::now());
         }
