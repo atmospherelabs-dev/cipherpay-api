@@ -294,7 +294,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/admin/system", web::get().to(admin::system))
             .route("/admin/test-email", web::post().to(admin::test_email))
             .route("/admin/rescan-fees", web::post().to(admin::rescan_fees))
-            .route("/admin/scanner-metrics", web::get().to(admin::scanner_metrics)),
+            .route("/admin/scanner-metrics", web::get().to(admin::scanner_metrics))
+            .route("/admin/backfill-campaign-addresses", web::post().to(admin::backfill_campaign_addresses)),
     );
 
     cfg.route(

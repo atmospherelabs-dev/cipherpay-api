@@ -871,3 +871,75 @@ pub async fn scanner_metrics(req: actix_web::HttpRequest) -> actix_web::HttpResp
     }
     actix_web::HttpResponse::Ok().json(body)
 }
+
+/// Backfill campaign catch-all addresses for existing donation links that don't have one.
+pub async fn backfill_campaign_addresses(
+    req: actix_web::HttpRequest,
+    pool: web::Data<SqlitePool>,
+    config: web::Data<crate::config::Config>,
+) -> actix_web::HttpResponse {
+    if !authenticate_admin(&req) {
+        return unauthorized();
+    }
+
+    let links: Vec<(String, String)> = match sqlx::query_as(
+        "SELECT id, merchant_id FROM payment_links WHERE mode = 'donation' AND campaign_address_hex IS NULL"
+    )
+    .fetch_all(pool.get_ref())
+    .await {
+        Ok(rows) => rows,
+        Err(e) => return actix_web::HttpResponse::InternalServerError().json(
+            serde_json::json!({"error": format!("Query failed: {e}")})
+        ),
+    };
+
+    if links.is_empty() {
+        return actix_web::HttpResponse::Ok().json(
+            serde_json::json!({"message": "No donation links need backfilling", "updated": 0})
+        );
+    }
+
+    let mut updated = 0;
+    let mut errors = Vec::new();
+
+    for (link_id, merchant_id) in &links {
+        let merchant = match crate::merchants::get_merchant_by_id(
+            pool.get_ref(), merchant_id, &config.encryption_key,
+        ).await {
+            Ok(Some(m)) => m,
+            Ok(None) => { errors.push(format!("{link_id}: merchant not found")); continue; }
+            Err(e) => { errors.push(format!("{link_id}: {e}")); continue; }
+        };
+
+        let div_index = match crate::merchants::next_diversifier_index(pool.get_ref(), merchant_id).await {
+            Ok(i) => i,
+            Err(e) => { errors.push(format!("{link_id}: diversifier error: {e}")); continue; }
+        };
+
+        let derived = match crate::addresses::derive_invoice_address(&merchant.ufvk, div_index) {
+            Ok(d) => d,
+            Err(e) => { errors.push(format!("{link_id}: address derivation error: {e}")); continue; }
+        };
+
+        match sqlx::query(
+            "UPDATE payment_links SET campaign_address_hex = ?, campaign_diversifier_index = ?, campaign_address_ua = ? WHERE id = ?"
+        )
+        .bind(&derived.orchard_receiver_hex)
+        .bind(div_index as i64)
+        .bind(&derived.ua_string)
+        .bind(link_id)
+        .execute(pool.get_ref())
+        .await {
+            Ok(_) => {
+                tracing::info!(link_id, div_index, "Backfilled campaign address");
+                updated += 1;
+            }
+            Err(e) => errors.push(format!("{link_id}: update error: {e}")),
+        }
+    }
+
+    actix_web::HttpResponse::Ok().json(serde_json::json!({
+        "updated": updated,
+        "errors": errors,
+    }))
+}
