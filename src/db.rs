@@ -257,5 +257,38 @@ run_tracked_migration(&pool, "accounting_v2026_06_21", || async {
 })
 .await?;
 
+run_tracked_migration(&pool, "campaign_catchall_addresses_v2026_06_30", || async {
+    for sql in &[
+        "ALTER TABLE payment_links ADD COLUMN campaign_address_hex TEXT",
+        "ALTER TABLE payment_links ADD COLUMN campaign_diversifier_index INTEGER",
+        "ALTER TABLE payment_links ADD COLUMN campaign_address_ua TEXT",
+    ] {
+        sqlx::query(sql).execute(&pool).await.ok();
+    }
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS campaign_donations (
+            id TEXT PRIMARY KEY,
+            link_id TEXT NOT NULL REFERENCES payment_links(id),
+            txid TEXT NOT NULL,
+            zatoshis INTEGER NOT NULL,
+            fiat_cents INTEGER NOT NULL,
+            currency TEXT NOT NULL DEFAULT 'USD',
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        )"
+    )
+    .execute(&pool)
+    .await
+    .ok();
+
+    sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_donations_txid_link ON campaign_donations(txid, link_id)")
+        .execute(&pool)
+        .await
+        .ok();
+
+    Ok(())
+})
+.await?;
+
     Ok(pool)
 }
