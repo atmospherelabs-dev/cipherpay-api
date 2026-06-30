@@ -290,5 +290,14 @@ run_tracked_migration(&pool, "campaign_catchall_addresses_v2026_06_30", || async
 })
 .await?;
 
+run_tracked_migration(&pool, "campaign_zec_tracking_v2026_06_30", || async {
+    sqlx::query("ALTER TABLE payment_links ADD COLUMN total_raised_zatoshis INTEGER NOT NULL DEFAULT 0")
+        .execute(&pool)
+        .await
+        .ok();
+    Ok(())
+})
+.await?;
+
     Ok(pool)
 }

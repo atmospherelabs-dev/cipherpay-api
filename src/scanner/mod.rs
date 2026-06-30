@@ -722,7 +722,7 @@ async fn on_invoice_confirmed(
             if let Ok(r) = marked {
                 if r.rows_affected() > 0 {
                     if let Err(e) =
-                        crate::payment_links::increment_raised(pool, link_id, amount_cents).await
+                        crate::payment_links::increment_raised(pool, link_id, amount_cents, invoice.received_zatoshis).await
                     {
                         tracing::error!(invoice_id = %invoice.id, error = %e, "Failed to increment campaign total_raised");
                     }

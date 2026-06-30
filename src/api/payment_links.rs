@@ -199,6 +199,7 @@ pub async fn info(
         "mode": link.mode,
         "active": link.active == 1,
         "total_raised": link.total_raised,
+        "total_raised_zatoshis": link.total_raised_zatoshis,
         "total_created": link.total_created,
         "merchant_name": merchant_name,
     });

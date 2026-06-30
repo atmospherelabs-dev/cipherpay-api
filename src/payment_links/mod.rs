@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, SqlitePool};
 use uuid::Uuid;
 
-const PL_COLUMNS: &str = "id, merchant_id, price_id, slug, name, success_url, metadata, active, total_created, mode, donation_config, total_raised, created_at, campaign_address_hex, campaign_diversifier_index, campaign_address_ua";
+const PL_COLUMNS: &str = "id, merchant_id, price_id, slug, name, success_url, metadata, active, total_created, mode, donation_config, total_raised, created_at, campaign_address_hex, campaign_diversifier_index, campaign_address_ua, total_raised_zatoshis";
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct PaymentLink {
@@ -22,6 +22,7 @@ pub struct PaymentLink {
     pub campaign_address_hex: Option<String>,
     pub campaign_diversifier_index: Option<i64>,
     pub campaign_address_ua: Option<String>,
+    pub total_raised_zatoshis: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -509,18 +510,22 @@ pub async fn increment_created(pool: &SqlitePool, id: &str) -> anyhow::Result<()
     Ok(())
 }
 
-/// Atomically increment total_raised by fiat cents. Used when a donation invoice is confirmed.
+/// Atomically increment total_raised by fiat cents and zatoshis.
 pub async fn increment_raised(
     pool: &SqlitePool,
     id: &str,
     amount_cents: i64,
+    zatoshis: i64,
 ) -> anyhow::Result<()> {
-    sqlx::query("UPDATE payment_links SET total_raised = total_raised + ? WHERE id = ?")
-        .bind(amount_cents)
-        .bind(id)
-        .execute(pool)
-        .await?;
-    tracing::info!(link_id = %id, amount_cents, "Campaign total_raised incremented");
+    sqlx::query(
+        "UPDATE payment_links SET total_raised = total_raised + ?, total_raised_zatoshis = total_raised_zatoshis + ? WHERE id = ?"
+    )
+    .bind(amount_cents)
+    .bind(zatoshis)
+    .bind(id)
+    .execute(pool)
+    .await?;
+    tracing::info!(link_id = %id, amount_cents, zatoshis, "Campaign total_raised incremented");
     Ok(())
 }
 
@@ -582,7 +587,7 @@ pub async fn record_campaign_donation(
     .await?;
 
     if result.rows_affected() > 0 {
-        increment_raised(pool, link_id, fiat_cents).await?;
+        increment_raised(pool, link_id, fiat_cents, zatoshis).await?;
         Ok(true)
     } else {
         Ok(false)
