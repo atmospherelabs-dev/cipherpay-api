@@ -610,6 +610,80 @@ async fn resolve_payment(
     }
 }
 
+/// Public endpoint: list active donation campaigns that are opted-in to the directory.
+pub async fn campaigns(
+    pool: web::Data<SqlitePool>,
+    config: web::Data<crate::config::Config>,
+) -> HttpResponse {
+    let rows = match sqlx::query_as::<_, payment_links::PaymentLink>(
+        &format!(
+            "SELECT {} FROM payment_links WHERE mode = 'donation' AND active = 1 AND listed = 1 ORDER BY total_raised_zatoshis DESC, created_at DESC",
+            payment_links::PL_COLUMNS_PUB
+        ),
+    )
+    .fetch_all(pool.get_ref())
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to list campaigns");
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Internal error"
+            }));
+        }
+    };
+
+    let frontend_url = config
+        .frontend_url
+        .as_deref()
+        .unwrap_or("https://cipherpay.app");
+
+    let mut campaigns = Vec::with_capacity(rows.len());
+    for link in &rows {
+        let merchant_name: Option<String> =
+            sqlx::query_scalar("SELECT name FROM merchants WHERE id = ?")
+                .bind(&link.merchant_id)
+                .fetch_optional(pool.get_ref())
+                .await
+                .ok()
+                .flatten();
+
+        let confirmed: i32 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM invoices WHERE payment_link_id = ? AND is_donation = 1 AND campaign_counted = 1",
+        )
+        .bind(&link.id)
+        .fetch_one(pool.get_ref())
+        .await
+        .unwrap_or(0);
+
+        let mut entry = serde_json::json!({
+            "slug": link.slug,
+            "name": link.name,
+            "merchant_name": merchant_name,
+            "total_raised": link.total_raised,
+            "total_raised_zatoshis": link.total_raised_zatoshis,
+            "total_confirmed": confirmed,
+            "donate_url": format!("{}/en/donate/{}", frontend_url, link.slug),
+            "created_at": link.created_at,
+        });
+
+        if let Some(dc) = link.donation_config_parsed() {
+            entry["campaign_name"] = serde_json::json!(dc.campaign_name);
+            entry["mission"] = serde_json::json!(dc.mission);
+            entry["campaign_goal"] = serde_json::json!(dc.campaign_goal);
+            entry["cover_image_url"] = serde_json::json!(dc.cover_image_url);
+            entry["currency"] = serde_json::json!(dc.currency);
+        }
+
+        campaigns.push(entry);
+    }
+
+    HttpResponse::Ok()
+        .insert_header(("Access-Control-Allow-Origin", "*"))
+        .insert_header(("Cache-Control", "public, max-age=60"))
+        .json(campaigns)
+}
+
 fn link_response(link: &payment_links::PaymentLink) -> serde_json::Value {
     let mut resp = serde_json::json!({
         "id": link.id,
@@ -623,6 +697,7 @@ fn link_response(link: &payment_links::PaymentLink) -> serde_json::Value {
         "total_created": link.total_created,
         "mode": link.mode,
         "total_raised": link.total_raised,
+        "listed": link.listed == 1,
         "created_at": link.created_at,
     });
 

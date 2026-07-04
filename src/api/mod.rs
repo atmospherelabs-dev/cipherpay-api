@@ -212,6 +212,12 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 "/donation-links",
                 web::post().to(payment_links::create_donation),
             )
+            // Campaign directory (public)
+            .service(
+                web::resource("/campaigns")
+                    .wrap(Governor::new(&public_read_limit))
+                    .route(web::get().to(payment_links::campaigns)),
+            )
             // Buyer checkout (public)
             .route("/checkout", web::post().to(checkout))
             // Invoice endpoints (API key auth)

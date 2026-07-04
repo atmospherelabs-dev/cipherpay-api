@@ -2,7 +2,9 @@ use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, SqlitePool};
 use uuid::Uuid;
 
-const PL_COLUMNS: &str = "id, merchant_id, price_id, slug, name, success_url, metadata, active, total_created, mode, donation_config, total_raised, created_at, campaign_address_hex, campaign_diversifier_index, campaign_address_ua, total_raised_zatoshis";
+const PL_COLUMNS: &str = "id, merchant_id, price_id, slug, name, success_url, metadata, active, total_created, mode, donation_config, total_raised, created_at, campaign_address_hex, campaign_diversifier_index, campaign_address_ua, total_raised_zatoshis, listed";
+
+pub const PL_COLUMNS_PUB: &str = PL_COLUMNS;
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct PaymentLink {
@@ -23,6 +25,7 @@ pub struct PaymentLink {
     pub campaign_diversifier_index: Option<i64>,
     pub campaign_address_ua: Option<String>,
     pub total_raised_zatoshis: i64,
+    pub listed: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,6 +89,7 @@ pub struct UpdatePaymentLinkRequest {
     pub active: Option<bool>,
     pub metadata: Option<serde_json::Value>,
     pub donation_config: Option<DonationConfig>,
+    pub listed: Option<bool>,
 }
 
 impl PaymentLink {
@@ -400,6 +404,11 @@ pub async fn update_payment_link(
         .map(|m| serde_json::to_string(m).unwrap_or_default())
         .or(existing.metadata);
 
+    let listed = req
+        .listed
+        .map(|l| if l { 1 } else { 0 })
+        .unwrap_or(existing.listed);
+
     let donation_config_json = if existing.mode == "donation" {
         match (&req.donation_config, &existing.donation_config) {
             (Some(updates), Some(existing_json)) => {
@@ -465,7 +474,7 @@ pub async fn update_payment_link(
     };
 
     sqlx::query(
-        "UPDATE payment_links SET name = ?, success_url = ?, active = ?, metadata = ?, donation_config = ?
+        "UPDATE payment_links SET name = ?, success_url = ?, active = ?, metadata = ?, donation_config = ?, listed = ?
          WHERE id = ? AND merchant_id = ?"
     )
     .bind(name)
@@ -473,6 +482,7 @@ pub async fn update_payment_link(
     .bind(active)
     .bind(&metadata_json)
     .bind(&donation_config_json)
+    .bind(listed)
     .bind(id)
     .bind(merchant_id)
     .execute(pool)

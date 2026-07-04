@@ -299,5 +299,14 @@ run_tracked_migration(&pool, "campaign_zec_tracking_v2026_06_30", || async {
 })
 .await?;
 
+run_tracked_migration(&pool, "campaign_directory_v2026_07_04", || async {
+    sqlx::query("ALTER TABLE payment_links ADD COLUMN listed INTEGER NOT NULL DEFAULT 1")
+        .execute(&pool)
+        .await
+        .ok();
+    Ok(())
+})
+.await?;
+
     Ok(pool)
 }
