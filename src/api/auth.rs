@@ -11,6 +11,8 @@ use crate::validation;
 
 const SESSION_COOKIE: &str = "__Host-cpay_session";
 const SESSION_COOKIE_LEGACY: &str = "cpay_session";
+const POS_SESSION_COOKIE: &str = "__Host-cpay_pos";
+const POS_SESSION_COOKIE_LEGACY: &str = "cpay_pos";
 const SESSION_HOURS: i64 = 24;
 
 #[derive(Debug, Deserialize)]
@@ -556,11 +558,18 @@ pub fn invalid_api_key_response() -> HttpResponse {
 
 /// Resolve a merchant from the session cookie
 pub async fn resolve_session(req: &HttpRequest, pool: &SqlitePool) -> Option<merchants::Merchant> {
-    let session_id = extract_session_id(req)?;
     let config = req.app_data::<web::Data<crate::config::Config>>()?;
-    merchants::get_by_session(pool, &session_id, &config.encryption_key)
-        .await
-        .ok()?
+    if let Some(session_id) = extract_session_id(req) {
+        if let Ok(Some(m)) = merchants::get_by_session(pool, &session_id, &config.encryption_key).await {
+            return Some(m);
+        }
+    }
+    if let Some(pos_id) = extract_pos_session_id(req) {
+        if let Ok(Some(m)) = merchants::get_by_session(pool, &pos_id, &config.encryption_key).await {
+            return Some(m);
+        }
+    }
+    None
 }
 
 /// Resolve a merchant from session cookie, rejecting POS-scoped sessions.
@@ -739,6 +748,51 @@ pub fn build_session_cookie<'a>(value: &str, config: &Config, clear: bool) -> Co
     }
 
     builder.finish()
+}
+
+pub fn build_pos_cookie<'a>(value: &str, config: &Config, clear: bool) -> Cookie<'a> {
+    let has_domain = config.cookie_domain.is_some();
+    let is_deployed = has_domain
+        || config
+            .frontend_url
+            .as_deref()
+            .map_or(false, |u| u.starts_with("https"));
+    let use_secure = !config.is_testnet() || is_deployed;
+
+    let cookie_name = if has_domain {
+        POS_SESSION_COOKIE_LEGACY
+    } else if use_secure {
+        POS_SESSION_COOKIE
+    } else {
+        POS_SESSION_COOKIE_LEGACY
+    };
+
+    let mut builder = Cookie::build(cookie_name, value.to_string())
+        .path("/")
+        .http_only(true)
+        .same_site(SameSite::Lax);
+
+    if use_secure {
+        builder = builder.secure(true);
+        if let Some(ref domain) = config.cookie_domain {
+            builder = builder.domain(domain.clone());
+        }
+    }
+
+    if clear {
+        builder = builder.max_age(actix_web::cookie::time::Duration::ZERO);
+    } else {
+        builder = builder.max_age(actix_web::cookie::time::Duration::hours(4));
+    }
+
+    builder.finish()
+}
+
+pub fn extract_pos_session_id(req: &HttpRequest) -> Option<String> {
+    req.cookie(POS_SESSION_COOKIE)
+        .or_else(|| req.cookie(POS_SESSION_COOKIE_LEGACY))
+        .map(|c| c.value().to_string())
+        .filter(|v| !v.is_empty())
 }
 
 #[derive(Debug, Deserialize)]

@@ -91,7 +91,7 @@ pub async fn create(
 }
 
 pub async fn list(req: HttpRequest, pool: web::Data<SqlitePool>) -> HttpResponse {
-    let merchant = match super::auth::require_full_session(&req, pool.get_ref()).await {
+    let merchant = match super::auth::require_merchant_or_session(&req, pool.get_ref()).await {
         Ok(merchant) => merchant,
         Err(response) => return response,
     };

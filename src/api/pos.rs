@@ -180,7 +180,7 @@ pub async fn create_pos_session(
         }));
     }
 
-    let cookie = super::auth::build_session_cookie(&session_id, &config, false);
+    let cookie = super::auth::build_pos_cookie(&session_id, &config, false);
 
     HttpResponse::Ok().cookie(cookie).json(serde_json::json!({
         "merchant_id": merchant.id,
