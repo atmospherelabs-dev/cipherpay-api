@@ -473,6 +473,21 @@ async fn confirmed_fiat(
 /// confirmation check at the top runs every ~block_interval seconds.
 const MAX_BLOCKS_PER_SCAN: u64 = 100;
 
+/// Find the earliest `created_at` across pending invoices and active campaigns.
+fn earliest_relevant_timestamp(
+    pending: &[invoices::Invoice],
+    campaigns: &[crate::payment_links::CampaignAddress],
+) -> Option<String> {
+    let invoice_earliest = pending.iter().map(|i| i.created_at.as_str()).min();
+    let campaign_earliest = campaigns.iter().map(|c| c.created_at.as_str()).min();
+    match (invoice_earliest, campaign_earliest) {
+        (Some(a), Some(b)) => Some(std::cmp::min(a, b).to_string()),
+        (Some(a), None) => Some(a.to_string()),
+        (None, Some(b)) => Some(b.to_string()),
+        (None, None) => None,
+    }
+}
+
 async fn scan_blocks(
     config: &Config,
     pool: &SqlitePool,
@@ -538,7 +553,7 @@ async fn scan_blocks(
     let current_height = blocks::get_chain_height(http, &config.cipherscan_api_url).await?;
     metrics::global().set_chain_tip(current_height);
 
-    let start_height = {
+    let persisted_start = {
         let last = last_height.read().await;
         match *last {
             Some(h) => h + 1,
@@ -546,14 +561,14 @@ async fn scan_blocks(
         }
     };
 
-    // Only skip to chain tip when there's truly nothing to scan for:
-    // no pending invoices AND no active payment link campaigns.
     let active_campaigns = crate::payment_links::get_active_campaign_addresses(pool)
         .await
         .unwrap_or_default();
+
+    // No pending invoices and no campaigns → jump straight to chain tip.
     if pending.is_empty() && active_campaigns.is_empty() {
-        if start_height < current_height {
-            let skipped = current_height - start_height;
+        if persisted_start < current_height {
+            let skipped = current_height - persisted_start;
             if skipped > MAX_BLOCKS_PER_SCAN {
                 tracing::info!(
                     skipped,
@@ -569,6 +584,37 @@ async fn scan_blocks(
         }
         return Ok(());
     }
+
+    // When items exist, only scan from the oldest relevant creation time.
+    // No point scanning blocks from before any pending invoice or campaign existed.
+    // Zcash averages ~75s per block; add a 100-block safety margin.
+    let start_height = {
+        let oldest_ts = earliest_relevant_timestamp(&pending, &active_campaigns);
+        if let Some(ts) = oldest_ts {
+            let now = chrono::Utc::now();
+            if let Ok(created) = chrono::DateTime::parse_from_rfc3339(&ts) {
+                let secs_ago = (now - created.with_timezone(&chrono::Utc)).num_seconds().max(0) as u64;
+                let blocks_ago = secs_ago / 75 + 100;
+                let earliest_block = current_height.saturating_sub(blocks_ago);
+                if earliest_block > persisted_start {
+                    tracing::info!(
+                        from = persisted_start,
+                        to = earliest_block,
+                        skipped = earliest_block - persisted_start,
+                        oldest_item = %ts,
+                        "Skipping irrelevant blocks — oldest item is recent"
+                    );
+                    earliest_block
+                } else {
+                    persisted_start
+                }
+            } else {
+                persisted_start
+            }
+        } else {
+            persisted_start
+        }
+    };
 
     // Cap batch size to keep iterations short
     let batch_end = std::cmp::min(current_height, start_height + MAX_BLOCKS_PER_SCAN - 1);

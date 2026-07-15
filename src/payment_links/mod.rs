@@ -546,18 +546,19 @@ pub struct CampaignAddress {
     pub merchant_id: String,
     pub campaign_address_hex: String,
     pub currency: String,
+    pub created_at: String,
 }
 
 /// Load all active donation campaigns that have a catch-all address.
 pub async fn get_active_campaign_addresses(pool: &SqlitePool) -> anyhow::Result<Vec<CampaignAddress>> {
-    let rows: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
-        "SELECT id, merchant_id, campaign_address_hex, donation_config FROM payment_links
+    let rows: Vec<(String, String, String, Option<String>, String)> = sqlx::query_as(
+        "SELECT id, merchant_id, campaign_address_hex, donation_config, created_at FROM payment_links
          WHERE mode = 'donation' AND active = 1 AND campaign_address_hex IS NOT NULL"
     )
     .fetch_all(pool)
     .await?;
 
-    Ok(rows.into_iter().map(|(id, mid, addr, config_json)| {
+    Ok(rows.into_iter().map(|(id, mid, addr, config_json, created)| {
         let currency = config_json
             .and_then(|c| serde_json::from_str::<DonationConfig>(&c).ok())
             .map(|c| c.currency)
@@ -567,6 +568,7 @@ pub async fn get_active_campaign_addresses(pool: &SqlitePool) -> anyhow::Result<
             merchant_id: mid,
             campaign_address_hex: addr,
             currency,
+            created_at: created,
         }
     }).collect())
 }
