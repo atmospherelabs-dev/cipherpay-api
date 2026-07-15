@@ -63,7 +63,17 @@ impl CircuitBreaker {
 /// Gets the current chain tip height from CipherScan API.
 pub async fn get_chain_height(http: &reqwest::Client, api_url: &str) -> anyhow::Result<u64> {
     let url = format!("{}/api/blockchain-info", api_url);
-    let resp: BlockchainInfoResponse = http.get(&url).send().await?.json().await?;
+    let response = http.get(&url).send().await?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(anyhow::anyhow!(
+            "CipherScan API returned HTTP {} for blockchain-info",
+            status.as_u16()
+        ));
+    }
+    let resp: BlockchainInfoResponse = response.json().await.map_err(|e| {
+        anyhow::anyhow!("Failed to parse blockchain-info JSON: {e}")
+    })?;
 
     resp.blocks
         .or(resp.headers)
@@ -89,11 +99,21 @@ async fn fetch_single_block_txids(
         }
 
         let resp = match http.get(&url).send().await {
-            Ok(r) => match r.json::<serde_json::Value>().await {
-                Ok(v) => v,
-                Err(e) => {
-                    last_err = Some(anyhow::anyhow!("Failed to parse block {} response: {}", height, e));
+            Ok(r) => {
+                let status = r.status();
+                if !status.is_success() {
+                    last_err = Some(anyhow::anyhow!(
+                        "CipherScan API returned HTTP {} for block {}",
+                        status.as_u16(), height
+                    ));
                     continue;
+                }
+                match r.json::<serde_json::Value>().await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        last_err = Some(anyhow::anyhow!("Failed to parse block {} response: {}", height, e));
+                        continue;
+                    }
                 }
             },
             Err(e) => {
@@ -195,7 +215,15 @@ pub async fn check_tx_confirmed(
     txid: &str,
 ) -> anyhow::Result<bool> {
     let url = format!("{}/api/tx/{}", api_url, txid);
-    let resp: serde_json::Value = http.get(&url).send().await?.json().await?;
+    let response = http.get(&url).send().await?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(anyhow::anyhow!(
+            "CipherScan API returned HTTP {} for tx {}",
+            status.as_u16(), txid
+        ));
+    }
+    let resp: serde_json::Value = response.json().await?;
 
     let confirmed = resp["block_height"].as_u64().is_some()
         || resp["blockHeight"].as_u64().is_some()

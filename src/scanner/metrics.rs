@@ -73,6 +73,21 @@ impl ScannerMetrics {
         }
     }
 
+    /// Clear error state after sustained healthy operation (10 min without errors).
+    pub async fn clear_stale_errors(&self) {
+        const STALE_THRESHOLD_SECS: u64 = 600;
+        let should_clear = self
+            .last_error
+            .read()
+            .await
+            .as_ref()
+            .map_or(false, |(_, when)| when.elapsed().as_secs() > STALE_THRESHOLD_SECS);
+        if should_clear {
+            self.scan_errors.store(0, Ordering::Relaxed);
+            *self.last_error.write().await = None;
+        }
+    }
+
     pub async fn last_error(&self) -> Option<(String, u64)> {
         self.last_error.read().await.as_ref().map(|(msg, when)| {
             (msg.clone(), when.elapsed().as_secs())
