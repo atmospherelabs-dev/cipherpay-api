@@ -546,15 +546,19 @@ async fn scan_blocks(
         }
     };
 
-    // When no invoices are pending, skip directly to chain tip — nothing to match against.
-    if pending.is_empty() {
+    // Only skip to chain tip when there's truly nothing to scan for:
+    // no pending invoices AND no active payment link campaigns.
+    let active_campaigns = crate::payment_links::get_active_campaign_addresses(pool)
+        .await
+        .unwrap_or_default();
+    if pending.is_empty() && active_campaigns.is_empty() {
         if start_height < current_height {
             let skipped = current_height - start_height;
             if skipped > MAX_BLOCKS_PER_SCAN {
                 tracing::info!(
                     skipped,
                     chain_tip = current_height,
-                    "No pending invoices — jumping to chain tip"
+                    "No pending invoices or campaigns — jumping to chain tip"
                 );
             }
         }
@@ -588,9 +592,7 @@ async fn scan_blocks(
 
         let block_invoice_index = matching::InvoiceIndex::build(&pending);
 
-        let campaign_addresses = crate::payment_links::get_active_campaign_addresses(pool)
-            .await
-            .unwrap_or_default();
+        let campaign_addresses = active_campaigns;
 
         for txid in &block_txids {
             if seen.read().await.contains_key(txid) {
