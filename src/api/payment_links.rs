@@ -396,17 +396,7 @@ async fn resolve_donation(
         refund_address: None,
     };
 
-    let fee_config = if config.fee_enabled() {
-        config
-            .fee_address
-            .as_ref()
-            .map(|addr| crate::invoices::FeeConfig {
-                fee_address: addr.clone(),
-                fee_rate: config.fee_rate,
-            })
-    } else {
-        None
-    };
+    let fee_config = crate::billing::fee_config_for_merchant(pool.get_ref(), &merchant.id, &config).await;
 
     match crate::invoices::create_invoice(
         pool.get_ref(),
@@ -538,17 +528,7 @@ async fn resolve_payment(
         refund_address: None,
     };
 
-    let fee_config = if config.fee_enabled() {
-        config
-            .fee_address
-            .as_ref()
-            .map(|addr| crate::invoices::FeeConfig {
-                fee_address: addr.clone(),
-                fee_rate: config.fee_rate,
-            })
-    } else {
-        None
-    };
+    let fee_config = crate::billing::fee_config_for_merchant(pool.get_ref(), &merchant.id, &config).await;
 
     match crate::invoices::create_invoice(
         pool.get_ref(),

@@ -12,6 +12,25 @@ pub use fee_ledger::{create_fee_entry, get_effective_fee_rate, mark_fee_collecte
 pub use status::get_merchant_billing_status;
 pub use types::{BillingCycle, BillingSummary, MIN_SETTLEMENT_ZATOSHIS};
 
+/// Build a FeeConfig using the merchant's effective rate (per-merchant override or global default).
+pub async fn fee_config_for_merchant(
+    pool: &SqlitePool,
+    merchant_id: &str,
+    config: &Config,
+) -> Option<crate::invoices::FeeConfig> {
+    if !config.fee_enabled() {
+        return None;
+    }
+    let fee_address = config.fee_address.as_ref()?;
+    let rate = get_effective_fee_rate(pool, merchant_id, config)
+        .await
+        .unwrap_or(config.fee_rate);
+    Some(crate::invoices::FeeConfig {
+        fee_address: fee_address.clone(),
+        fee_rate: rate,
+    })
+}
+
 pub async fn get_billing_summary(
     pool: &SqlitePool,
     merchant_id: &str,

@@ -49,14 +49,7 @@ pub async fn create(
         }
     };
 
-    let fee_config = if config.fee_enabled() {
-        config.fee_address.as_ref().map(|addr| invoices::FeeConfig {
-            fee_address: addr.clone(),
-            fee_rate: config.fee_rate,
-        })
-    } else {
-        None
-    };
+    let fee_config = crate::billing::fee_config_for_merchant(pool.get_ref(), &merchant.id, &config).await;
 
     match invoices::create_invoice(
         pool.get_ref(),
@@ -281,13 +274,9 @@ pub async fn finalize(
         }
     };
 
-    let fee_config = if config.fee_enabled() {
-        config.fee_address.as_ref().map(|addr| invoices::FeeConfig {
-            fee_address: addr.clone(),
-            fee_rate: config.fee_rate,
-        })
-    } else {
-        None
+    let fee_config = match invoices::get_invoice(pool.get_ref(), &invoice_id).await {
+        Ok(Some(inv)) => crate::billing::fee_config_for_merchant(pool.get_ref(), &inv.merchant_id, &config).await,
+        _ => None,
     };
 
     match invoices::finalize_invoice(pool.get_ref(), &invoice_id, &rates, fee_config.as_ref()).await
