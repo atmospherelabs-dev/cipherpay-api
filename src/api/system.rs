@@ -44,11 +44,11 @@ pub async fn health(
     let m = crate::scanner::metrics::global();
     let snap = m.snapshot();
     let scanner_status = snap.status();
-    let scan_errors = snap.scan_errors;
+    let recent_errors = m.recent_errors().await;
     let blocks_behind = snap.blocks_behind();
     let last_error = m.last_error().await;
 
-    if scanner_status == "behind" || (scan_errors > 0 && snap.last_block_height == 0) {
+    if scanner_status == "behind" || (recent_errors > 0 && snap.last_block_height == 0) {
         unhealthy = true;
     } else if scanner_status == "catching_up" || blocks_behind > 5 {
         degraded = true;
@@ -56,7 +56,7 @@ pub async fn health(
     let mut scanner_json = serde_json::json!({
         "status": scanner_status,
         "blocks_behind": blocks_behind,
-        "scan_errors": scan_errors,
+        "scan_errors": recent_errors,
         "last_block_height": snap.last_block_height,
     });
     if let Some((msg, ago_secs)) = last_error {
@@ -116,6 +116,11 @@ pub async fn well_known_payment(config: web::Data<crate::config::Config>) -> Htt
     } else {
         "zcash:mainnet"
     };
+    let base_url = if config.is_testnet() {
+        "https://testnet.api.cipherpay.app"
+    } else {
+        "https://api.cipherpay.app"
+    };
     HttpResponse::Ok()
         .insert_header(("Access-Control-Allow-Origin", "*"))
         .insert_header(("Cache-Control", "public, max-age=3600"))
@@ -125,13 +130,25 @@ pub async fn well_known_payment(config: web::Data<crate::config::Config>) -> Htt
             "methods": ["zcash"],
             "currencies": ["ZEC"],
             "network": network,
+            "asset": "ZEC",
+            "scheme": "exact",
             "protocols": ["x402", "mpp"],
             "capabilities": {
                 "sessions": true,
                 "streaming": true,
                 "replay_protection": true,
+                "idempotency": true,
+                "auto_session": true,
             },
-            "facilitator": "https://api.cipherpay.app",
+            "facilitator": base_url,
+            "facilitatorUrl": format!("{}/api/x402", base_url),
+            "endpoints": {
+                "verify": format!("{}/api/x402/v2/verify", base_url),
+                "settle": format!("{}/api/x402/v2/settle", base_url),
+                "supported": format!("{}/api/x402/supported", base_url),
+                "session_prepare": format!("{}/api/sessions/prepare", base_url),
+                "session_validate": format!("{}/api/sessions/validate", base_url),
+            },
             "documentation": "https://cipherpay.app/docs",
         }))
 }

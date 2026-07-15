@@ -5,17 +5,21 @@ use tokio::sync::RwLock;
 
 static INSTANCE: OnceLock<ScannerMetrics> = OnceLock::new();
 
+const ERROR_WINDOW_SECS: u64 = 3600;
+const STALE_ERROR_MSG_SECS: u64 = 600;
+
 pub struct ScannerMetrics {
     pub blocks_scanned: AtomicU64,
     pub last_block_height: AtomicU64,
     pub chain_tip_height: AtomicU64,
     pub payments_detected: AtomicU64,
     pub mempool_txs_checked: AtomicU64,
-    pub scan_errors: AtomicU64,
+    total_errors: AtomicU64,
     pub last_block_scan_ms: AtomicU64,
     pub last_mempool_scan_ms: AtomicU64,
     started_at: RwLock<Option<Instant>>,
     last_error: RwLock<Option<(String, Instant)>>,
+    error_timestamps: RwLock<Vec<Instant>>,
 }
 
 impl ScannerMetrics {
@@ -26,11 +30,12 @@ impl ScannerMetrics {
             chain_tip_height: AtomicU64::new(0),
             payments_detected: AtomicU64::new(0),
             mempool_txs_checked: AtomicU64::new(0),
-            scan_errors: AtomicU64::new(0),
+            total_errors: AtomicU64::new(0),
             last_block_scan_ms: AtomicU64::new(0),
             last_mempool_scan_ms: AtomicU64::new(0),
             started_at: RwLock::new(None),
             last_error: RwLock::new(None),
+            error_timestamps: RwLock::new(Vec::new()),
         }
     }
 
@@ -67,30 +72,42 @@ impl ScannerMetrics {
     }
 
     pub fn record_scan_error(&self, msg: &str) {
-        self.scan_errors.fetch_add(1, Ordering::Relaxed);
+        self.total_errors.fetch_add(1, Ordering::Relaxed);
         if let Ok(mut guard) = self.last_error.try_write() {
             *guard = Some((msg.to_string(), Instant::now()));
         }
-    }
-
-    /// Clear error state after sustained healthy operation (10 min without errors).
-    pub async fn clear_stale_errors(&self) {
-        const STALE_THRESHOLD_SECS: u64 = 600;
-        let should_clear = self
-            .last_error
-            .read()
-            .await
-            .as_ref()
-            .map_or(false, |(_, when)| when.elapsed().as_secs() > STALE_THRESHOLD_SECS);
-        if should_clear {
-            self.scan_errors.store(0, Ordering::Relaxed);
-            *self.last_error.write().await = None;
+        if let Ok(mut ts) = self.error_timestamps.try_write() {
+            ts.push(Instant::now());
         }
     }
 
+    /// Errors in the last hour (rolling window).
+    pub async fn recent_errors(&self) -> u64 {
+        let cutoff = Instant::now() - std::time::Duration::from_secs(ERROR_WINDOW_SECS);
+        let ts = self.error_timestamps.read().await;
+        ts.iter().filter(|t| **t > cutoff).count() as u64
+    }
+
+    pub fn total_errors(&self) -> u64 {
+        self.total_errors.load(Ordering::Relaxed)
+    }
+
+    /// Evict old timestamps from the rolling window to avoid unbounded growth.
+    pub async fn evict_old_errors(&self) {
+        let cutoff = Instant::now() - std::time::Duration::from_secs(ERROR_WINDOW_SECS);
+        let mut ts = self.error_timestamps.write().await;
+        ts.retain(|t| *t > cutoff);
+    }
+
+    /// Returns last error message and age — only if the error is recent (< 10 min).
     pub async fn last_error(&self) -> Option<(String, u64)> {
-        self.last_error.read().await.as_ref().map(|(msg, when)| {
-            (msg.clone(), when.elapsed().as_secs())
+        self.last_error.read().await.as_ref().and_then(|(msg, when)| {
+            let ago = when.elapsed().as_secs();
+            if ago < STALE_ERROR_MSG_SECS {
+                Some((msg.clone(), ago))
+            } else {
+                None
+            }
         })
     }
 
@@ -109,7 +126,7 @@ impl ScannerMetrics {
             chain_tip_height: self.chain_tip_height.load(Ordering::Relaxed),
             payments_detected: self.payments_detected.load(Ordering::Relaxed),
             mempool_txs_checked: self.mempool_txs_checked.load(Ordering::Relaxed),
-            scan_errors: self.scan_errors.load(Ordering::Relaxed),
+            total_errors: self.total_errors.load(Ordering::Relaxed),
             last_block_scan_ms: self.last_block_scan_ms.load(Ordering::Relaxed),
             last_mempool_scan_ms: self.last_mempool_scan_ms.load(Ordering::Relaxed),
         }
@@ -123,7 +140,7 @@ pub struct MetricsSnapshot {
     pub chain_tip_height: u64,
     pub payments_detected: u64,
     pub mempool_txs_checked: u64,
-    pub scan_errors: u64,
+    pub total_errors: u64,
     pub last_block_scan_ms: u64,
     pub last_mempool_scan_ms: u64,
 }

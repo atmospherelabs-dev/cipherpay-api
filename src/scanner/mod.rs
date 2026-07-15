@@ -188,7 +188,6 @@ pub async fn run(config: Config, pool: SqlitePool, scanner_http: reqwest::Client
                 Ok(_) => {
                     block_cb.record_success();
                     metrics::global().set_last_block_scan_ms(block_start.elapsed().as_millis() as u64);
-                    metrics::global().clear_stale_errors().await;
                 }
                 Err(e) => {
                     block_cb.record_failure();
@@ -213,6 +212,7 @@ pub async fn run(config: Config, pool: SqlitePool, scanner_http: reqwest::Client
             if evicted > 0 {
                 tracing::debug!(evicted, remaining = set.len(), "Evicted stale seen_txids");
             }
+            metrics::global().evict_old_errors().await;
         }
     });
 
