@@ -546,10 +546,30 @@ async fn scan_blocks(
         }
     };
 
+    // When no invoices are pending, skip directly to chain tip — nothing to match against.
+    if pending.is_empty() {
+        if start_height < current_height {
+            let skipped = current_height - start_height;
+            if skipped > MAX_BLOCKS_PER_SCAN {
+                tracing::info!(
+                    skipped,
+                    chain_tip = current_height,
+                    "No pending invoices — jumping to chain tip"
+                );
+            }
+        }
+        *last_height.write().await = Some(current_height);
+        metrics::global().set_last_block_height(current_height);
+        if let Err(e) = crate::db::set_scanner_state(pool, "last_height", &current_height.to_string()).await {
+            tracing::warn!(error = %e, "Failed to persist last_height");
+        }
+        return Ok(());
+    }
+
     // Cap batch size to keep iterations short
     let batch_end = std::cmp::min(current_height, start_height + MAX_BLOCKS_PER_SCAN - 1);
 
-    if !pending.is_empty() && start_height <= batch_end {
+    if start_height <= batch_end {
         if batch_end < current_height {
             tracing::info!(
                 start = start_height,
