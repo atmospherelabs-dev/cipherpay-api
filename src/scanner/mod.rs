@@ -470,9 +470,8 @@ async fn confirmed_fiat(
     (Some(rate), Some(fiat))
 }
 
-/// Max blocks to process per iteration. Keeps each call short so the
-/// confirmation check at the top runs every ~block_interval seconds.
 const MAX_BLOCKS_PER_SCAN: u64 = 100;
+const MAX_BLOCKS_CATCHUP: u64 = 1000;
 
 /// Find the earliest `created_at` across pending invoices and active campaigns.
 fn earliest_relevant_timestamp(
@@ -617,8 +616,14 @@ async fn scan_blocks(
         }
     };
 
-    // Cap batch size to keep iterations short
-    let batch_end = std::cmp::min(current_height, start_height + MAX_BLOCKS_PER_SCAN - 1);
+    // Use larger batches when catching up; smaller when near chain tip.
+    let blocks_behind = current_height.saturating_sub(start_height);
+    let batch_size = if blocks_behind > MAX_BLOCKS_CATCHUP {
+        MAX_BLOCKS_CATCHUP
+    } else {
+        MAX_BLOCKS_PER_SCAN
+    };
+    let batch_end = std::cmp::min(current_height, start_height + batch_size - 1);
 
     if start_height <= batch_end {
         if batch_end < current_height {
