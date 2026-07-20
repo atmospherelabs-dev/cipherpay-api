@@ -88,7 +88,18 @@ pub async fn create_merchant(
         req.ufvk.clone()
     } else {
         let uivk = crate::scanner::decrypt::derive_uivk_from_ufvk(&req.ufvk)
-            .map_err(|e| anyhow::anyhow!("Invalid viewing key — could not derive UIVK: {}", e))?;
+            .map_err(|e| {
+                let detail = e.to_string();
+                if detail.contains("NotUnified") {
+                    anyhow::anyhow!(
+                        "Invalid viewing key — this doesn't appear to be a Unified Full Viewing Key. \
+                         Make sure you export the UFVK (starts with uview1…), not a unified address (u1…) \
+                         or spending key. Check your wallet's export/backup settings."
+                    )
+                } else {
+                    anyhow::anyhow!("Invalid viewing key — could not decode: {}", detail)
+                }
+            })?;
         tracing::info!("UFVK received, derived UIVK for storage");
         uivk
     };

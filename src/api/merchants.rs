@@ -22,6 +22,11 @@ pub async fn create(
                 HttpResponse::Conflict().json(serde_json::json!({
                     "error": msg
                 }))
+            } else if msg.contains("Invalid viewing key") {
+                tracing::warn!(error = %e, "Merchant registration: invalid viewing key");
+                HttpResponse::BadRequest().json(serde_json::json!({
+                    "error": msg
+                }))
             } else {
                 tracing::error!(error = %e, "Failed to create merchant");
                 HttpResponse::InternalServerError().json(serde_json::json!({
