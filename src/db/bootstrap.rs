@@ -1576,7 +1576,18 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
           .await
           .ok();
 
-        
+    // x402 idempotency cache (Idempotency-Key header, 24h TTL)
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS x402_idempotency (
+            idempotency_key TEXT PRIMARY KEY,
+            response_json TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        )",
+    )
+    .execute(&pool)
+    .await
+    .ok();
+
     validate_schema_state(&pool).await?;
     tracing::info!("Database ready (SQLite)");
     Ok(())

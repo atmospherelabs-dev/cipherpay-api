@@ -52,8 +52,20 @@ pub async fn create_session(
     balance_zatoshis: i64,
     refund_address: Option<&str>,
 ) -> Result<Session> {
+    create_session_with_cost(pool, merchant_id, deposit_txid, balance_zatoshis, refund_address, None).await
+}
+
+pub async fn create_session_with_cost(
+    pool: &SqlitePool,
+    merchant_id: &str,
+    deposit_txid: &str,
+    balance_zatoshis: i64,
+    refund_address: Option<&str>,
+    cost_per_request: Option<i64>,
+) -> Result<Session> {
     let id = uuid::Uuid::new_v4().to_string();
     let bearer_token = generate_token();
+    let cost = cost_per_request.unwrap_or(DEFAULT_COST_PER_REQUEST);
 
     match sqlx::query(
         "INSERT INTO agent_sessions (id, merchant_id, deposit_txid, bearer_token, balance_zatoshis, balance_remaining, cost_per_request, requests_made, refund_address, status, expires_at)
@@ -65,7 +77,7 @@ pub async fn create_session(
     .bind(&bearer_token)
     .bind(balance_zatoshis)
     .bind(balance_zatoshis)
-    .bind(DEFAULT_COST_PER_REQUEST)
+    .bind(cost)
     .bind(refund_address)
     .bind(SESSION_EXPIRY_HOURS)
     .execute(pool)
@@ -86,6 +98,7 @@ pub async fn create_session(
         merchant_id,
         deposit_txid,
         balance = balance_zatoshis,
+        cost_per_request = cost,
         "Session created"
     );
 

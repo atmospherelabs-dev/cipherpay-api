@@ -480,6 +480,31 @@ pub struct VerifyRequestV2 {
     pub payment_requirements: PaymentRequirementsV2,
 }
 
+/// Optional session config sent alongside settle to auto-create a session.
+#[derive(Debug, Deserialize)]
+struct SettleSessionConfig {
+    #[serde(rename = "costPerRequest")]
+    cost_per_request: Option<i64>,
+    #[serde(rename = "refundAddress")]
+    refund_address: Option<String>,
+}
+
+/// Extended settle request: standard x402 V2 fields + optional session bridge.
+#[derive(Debug, Deserialize)]
+pub struct SettleRequestV2 {
+    #[serde(rename = "x402Version")]
+    pub x402_version: Option<u32>,
+    #[serde(rename = "paymentPayload")]
+    pub payment_payload: PaymentPayloadV2,
+    #[serde(rename = "paymentRequirements")]
+    pub payment_requirements: PaymentRequirementsV2,
+    /// If present, auto-create a session after successful settlement.
+    session: Option<SettleSessionConfig>,
+    /// RFC Idempotency-Key — if repeated, returns cached response.
+    #[serde(rename = "idempotencyKey")]
+    idempotency_key: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 struct VerifyResponseV2 {
     #[serde(rename = "isValid")]
@@ -488,6 +513,20 @@ struct VerifyResponseV2 {
     invalid_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     payer: Option<String>,
+}
+
+/// Session info returned when auto-session is created on settle.
+#[derive(Debug, Serialize)]
+struct SessionInfo {
+    token: String,
+    #[serde(rename = "sessionId")]
+    session_id: String,
+    #[serde(rename = "balanceRemaining")]
+    balance_remaining: i64,
+    #[serde(rename = "costPerRequest")]
+    cost_per_request: i64,
+    #[serde(rename = "expiresAt")]
+    expires_at: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -501,53 +540,90 @@ struct SettleResponseV2 {
     error_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     amount: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session: Option<SessionInfo>,
 }
 
-/// Extract and validate the common fields from V2 request body.
-/// Returns (txid, expected_zatoshis, network) or an error response.
-fn parse_v2_request(body: &VerifyRequestV2) -> Result<(String, u64, String), HttpResponse> {
-    let txid = body
-        .payment_payload
+// ---------------------------------------------------------------------------
+// RFC 9457 Problem Details (https://www.rfc-editor.org/rfc/rfc9457)
+// ---------------------------------------------------------------------------
+
+fn problem_details(
+    status: u16,
+    error_type: &str,
+    title: &str,
+    detail: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "type": format!("https://cipherpay.app/errors/{}", error_type),
+        "title": title,
+        "status": status,
+        "detail": detail,
+    })
+}
+
+/// Extract and validate the common fields from a V2 request body.
+/// Works for both VerifyRequestV2 and SettleRequestV2 via trait.
+fn parse_v2_fields(
+    payload: &PaymentPayloadV2,
+    requirements: &PaymentRequirementsV2,
+) -> Result<(String, u64, String), HttpResponse> {
+    let txid = payload
         .payload
         .as_ref()
         .and_then(|p| p.txid.as_deref())
         .unwrap_or("");
 
     if txid.len() != 64 || !txid.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(HttpResponse::BadRequest().json(serde_json::json!({
-            "isValid": false,
-            "invalidReason": "invalid_payload",
-        })));
+        return Err(HttpResponse::BadRequest()
+            .insert_header(("Content-Type", "application/problem+json"))
+            .json(problem_details(
+                400,
+                "invalid-payload",
+                "Invalid Payment Payload",
+                "txid must be a 64-character hex string",
+            )));
     }
 
-    let amount_str = body
-        .payment_requirements
-        .amount
-        .as_deref()
-        .unwrap_or("0");
+    let amount_str = requirements.amount.as_deref().unwrap_or("0");
 
     let expected_zatoshis: u64 = amount_str.parse().map_err(|_| {
-        HttpResponse::BadRequest().json(serde_json::json!({
-            "isValid": false,
-            "invalidReason": "invalid_payment_requirements",
-        }))
+        HttpResponse::BadRequest()
+            .insert_header(("Content-Type", "application/problem+json"))
+            .json(problem_details(
+                400,
+                "invalid-payment-requirements",
+                "Invalid Payment Requirements",
+                "amount must be a valid integer string (zatoshis)",
+            ))
     })?;
 
     if expected_zatoshis == 0 {
-        return Err(HttpResponse::BadRequest().json(serde_json::json!({
-            "isValid": false,
-            "invalidReason": "invalid_payment_requirements",
-        })));
+        return Err(HttpResponse::BadRequest()
+            .insert_header(("Content-Type", "application/problem+json"))
+            .json(problem_details(
+                400,
+                "invalid-payment-requirements",
+                "Invalid Payment Requirements",
+                "amount must be greater than zero",
+            )));
     }
 
-    let network = body
-        .payment_requirements
+    let network = requirements
         .network
         .as_deref()
         .unwrap_or("zcash:mainnet")
         .to_string();
 
     Ok((txid.to_string(), expected_zatoshis, network))
+}
+
+fn parse_v2_request(body: &VerifyRequestV2) -> Result<(String, u64, String), HttpResponse> {
+    parse_v2_fields(&body.payment_payload, &body.payment_requirements)
+}
+
+fn parse_settle_request(body: &SettleRequestV2) -> Result<(String, u64, String), HttpResponse> {
+    parse_v2_fields(&body.payment_payload, &body.payment_requirements)
 }
 
 /// Core verification logic shared by verify_v2 and settle_v2.
@@ -563,17 +639,15 @@ async fn verify_core_v2(
     let merchant = match merchants::authenticate(pool, api_key, &config.encryption_key).await {
         Ok(Some(m)) => m,
         Ok(None) => {
-            return Err(HttpResponse::Unauthorized().json(serde_json::json!({
-                "isValid": false,
-                "invalidReason": "unauthorized",
-            })));
+            return Err(HttpResponse::Unauthorized()
+                .insert_header(("Content-Type", "application/problem+json"))
+                .json(problem_details(401, "unauthorized", "Unauthorized", "Invalid API key")));
         }
         Err(e) => {
             tracing::error!(error = %e, "x402 v2 auth error");
-            return Err(HttpResponse::InternalServerError().json(serde_json::json!({
-                "isValid": false,
-                "invalidReason": "unexpected_verify_error",
-            })));
+            return Err(HttpResponse::InternalServerError()
+                .insert_header(("Content-Type", "application/problem+json"))
+                .json(problem_details(500, "internal-error", "Internal Error", "Unexpected verification error")));
         }
     };
 
@@ -582,10 +656,9 @@ async fn verify_core_v2(
             crate::billing::get_merchant_billing_status(pool, &merchant.id).await
         {
             if merchant_billing_blocked(&status) {
-                return Err(HttpResponse::PaymentRequired().json(serde_json::json!({
-                    "isValid": false,
-                    "invalidReason": "merchant_billing_blocked",
-                })));
+                return Err(HttpResponse::PaymentRequired()
+                    .insert_header(("Content-Type", "application/problem+json"))
+                    .json(problem_details(402, "merchant-billing-blocked", "Merchant Billing Blocked", "Merchant account has outstanding fees")));
             }
         }
     }
@@ -653,19 +726,18 @@ pub async fn verify_v2(
     let api_key = match extract_api_key(&req) {
         Some(k) => k,
         None => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "isValid": false,
-                "invalidReason": "unauthorized",
-            }));
+            return HttpResponse::Unauthorized()
+                .insert_header(("Content-Type", "application/problem+json"))
+                .json(problem_details(401, "unauthorized", "Unauthorized", "Missing or invalid Authorization header"));
         }
     };
 
-    let (txid, expected_zatoshis, _network) = match parse_v2_request(&body) {
+    let (txid, expected_zatoshis, network) = match parse_v2_request(&body) {
         Ok(v) => v,
         Err(resp) => return resp,
     };
 
-    match verify_core_v2(pool.get_ref(), &config, &http_client, &txid, expected_zatoshis, &_network, &api_key).await {
+    match verify_core_v2(pool.get_ref(), &config, &http_client, &txid, expected_zatoshis, &network, &api_key).await {
         Ok((is_valid, invalid_reason, _)) => {
             HttpResponse::Ok().json(VerifyResponseV2 {
                 is_valid,
@@ -678,50 +750,79 @@ pub async fn verify_v2(
 }
 
 /// POST /api/x402/v2/settle — x402 V2 spec-compliant settle endpoint.
-/// For Zcash, settlement is implicit (tx already on-chain), so this mirrors verify.
+///
+/// For Zcash, settlement is implicit (tx already on-chain), so this verifies
+/// the transaction and records it. Supports:
+/// - **Idempotency-Key** header for safe retries
+/// - **Auto-session**: optional `session` field to create a session in one step
 pub async fn settle_v2(
     req: HttpRequest,
     pool: web::Data<SqlitePool>,
     config: web::Data<Config>,
     http_client: web::Data<reqwest::Client>,
-    body: web::Json<VerifyRequestV2>,
+    body: web::Json<SettleRequestV2>,
 ) -> HttpResponse {
     let api_key = match extract_api_key(&req) {
         Some(k) => k,
         None => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "success": false,
-                "errorReason": "unauthorized",
-                "transaction": "",
-                "network": "",
-            }));
+            return HttpResponse::Unauthorized()
+                .insert_header(("Content-Type", "application/problem+json"))
+                .json(problem_details(401, "unauthorized", "Unauthorized", "Missing or invalid Authorization header"));
         }
     };
 
-    let (txid, expected_zatoshis, network) = match parse_v2_request(&body) {
-        Ok(v) => v,
-        Err(_) => {
-            return HttpResponse::BadRequest().json(SettleResponseV2 {
-                success: false,
-                transaction: String::new(),
-                network: String::new(),
-                payer: None,
-                error_reason: Some("invalid_payload".to_string()),
-                amount: None,
-            });
+    // Idempotency-Key: check header first, fall back to body field
+    let idempotency_key = req
+        .headers()
+        .get("Idempotency-Key")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .or_else(|| body.idempotency_key.clone());
+
+    if let Some(ref key) = idempotency_key {
+        if let Some(cached) = get_idempotent_response(pool.get_ref(), key).await {
+            return HttpResponse::Ok()
+                .insert_header(("Idempotency-Replayed", "true"))
+                .json(cached);
         }
+    }
+
+    let (txid, expected_zatoshis, network) = match parse_settle_request(&body) {
+        Ok(v) => v,
+        Err(resp) => return resp,
     };
 
     match verify_core_v2(pool.get_ref(), &config, &http_client, &txid, expected_zatoshis, &network, &api_key).await {
         Ok((true, _, total_zatoshis)) => {
-            HttpResponse::Ok().json(SettleResponseV2 {
+            // Auto-session: if requested and payment verified, create a session
+            let session_info = if let Some(ref session_cfg) = body.session {
+                match try_auto_session(pool.get_ref(), &api_key, &config, &txid, total_zatoshis, session_cfg).await {
+                    Ok(Some(info)) => Some(info),
+                    Ok(None) => None,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Auto-session creation failed (settle still succeeds)");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            let response = SettleResponseV2 {
                 success: true,
                 transaction: txid,
                 network,
                 payer: None,
                 error_reason: None,
                 amount: Some(total_zatoshis.to_string()),
-            })
+                session: session_info,
+            };
+
+            if let Some(ref key) = idempotency_key {
+                store_idempotent_response(pool.get_ref(), key, &response).await;
+            }
+
+            HttpResponse::Ok().json(response)
         }
         Ok((false, reason, _)) => {
             HttpResponse::Ok().json(SettleResponseV2 {
@@ -731,9 +832,88 @@ pub async fn settle_v2(
                 payer: None,
                 error_reason: reason,
                 amount: None,
+                session: None,
             })
         }
         Err(resp) => resp,
+    }
+}
+
+/// Try to auto-create a session from a settled payment.
+async fn try_auto_session(
+    pool: &SqlitePool,
+    api_key: &str,
+    config: &Config,
+    txid: &str,
+    total_zatoshis: u64,
+    session_cfg: &SettleSessionConfig,
+) -> Result<Option<SessionInfo>, anyhow::Error> {
+    if crate::sessions::txid_already_used(pool, txid).await {
+        return Ok(None);
+    }
+
+    let merchant = match merchants::authenticate(pool, api_key, &config.encryption_key).await? {
+        Some(m) => m,
+        None => return Ok(None),
+    };
+
+    let cost_per_request = session_cfg.cost_per_request.unwrap_or(1_000);
+    if cost_per_request <= 0 || (total_zatoshis as i64) < cost_per_request {
+        return Ok(None);
+    }
+
+    let session = crate::sessions::create_session_with_cost(
+        pool,
+        &merchant.id,
+        txid,
+        total_zatoshis as i64,
+        session_cfg.refund_address.as_deref(),
+        session_cfg.cost_per_request,
+    )
+    .await?;
+
+    Ok(Some(SessionInfo {
+        token: session.bearer_token,
+        session_id: session.id,
+        balance_remaining: session.balance_remaining,
+        cost_per_request: session.cost_per_request,
+        expires_at: session.expires_at,
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// Idempotency-Key storage (x402_idempotency table)
+// ---------------------------------------------------------------------------
+
+async fn get_idempotent_response(pool: &SqlitePool, key: &str) -> Option<serde_json::Value> {
+    let row = sqlx::query_scalar::<_, String>(
+        "SELECT response_json FROM x402_idempotency
+         WHERE idempotency_key = ? AND created_at >= strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-24 hours')"
+    )
+    .bind(key)
+    .fetch_optional(pool)
+    .await
+    .ok()?;
+
+    row.and_then(|json_str| serde_json::from_str(&json_str).ok())
+}
+
+async fn store_idempotent_response(pool: &SqlitePool, key: &str, response: &SettleResponseV2) {
+    let json_str = match serde_json::to_string(response) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+
+    let result = sqlx::query(
+        "INSERT OR IGNORE INTO x402_idempotency (idempotency_key, response_json) VALUES (?, ?)"
+    )
+    .bind(key)
+    .bind(&json_str)
+    .execute(pool)
+    .await;
+
+    if let Err(e) = result {
+        tracing::warn!(error = %e, "Failed to store idempotent response");
     }
 }
 
