@@ -82,14 +82,24 @@ pub async fn create_merchant(
     req: &CreateMerchantRequest,
     encryption_key: &str,
 ) -> anyhow::Result<CreateMerchantResponse> {
-    let is_uivk_input = req.ufvk.starts_with("uivk");
+    let ufvk_clean: String = req.ufvk.chars().filter(|c| !c.is_whitespace()).collect();
+
+    let is_uivk_input = ufvk_clean.starts_with("uivk");
     let viewing_key = if is_uivk_input {
         tracing::info!("UIVK received directly for new merchant registration");
-        req.ufvk.clone()
+        ufvk_clean.clone()
     } else {
-        let uivk = crate::scanner::decrypt::derive_uivk_from_ufvk(&req.ufvk)
+        let uivk = crate::scanner::decrypt::derive_uivk_from_ufvk(&ufvk_clean)
             .map_err(|e| {
                 let detail = e.to_string();
+                let prefix: String = ufvk_clean.chars().take(12).collect();
+                tracing::warn!(
+                    key_len = ufvk_clean.len(),
+                    key_prefix = %prefix,
+                    raw_len = req.ufvk.len(),
+                    decode_error = %detail,
+                    "Viewing key decode failed"
+                );
                 if detail.contains("NotUnified") {
                     anyhow::anyhow!(
                         "Invalid viewing key — this doesn't appear to be a Unified Full Viewing Key. \
