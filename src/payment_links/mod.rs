@@ -284,10 +284,6 @@ pub async fn create_donation_link(
         }
     }
 
-    if let (Some(_name), None) = (&req.campaign_name, &req.campaign_goal) {
-        anyhow::bail!("campaign_goal is required when campaign_name is set");
-    }
-
     let config = DonationConfig {
         mission: req.mission.clone(),
         thank_you: req.thank_you.clone(),
