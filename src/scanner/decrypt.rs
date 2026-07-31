@@ -3,7 +3,7 @@ use std::io::Cursor;
 
 use orchard::{
     keys::{FullViewingKey, IncomingViewingKey, PreparedIncomingViewingKey, Scope},
-    note_encryption::OrchardDomain,
+    note_encryption::{IronwoodDomain, OrchardDomain},
 };
 use zcash_address::unified::{Container, Encoding, Fvk, Ivk, Ufvk, Uivk};
 use zcash_note_encryption::try_note_decryption;
@@ -111,7 +111,7 @@ pub fn derive_uivk_from_ufvk(ufvk_str: &str) -> Result<String> {
     Ok(uivk.encode(&network))
 }
 
-/// Trial-decrypt all Orchard outputs using pre-computed keys (fast path).
+/// Trial-decrypt all Orchard and Ironwood outputs using pre-computed keys (fast path).
 pub fn try_decrypt_with_keys(raw_hex: &str, keys: &CachedKeys) -> Result<Vec<DecryptedOutput>> {
     let tx_bytes = hex::decode(raw_hex)?;
     if tx_bytes.len() < 4 {
@@ -119,56 +119,31 @@ pub fn try_decrypt_with_keys(raw_hex: &str, keys: &CachedKeys) -> Result<Vec<Dec
     }
 
     let mut cursor = Cursor::new(&tx_bytes[..]);
-    let tx = match Transaction::read(&mut cursor, BranchId::Nu6_2) {
+    let tx = match Transaction::read(&mut cursor, BranchId::Nu6_3) {
         Ok(tx) => tx,
         Err(_) => return Ok(vec![]),
     };
 
-    let bundle = match tx.orchard_bundle() {
-        Some(b) => b,
-        None => return Ok(vec![]),
-    };
-
-    let actions: Vec<_> = bundle.actions().iter().collect();
     let mut outputs = Vec::new();
 
-    for action in &actions {
-        let domain = OrchardDomain::for_action(*action);
-
-        {
+    // Decrypt Orchard bundle (v5 and v6 transactions)
+    if let Some(bundle) = tx.orchard_bundle() {
+        for action in bundle.actions().iter() {
+            let domain = OrchardDomain::for_action(action);
             let pivk = &keys.pivk_external;
-            if let Some((note, _recipient, memo)) = try_note_decryption(&domain, pivk, *action) {
-                let recipient_raw = note.recipient().to_raw_address_bytes();
-                let memo_bytes = memo.as_slice();
-                let memo_len = memo_bytes
-                    .iter()
-                    .position(|&b| b == 0)
-                    .unwrap_or(memo_bytes.len());
+            if let Some((note, _recipient, memo)) = try_note_decryption(&domain, pivk, action) {
+                outputs.push(decrypted_output_from_note(&note, &memo));
+            }
+        }
+    }
 
-                let memo_text = if memo_len > 0 {
-                    String::from_utf8(memo_bytes[..memo_len].to_vec()).unwrap_or_default()
-                } else {
-                    String::new()
-                };
-
-                let amount_zatoshis = note.value().inner();
-                let amount_zec = amount_zatoshis as f64 / 100_000_000.0;
-
-                if !memo_text.trim().is_empty() {
-                    tracing::debug!(
-                        has_memo = true,
-                        memo_len = memo_text.len(),
-                        amount_zec,
-                        "Decrypted Orchard output"
-                    );
-                }
-
-                outputs.push(DecryptedOutput {
-                    memo: memo_text,
-                    amount_zec,
-                    amount_zatoshis,
-                    recipient_raw,
-                });
+    // Decrypt Ironwood bundle (v6 transactions only)
+    if let Some(bundle) = tx.ironwood_bundle() {
+        for action in bundle.actions().iter() {
+            let domain = IronwoodDomain::for_action(action);
+            let pivk = &keys.pivk_external;
+            if let Some((note, _recipient, memo)) = try_note_decryption(&domain, pivk, action) {
+                outputs.push(decrypted_output_from_note(&note, &memo));
             }
         }
     }
@@ -194,6 +169,41 @@ pub(crate) fn parse_orchard_fvk(ufvk_str: &str) -> Result<FullViewingKey> {
         .ok_or_else(|| anyhow::anyhow!("Failed to parse Orchard FVK from bytes"))
 }
 
+/// Extract a DecryptedOutput from a decrypted note and memo.
+fn decrypted_output_from_note(note: &orchard::Note, memo: &[u8; 512]) -> DecryptedOutput {
+    let recipient_raw = note.recipient().to_raw_address_bytes();
+    let memo_bytes = memo.as_slice();
+    let memo_len = memo_bytes
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(memo_bytes.len());
+
+    let memo_text = if memo_len > 0 {
+        String::from_utf8(memo_bytes[..memo_len].to_vec()).unwrap_or_default()
+    } else {
+        String::new()
+    };
+
+    let amount_zatoshis = note.value().inner();
+    let amount_zec = amount_zatoshis as f64 / 100_000_000.0;
+
+    if !memo_text.trim().is_empty() {
+        tracing::debug!(
+            has_memo = true,
+            memo_len = memo_text.len(),
+            amount_zec,
+            "Decrypted shielded output"
+        );
+    }
+
+    DecryptedOutput {
+        memo: memo_text,
+        amount_zec,
+        amount_zatoshis,
+        recipient_raw,
+    }
+}
+
 /// Trial-decrypt all Orchard outputs using a viewing key (UIVK or UFVK).
 /// Returns the first successfully decrypted output.
 pub fn try_decrypt_outputs(raw_hex: &str, key_str: &str) -> Result<Option<DecryptedOutput>> {
@@ -201,7 +211,7 @@ pub fn try_decrypt_outputs(raw_hex: &str, key_str: &str) -> Result<Option<Decryp
     Ok(results.into_iter().next())
 }
 
-/// Trial-decrypt ALL Orchard outputs using a viewing key (UIVK or UFVK).
+/// Trial-decrypt ALL Orchard and Ironwood outputs using a viewing key (UIVK or UFVK).
 /// External scope only -- sufficient for incoming payment detection.
 pub fn try_decrypt_all_outputs_ivk(raw_hex: &str, key_str: &str) -> Result<Vec<DecryptedOutput>> {
     let tx_bytes = hex::decode(raw_hex)?;
@@ -220,62 +230,41 @@ pub fn try_decrypt_all_outputs_ivk(raw_hex: &str, key_str: &str) -> Result<Vec<D
     let prepared_ivk = PreparedIncomingViewingKey::new(&ivk);
 
     let mut cursor = Cursor::new(&tx_bytes[..]);
-    let tx = match Transaction::read(&mut cursor, BranchId::Nu6_2) {
+    let tx = match Transaction::read(&mut cursor, BranchId::Nu6_3) {
         Ok(tx) => tx,
         Err(_) => return Ok(vec![]),
     };
 
-    let bundle = match tx.orchard_bundle() {
-        Some(b) => b,
-        None => return Ok(vec![]),
-    };
-
-    let actions: Vec<_> = bundle.actions().iter().collect();
     let mut outputs = Vec::new();
 
-    for action in &actions {
-        let domain = OrchardDomain::for_action(*action);
-
-        if let Some((note, _recipient, memo)) = try_note_decryption(&domain, &prepared_ivk, *action)
-        {
-            let recipient_raw = note.recipient().to_raw_address_bytes();
-            let memo_bytes = memo.as_slice();
-            let memo_len = memo_bytes
-                .iter()
-                .position(|&b| b == 0)
-                .unwrap_or(memo_bytes.len());
-
-            let memo_text = if memo_len > 0 {
-                String::from_utf8(memo_bytes[..memo_len].to_vec()).unwrap_or_default()
-            } else {
-                String::new()
-            };
-
-            let amount_zatoshis = note.value().inner();
-            let amount_zec = amount_zatoshis as f64 / 100_000_000.0;
-
-            if !memo_text.trim().is_empty() {
-                tracing::debug!(
-                    has_memo = true,
-                    memo_len = memo_text.len(),
-                    amount_zec,
-                    "Decrypted Orchard output"
-                );
+    // Decrypt Orchard bundle
+    if let Some(bundle) = tx.orchard_bundle() {
+        for action in bundle.actions().iter() {
+            let domain = OrchardDomain::for_action(action);
+            if let Some((note, _recipient, memo)) =
+                try_note_decryption(&domain, &prepared_ivk, action)
+            {
+                outputs.push(decrypted_output_from_note(&note, &memo));
             }
+        }
+    }
 
-            outputs.push(DecryptedOutput {
-                memo: memo_text,
-                amount_zec,
-                amount_zatoshis,
-                recipient_raw,
-            });
+    // Decrypt Ironwood bundle
+    if let Some(bundle) = tx.ironwood_bundle() {
+        for action in bundle.actions().iter() {
+            let domain = IronwoodDomain::for_action(action);
+            if let Some((note, _recipient, memo)) =
+                try_note_decryption(&domain, &prepared_ivk, action)
+            {
+                outputs.push(decrypted_output_from_note(&note, &memo));
+            }
         }
     }
 
     Ok(outputs)
 }
 
-/// Trial-decrypt ALL Orchard outputs using a UFVK (both scopes).
+/// Trial-decrypt ALL Orchard and Ironwood outputs using a UFVK (both scopes).
 /// Used for fee detection where CipherPay's own FEE_UFVK needs full scope scanning.
 pub fn try_decrypt_all_outputs(raw_hex: &str, ufvk_str: &str) -> Result<Vec<DecryptedOutput>> {
     let tx_bytes = hex::decode(raw_hex)?;
@@ -292,60 +281,41 @@ pub fn try_decrypt_all_outputs(raw_hex: &str, ufvk_str: &str) -> Result<Vec<Decr
     };
 
     let mut cursor = Cursor::new(&tx_bytes[..]);
-    let tx = match Transaction::read(&mut cursor, BranchId::Nu6_2) {
+    let tx = match Transaction::read(&mut cursor, BranchId::Nu6_3) {
         Ok(tx) => tx,
         Err(_) => return Ok(vec![]),
     };
 
-    let bundle = match tx.orchard_bundle() {
-        Some(b) => b,
-        None => return Ok(vec![]),
-    };
-
-    let actions: Vec<_> = bundle.actions().iter().collect();
     let mut outputs = Vec::new();
 
-    for action in &actions {
-        let domain = OrchardDomain::for_action(*action);
-
-        for scope in [Scope::External, Scope::Internal] {
-            let ivk = fvk.to_ivk(scope);
-            let prepared_ivk = PreparedIncomingViewingKey::new(&ivk);
-
-            if let Some((note, _recipient, memo)) =
-                try_note_decryption(&domain, &prepared_ivk, *action)
-            {
-                let recipient_raw = note.recipient().to_raw_address_bytes();
-                let memo_bytes = memo.as_slice();
-                let memo_len = memo_bytes
-                    .iter()
-                    .position(|&b| b == 0)
-                    .unwrap_or(memo_bytes.len());
-
-                let memo_text = if memo_len > 0 {
-                    String::from_utf8(memo_bytes[..memo_len].to_vec()).unwrap_or_default()
-                } else {
-                    String::new()
-                };
-
-                let amount_zatoshis = note.value().inner();
-                let amount_zec = amount_zatoshis as f64 / 100_000_000.0;
-
-                if !memo_text.trim().is_empty() {
-                    tracing::debug!(
-                        has_memo = true,
-                        memo_len = memo_text.len(),
-                        amount_zec,
-                        "Decrypted Orchard output"
-                    );
+    // Decrypt Orchard bundle (both scopes)
+    if let Some(bundle) = tx.orchard_bundle() {
+        for action in bundle.actions().iter() {
+            let domain = OrchardDomain::for_action(action);
+            for scope in [Scope::External, Scope::Internal] {
+                let ivk = fvk.to_ivk(scope);
+                let prepared_ivk = PreparedIncomingViewingKey::new(&ivk);
+                if let Some((note, _recipient, memo)) =
+                    try_note_decryption(&domain, &prepared_ivk, action)
+                {
+                    outputs.push(decrypted_output_from_note(&note, &memo));
                 }
+            }
+        }
+    }
 
-                outputs.push(DecryptedOutput {
-                    memo: memo_text,
-                    amount_zec,
-                    amount_zatoshis,
-                    recipient_raw,
-                });
+    // Decrypt Ironwood bundle (both scopes)
+    if let Some(bundle) = tx.ironwood_bundle() {
+        for action in bundle.actions().iter() {
+            let domain = IronwoodDomain::for_action(action);
+            for scope in [Scope::External, Scope::Internal] {
+                let ivk = fvk.to_ivk(scope);
+                let prepared_ivk = PreparedIncomingViewingKey::new(&ivk);
+                if let Some((note, _recipient, memo)) =
+                    try_note_decryption(&domain, &prepared_ivk, action)
+                {
+                    outputs.push(decrypted_output_from_note(&note, &memo));
+                }
             }
         }
     }
