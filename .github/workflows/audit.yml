@@ -20,9 +20,11 @@ jobs:
       # RUSTSEC-2023-0071: Marvin Attack on rsa (transitive, no direct exposure)
       # RUSTSEC-2026-0097: (previous advisory, retained for safety)
       # RUSTSEC-2026-0105: core2 unmaintained — zcash upstream dependency
+      # RUSTSEC-2026-0173: proc-macro-error2 unmaintained — transitive via getset (orchard/zcash_primitives)
       - run: >-
           cargo audit
           --deny unmaintained --deny unsound
           --ignore RUSTSEC-2023-0071
           --ignore RUSTSEC-2026-0097
           --ignore RUSTSEC-2026-0105
+          --ignore RUSTSEC-2026-0173
