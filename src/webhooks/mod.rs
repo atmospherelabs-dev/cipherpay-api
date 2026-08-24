@@ -28,6 +28,19 @@ fn retry_delay_secs(attempt: i64) -> i64 {
     }
 }
 
+/// Retry delay with up to +25% jitter, so deliveries that failed around the
+/// same time don't all come due on the same retry-worker tick. Bursts of
+/// same-host retries look like abuse to per-IP rate limiters (e.g.
+/// WordPress.com returns sticky 429s for the whole source IP).
+fn jittered_retry_delay_secs(attempt: i64) -> i64 {
+    let base = retry_delay_secs(attempt);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as i64)
+        .unwrap_or(0);
+    base + nanos % (base / 4).max(1)
+}
+
 pub async fn dispatch_payment(
     pool: &SqlitePool,
     http: &reqwest::Client,
@@ -75,7 +88,7 @@ pub async fn dispatch_payment(
     let signature = sign_payload(&webhook_secret, &timestamp, &payload_str);
 
     let delivery_id = Uuid::new_v4().to_string();
-    let next_retry = (Utc::now() + chrono::Duration::seconds(retry_delay_secs(1)))
+    let next_retry = (Utc::now() + chrono::Duration::seconds(jittered_retry_delay_secs(1)))
         .format("%Y-%m-%dT%H:%M:%SZ")
         .to_string();
 
@@ -185,7 +198,7 @@ pub async fn dispatch_event(
     let signature = sign_payload(&webhook_secret, &timestamp, &payload_str);
 
     let delivery_id = Uuid::new_v4().to_string();
-    let next_retry = (Utc::now() + chrono::Duration::seconds(retry_delay_secs(1)))
+    let next_retry = (Utc::now() + chrono::Duration::seconds(jittered_retry_delay_secs(1)))
         .format("%Y-%m-%dT%H:%M:%SZ")
         .to_string();
 
@@ -264,13 +277,29 @@ pub async fn retry_failed(
          WHERE wd.status = 'pending'
          AND wd.attempts < 5
          AND (wd.next_retry_at IS NULL OR wd.next_retry_at <= ?)
+         ORDER BY wd.next_retry_at ASC
          LIMIT 200",
     )
     .bind(&now)
     .fetch_all(pool)
     .await?;
 
+    // One attempt per destination host per cycle. Back-to-back requests to
+    // the same host look like a burst to per-IP rate limiters and can put
+    // our IP in a penalty window that then rejects every delivery. Skipped
+    // rows stay pending (attempts untouched) and are due again next cycle,
+    // giving a natural >=60s spacing between same-host attempts.
+    let mut attempted_hosts: std::collections::HashSet<String> = std::collections::HashSet::new();
+
     for (id, url, payload, raw_secret, attempts) in rows {
+        if let Some(host) = url::Url::parse(&url)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_owned))
+        {
+            if !attempted_hosts.insert(host) {
+                continue;
+            }
+        }
         let secret = match crate::crypto::decrypt_webhook_secret(&raw_secret, encryption_key) {
             Ok(s) => s,
             Err(e) => {
@@ -302,7 +331,7 @@ pub async fn retry_failed(
         let updated_payload = body.to_string();
         let signature = sign_payload(&secret, &ts, &updated_payload);
 
-        let (resp_status, resp_error, success) = match http
+        let (resp_status, resp_error, success, retry_after_secs) = match http
             .post(&url)
             .header("X-CipherPay-Signature", &signature)
             .header("X-CipherPay-Timestamp", &ts)
@@ -312,13 +341,26 @@ pub async fn retry_failed(
             .send()
             .await
         {
-            Ok(resp) if resp.status().is_success() => (resp.status().as_u16() as i32, None, true),
-            Ok(resp) => (
-                resp.status().as_u16() as i32,
-                Some(format!("HTTP {}", resp.status())),
-                false,
-            ),
-            Err(e) => (0, Some(e.to_string()), false),
+            Ok(resp) if resp.status().is_success() => {
+                (resp.status().as_u16() as i32, None, true, None)
+            }
+            Ok(resp) => {
+                // Honor Retry-After (seconds form) on rejection so we back
+                // off as long as the endpoint asks, never sooner than our
+                // own schedule.
+                let retry_after = resp
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.trim().parse::<i64>().ok());
+                (
+                    resp.status().as_u16() as i32,
+                    Some(format!("HTTP {}", resp.status())),
+                    false,
+                    retry_after,
+                )
+            }
+            Err(e) => (0, Some(e.to_string()), false, None),
         };
 
         if success {
@@ -343,7 +385,13 @@ pub async fn retry_failed(
                 .await?;
                 tracing::warn!(delivery_id = %id, "Webhook permanently failed after 5 attempts");
             } else {
-                let next = (Utc::now() + chrono::Duration::seconds(retry_delay_secs(new_attempts)))
+                let base_delay = jittered_retry_delay_secs(new_attempts);
+                // Respect Retry-After up to the 10h max backoff, but never
+                // retry sooner than our own schedule.
+                let delay = retry_after_secs
+                    .map(|ra| base_delay.max(ra.min(36000)))
+                    .unwrap_or(base_delay);
+                let next = (Utc::now() + chrono::Duration::seconds(delay))
                     .format("%Y-%m-%dT%H:%M:%SZ")
                     .to_string();
                 sqlx::query(
