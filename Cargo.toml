@@ -29,9 +29,12 @@ reqwest = { version = "0.12", features = ["json"] }
 tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
 
 # Zcash crates (NU6.3 / Ironwood support)
-zcash_primitives = { version = "0.29", default-features = false }
+# Zakura Common: performance-optimized forks of librustzcash (1.5x trial decryption,
+# 21x Sinsemilla). Same APIs, lib names unchanged — `use zcash_primitives::...` and
+# `use orchard::...` still work.
+zcash_primitives = { package = "zakura-primitives", version = "1.0.1", default-features = false }
 zcash_note_encryption = "0.4.2"
-orchard = { version = "0.15", default-features = false, features = ["std"] }
+orchard = { package = "zakura-orchard", version = "1.0.1", default-features = false, features = ["std"] }
 zcash_address = "0.13"
 zcash_protocol = "0.10"
 
