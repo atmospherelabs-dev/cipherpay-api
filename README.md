@@ -167,6 +167,7 @@ Signature = HMAC-SHA256(`timestamp.body`, `webhook_secret`)
 | **x402** | | | |
 | `POST` | `/api/x402/verify` | API key | Verify HTTP 402 payment |
 | `GET` | `/api/merchants/me/x402/history` | Session | x402 verification history |
+- [JMT x402 Agent Tools](https://jmt-x402-proxy.jmthomasofficial.workers.dev) — 25 paid x402 endpoints on Base mainnet: web search, AI analysis, crypto/stock data, SEC filings, company intel, news, sentiment, macro dashboard. $0.001-$0.15/call USDC. Local LLM-powered.
 
 ## Project Structure
 
