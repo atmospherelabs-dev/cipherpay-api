@@ -7,6 +7,19 @@ test -f "$release/build-success"
 test -x "$release/cipherpay"
 test -f "$release/migration-verified"
 python3 /opt/cipherpay-api/scripts/backup.py
+systemctl stop cipherpay-api.service
+trap 'trap - ERR; bash "$release/source/scripts/rollback-audit.sh"' ERR
+python3 "$release/source/scripts/repair-orphan-payments.py" archive-clean \
+    /opt/cipherpay-api/cipherpay.db "$release/rollback/orphan-payments.json"
+if ! (cd "$release" && DATABASE_URL=sqlite:/opt/cipherpay-api/cipherpay.db ./cipherpay --check-database > migration-live.log 2>&1); then
+    bash "$release/source/scripts/rollback-audit.sh"
+    exit 1
+fi
+python3 "$release/source/scripts/repair-orphan-payments.py" record-consumption \
+    /opt/cipherpay-api/cipherpay.db "$release/rollback/orphan-payments.json"
+for database_file in /opt/cipherpay-api/cipherpay.db /opt/cipherpay-api/cipherpay.db-wal /opt/cipherpay-api/cipherpay.db-shm; do
+    if test -f "$database_file"; then chown cipherpay:cipherpay "$database_file"; fi
+done
 chgrp cipherpay "$release"
 chmod 750 "$release"
 chmod 755 "$release/cipherpay"
