@@ -210,3 +210,22 @@ async fn prepared_session_consumption_rolls_back_and_cannot_be_reused() {
     );
     assert!(!crate::sessions::txid_already_used(&pool, "other").await);
 }
+
+#[tokio::test]
+async fn upgrade_supports_deployments_without_legacy_idempotency_table() {
+    let file = std::env::temp_dir().join(format!("cipherpay-upgrade-{}.db", uuid::Uuid::new_v4()));
+    let url = format!("sqlite:{}", file.display());
+    let pool = crate::db::create_pool(&url).await.unwrap();
+    for statement in ["DROP TRIGGER invoice_payment_outbox", "DROP TABLE payment_consumptions", "DROP TABLE session_charges", "DROP TABLE x402_idempotency_v2", "DROP TABLE IF EXISTS x402_idempotency", "DELETE FROM schema_migrations WHERE name IN ('audit_repairs_v2026_09_08','payment_outbox_v2026_09_08')"] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    pool.close().await;
+    let upgraded = crate::db::create_pool(&url).await.unwrap();
+    let violations = sqlx::query("PRAGMA foreign_key_check")
+        .fetch_all(&upgraded)
+        .await
+        .unwrap();
+    assert!(violations.is_empty());
+    upgraded.close().await;
+    std::fs::remove_file(file).unwrap();
+}

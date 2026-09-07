@@ -320,7 +320,7 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
             "INSERT OR IGNORE INTO payment_consumptions (txid, purpose) SELECT lower(txid), 'legacy-x402' FROM x402_verifications WHERE status = 'verified'",
             "CREATE TABLE session_charges (session_id TEXT NOT NULL, request_id TEXT NOT NULL, resource TEXT NOT NULL, amount INTEGER NOT NULL, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')), PRIMARY KEY(session_id, request_id))",
             "CREATE TABLE x402_idempotency_v2 (merchant_id TEXT NOT NULL, idempotency_key TEXT NOT NULL, request_hash TEXT NOT NULL, response_json TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')), PRIMARY KEY(merchant_id, idempotency_key))",
-            "DELETE FROM x402_idempotency",
+            "DROP TABLE IF EXISTS x402_idempotency",
         ] { sqlx::query(sql).execute(&mut *tx).await?; }
         tx.commit().await?;
         Ok(())
