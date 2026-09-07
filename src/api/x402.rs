@@ -135,6 +135,23 @@ pub async fn verify(
 
     let previously_verified = false;
 
+    if !crate::scanner::blocks::check_tx_confirmed(
+        &http_client,
+        &config.cipherscan_api_url,
+        &body.txid,
+    )
+    .await
+    .unwrap_or(false)
+    {
+        return HttpResponse::Ok().json(VerifyResponse {
+            valid: false,
+            received_zec: 0.0,
+            received_zatoshis: 0,
+            previously_verified: false,
+            reason: Some("Payment is not confirmed".to_string()),
+        });
+    }
+
     let raw_hex =
         match mempool::fetch_raw_tx(&http_client, &config.cipherscan_api_url, &body.txid).await {
             Ok(hex) => hex,
