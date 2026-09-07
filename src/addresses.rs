@@ -37,10 +37,13 @@ mod tests {
 
     #[test]
     fn test_derive_different_indices_produce_different_addresses() {
-        let test_key = std::env::var("TEST_UFVK").unwrap_or_default();
-        if test_key.is_empty() {
-            return;
-        }
+        use orchard::keys::{FullViewingKey, SpendingKey};
+        use zcash_address::unified::{Fvk, Ufvk};
+        let sk = SpendingKey::from_bytes([7u8; 32]).unwrap();
+        let fvk = FullViewingKey::from(&sk);
+        let test_key = Ufvk::try_from_items(vec![Fvk::Orchard(fvk.to_bytes())])
+            .unwrap()
+            .encode(&zcash_protocol::consensus::NetworkType::Main);
 
         let addr0 = derive_invoice_address(&test_key, 0).unwrap();
         let addr1 = derive_invoice_address(&test_key, 1).unwrap();

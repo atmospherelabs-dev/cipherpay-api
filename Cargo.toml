@@ -7,7 +7,7 @@ license = "MIT"
 
 [dependencies]
 # Web framework
-actix-web = "4"
+actix-web = { version = "4", default-features = false, features = ["macros", "cookies", "compress-gzip", "compress-brotli", "compress-zstd"] }
 actix-cors = "0.7"
 actix-web-lab = "0.24"
 actix-governor = "0.7"
@@ -16,7 +16,7 @@ actix-governor = "0.7"
 tokio = { version = "1", features = ["full"] }
 
 # Database (SQLite for local dev, Postgres for production)
-sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "uuid", "chrono", "json"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "derive", "uuid", "chrono", "json"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

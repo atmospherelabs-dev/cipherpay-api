@@ -152,14 +152,13 @@ pub async fn me(req: HttpRequest, pool: web::Data<SqlitePool>) -> HttpResponse {
 
     let has_passkeys = super::passkey::has_passkeys(pool.get_ref(), &merchant.id).await;
 
-    let last_token_login: Option<String> = sqlx::query_scalar(
-        "SELECT last_token_login_at FROM merchants WHERE id = ?",
-    )
-    .bind(&merchant.id)
-    .fetch_optional(pool.get_ref())
-    .await
-    .ok()
-    .flatten();
+    let last_token_login: Option<String> =
+        sqlx::query_scalar("SELECT last_token_login_at FROM merchants WHERE id = ?")
+            .bind(&merchant.id)
+            .fetch_optional(pool.get_ref())
+            .await
+            .ok()
+            .flatten();
 
     HttpResponse::Ok().json(serde_json::json!({
         "id": merchant.id,
@@ -455,9 +454,7 @@ pub async fn retry_webhook(
             .json(serde_json::json!({"error": format!("Blocked: {reason}")}));
     }
 
-    let ts = chrono::Utc::now()
-        .format("%Y-%m-%dT%H:%M:%SZ")
-        .to_string();
+    let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let mut body: serde_json::Value = match serde_json::from_str(&payload) {
         Ok(v) => v,
         Err(_) => {
@@ -530,8 +527,7 @@ pub async fn retry_webhook(
             .bind(&delivery_id)
             .execute(pool.get_ref())
             .await;
-            HttpResponse::Ok()
-                .json(serde_json::json!({"status": "failed", "error": error_text}))
+            HttpResponse::Ok().json(serde_json::json!({"status": "failed", "error": error_text}))
         }
     }
 }
@@ -560,12 +556,15 @@ pub fn invalid_api_key_response() -> HttpResponse {
 pub async fn resolve_session(req: &HttpRequest, pool: &SqlitePool) -> Option<merchants::Merchant> {
     let config = req.app_data::<web::Data<crate::config::Config>>()?;
     if let Some(session_id) = extract_session_id(req) {
-        if let Ok(Some(m)) = merchants::get_by_session(pool, &session_id, &config.encryption_key).await {
+        if let Ok(Some(m)) =
+            merchants::get_by_session(pool, &session_id, &config.encryption_key).await
+        {
             return Some(m);
         }
     }
     if let Some(pos_id) = extract_pos_session_id(req) {
-        if let Ok(Some(m)) = merchants::get_by_session(pool, &pos_id, &config.encryption_key).await {
+        if let Ok(Some(m)) = merchants::get_by_session(pool, &pos_id, &config.encryption_key).await
+        {
             return Some(m);
         }
     }
@@ -574,12 +573,16 @@ pub async fn resolve_session(req: &HttpRequest, pool: &SqlitePool) -> Option<mer
 
 /// Resolve a merchant from session cookie, rejecting POS-scoped sessions.
 /// Use for account-management endpoints that must not be accessible via PIN.
-pub async fn resolve_full_session(req: &HttpRequest, pool: &SqlitePool) -> Option<merchants::Merchant> {
+pub async fn resolve_full_session(
+    req: &HttpRequest,
+    pool: &SqlitePool,
+) -> Option<merchants::Merchant> {
     let session_id = extract_session_id(req)?;
     let config = req.app_data::<web::Data<crate::config::Config>>()?;
-    let (merchant, pos_scoped) = merchants::get_by_session_with_scope(pool, &session_id, &config.encryption_key)
-        .await
-        .ok()??;
+    let (merchant, pos_scoped) =
+        merchants::get_by_session_with_scope(pool, &session_id, &config.encryption_key)
+            .await
+            .ok()??;
     if pos_scoped {
         return None;
     }
@@ -597,7 +600,9 @@ pub async fn resolve_with_kind(
     if let Some(auth) = req.headers().get("Authorization") {
         if let Ok(auth_str) = auth.to_str() {
             let key = auth_str.strip_prefix("Bearer ").unwrap_or(auth_str).trim();
-            if key.starts_with("cpay_sk_") || key.starts_with("cpay_rk_") || key.starts_with("cpay_")
+            if key.starts_with("cpay_sk_")
+                || key.starts_with("cpay_rk_")
+                || key.starts_with("cpay_")
             {
                 return merchants::authenticate_with_kind(pool, key, &config.encryption_key)
                     .await
@@ -1125,4 +1130,40 @@ fn validate_update(
         }
     }
     Ok(())
+}
+
+/// Read the existing integration secret without rotating it as a setup side effect.
+pub async fn webhook_config(
+    req: HttpRequest,
+    pool: web::Data<SqlitePool>,
+    config: web::Data<Config>,
+) -> HttpResponse {
+    let merchant = match require_full_session(&req, pool.get_ref()).await {
+        Ok(m) => m,
+        Err(r) => return r,
+    };
+    let secret = match crate::crypto::decrypt_webhook_secret(
+        &merchant.webhook_secret,
+        &config.encryption_key,
+    ) {
+        Ok(s) => s,
+        Err(_) => return HttpResponse::InternalServerError().finish(),
+    };
+    HttpResponse::Ok()
+        .insert_header(("Cache-Control", "no-store"))
+        .json(serde_json::json!({"webhook_url":merchant.webhook_url,"webhook_secret":secret}))
+}
+/// Finalize setup only if it does not replace a different integration.
+pub async fn connect_shopify(req: HttpRequest, pool: web::Data<SqlitePool>) -> HttpResponse {
+    let merchant = match require_full_session(&req, pool.get_ref()).await {
+        Ok(m) => m,
+        Err(r) => return r,
+    };
+    let target = "https://connect.cipherpay.app/api/webhook/cipherpay";
+    match sqlx::query("UPDATE merchants SET webhook_url = ? WHERE id = ? AND (webhook_url IS NULL OR webhook_url = '' OR webhook_url = ?)")
+        .bind(target).bind(&merchant.id).bind(target).execute(pool.get_ref()).await {
+        Ok(result) if result.rows_affected()==1 => HttpResponse::Ok().json(serde_json::json!({"ok":true})),
+        Ok(_) => HttpResponse::Conflict().json(serde_json::json!({"error":"A different webhook integration is already configured"})),
+        Err(_) => HttpResponse::InternalServerError().finish(),
+    }
 }

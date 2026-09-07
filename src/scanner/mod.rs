@@ -29,7 +29,13 @@ struct KeyCache {
     merchant_ids: Vec<String>,
 }
 
-pub async fn run(config: Config, pool: SqlitePool, scanner_http: reqwest::Client, webhook_http: reqwest::Client, price_service: PriceService) {
+pub async fn run(
+    config: Config,
+    pool: SqlitePool,
+    scanner_http: reqwest::Client,
+    webhook_http: reqwest::Client,
+    price_service: PriceService,
+) {
     // scanner_http: internal client for CipherScan API calls (carries X-Service-Key)
     // webhook_http: outbound client for merchant webhooks (no service keys, no redirects)
     let http = scanner_http;
@@ -106,15 +112,13 @@ pub async fn run(config: Config, pool: SqlitePool, scanner_http: reqwest::Client
                 } => {
                     match result {
                         Some(push) => {
-                            {
-                                let mut seen_set = mempool_seen.write().await;
-                                seen_set.insert(push.txid.clone(), Instant::now());
-                            }
                             if let Err(e) = process_ws_mempool_tx(
                                 &mempool_config, &mempool_pool, &mempool_http, &mempool_webhook_http,
                                 &push, &mut key_cache, &mempool_price_service,
                             ).await {
                                 tracing::error!(error = %e, txid = %push.txid, "WS mempool tx error");
+                            } else {
+                                mempool_seen.write().await.insert(push.txid.clone(), Instant::now());
                             }
                         }
                         None => {
@@ -187,7 +191,8 @@ pub async fn run(config: Config, pool: SqlitePool, scanner_http: reqwest::Client
             {
                 Ok(_) => {
                     block_cb.record_success();
-                    metrics::global().set_last_block_scan_ms(block_start.elapsed().as_millis() as u64);
+                    metrics::global()
+                        .set_last_block_scan_ms(block_start.elapsed().as_millis() as u64);
                 }
                 Err(e) => {
                     block_cb.record_failure();
@@ -276,41 +281,20 @@ fn refresh_key_cache<'a>(
     &cache.as_ref().unwrap().keys
 }
 
-/// Fire a payment webhook without blocking the scan loop.
+/// State transitions persist the webhook in the same database transaction.
+/// Wake the worker only after the transition has committed.
 fn spawn_payment_webhook(
-    pool: &SqlitePool,
-    webhook_http: &reqwest::Client,
-    invoice_id: &str,
-    event: &str,
-    txid: &str,
-    price_zatoshis: i64,
-    received_zatoshis: i64,
-    overpaid: bool,
-    encryption_key: &str,
+    _pool: &SqlitePool,
+    _http: &reqwest::Client,
+    _invoice_id: &str,
+    _event: &str,
+    _txid: &str,
+    _price: i64,
+    _received: i64,
+    _overpaid: bool,
+    _key: &str,
 ) {
-    let pool = pool.clone();
-    let http = webhook_http.clone();
-    let invoice_id = invoice_id.to_string();
-    let event = event.to_string();
-    let txid = txid.to_string();
-    let enc_key = encryption_key.to_string();
-    tokio::spawn(async move {
-        if let Err(e) = webhooks::dispatch_payment(
-            &pool,
-            &http,
-            &invoice_id,
-            &event,
-            &txid,
-            price_zatoshis,
-            received_zatoshis,
-            overpaid,
-            &enc_key,
-        )
-        .await
-        {
-            tracing::error!(invoice_id, event, error = %e, "Async payment webhook failed");
-        }
-    });
+    crate::webhooks::wake();
 }
 
 async fn scan_mempool(
@@ -352,14 +336,6 @@ async fn scan_mempool(
     metrics::global().record_mempool_txs(new_txids.len() as u64);
     tracing::debug!(count = new_txids.len(), "New mempool transactions");
 
-    {
-        let mut seen_set = seen.write().await;
-        let now = Instant::now();
-        for txid in &new_txids {
-            seen_set.insert(txid.clone(), now);
-        }
-    }
-
     let raw_txs = mempool::fetch_raw_txs_batch(http, &config.cipherscan_api_url, &new_txids).await;
     tracing::debug!(
         fetched = raw_txs.len(),
@@ -381,14 +357,20 @@ async fn scan_mempool(
             &invoice_index,
             &campaign_addresses,
             invoice_detection::MempoolSource::Polling,
-        );
-        let detected =
-            invoice_detection::apply_mempool_invoice_totals(pool, webhook_http, config, txid, &invoice_totals)
-                .await?;
+        )?;
+        let detected = invoice_detection::apply_mempool_invoice_totals(
+            pool,
+            webhook_http,
+            config,
+            txid,
+            &invoice_totals,
+        )
+        .await?;
         for invoice_id in &detected {
             try_detect_fee(pool, config, raw_hex, invoice_id).await;
         }
         invoice_detection::apply_campaign_totals(pool, txid, &campaign_totals, price_service).await;
+        seen.write().await.insert(txid.clone(), Instant::now());
     }
 
     Ok(())
@@ -430,7 +412,7 @@ async fn process_ws_mempool_tx(
         &invoice_index,
         &campaign_addresses,
         invoice_detection::MempoolSource::WebSocket,
-    );
+    )?;
     let detected = invoice_detection::apply_mempool_invoice_totals(
         pool,
         webhook_http,
@@ -442,7 +424,8 @@ async fn process_ws_mempool_tx(
     for invoice_id in &detected {
         try_detect_fee(pool, config, &push.raw_hex, invoice_id).await;
     }
-    invoice_detection::apply_campaign_totals(pool, &push.txid, &campaign_totals, price_service).await;
+    invoice_detection::apply_campaign_totals(pool, &push.txid, &campaign_totals, price_service)
+        .await;
 
     Ok(())
 }
@@ -488,6 +471,36 @@ fn earliest_relevant_timestamp(
     }
 }
 
+/// Recheck canonical confirmation of every contribution on every attempt.
+/// A missing, dropped or reorged contribution never counts toward fulfillment.
+async fn confirmed_payment_total(
+    pool: &SqlitePool,
+    http: &reqwest::Client,
+    api_url: &str,
+    invoice_id: &str,
+) -> anyhow::Result<i64> {
+    let payments = sqlx::query_as::<_, (String, i64)>(
+        "SELECT txid, zatoshis FROM invoice_payments WHERE invoice_id = ?",
+    )
+    .bind(invoice_id)
+    .fetch_all(pool)
+    .await?;
+    let mut total = 0i64;
+    for (txid, amount) in payments {
+        if blocks::check_tx_confirmed(http, api_url, &txid).await? {
+            total = total
+                .checked_add(amount)
+                .ok_or_else(|| anyhow::anyhow!("Payment total overflow"))?;
+        }
+    }
+    sqlx::query("UPDATE invoices SET received_zatoshis = ? WHERE id = ? AND status = 'detected'")
+        .bind(total)
+        .bind(invoice_id)
+        .execute(pool)
+        .await?;
+    Ok(total)
+}
+
 async fn scan_blocks(
     config: &Config,
     pool: &SqlitePool,
@@ -509,10 +522,21 @@ async fn scan_blocks(
             .collect();
         for invoice in &detected {
             if let Some(txid) = &invoice.detected_txid {
-                match blocks::check_tx_confirmed(http, &config.cipherscan_api_url, txid).await {
-                    Ok(true) => {
+                match confirmed_payment_total(pool, http, &config.cipherscan_api_url, &invoice.id)
+                    .await
+                {
+                    Ok(total)
+                        if total
+                            >= (invoice.price_zatoshis as f64 * decrypt::SLIPPAGE_TOLERANCE)
+                                as i64 =>
+                    {
+                        let mut invoice = invoice.clone();
+                        invoice.received_zatoshis = total;
+                        let invoice = &invoice;
                         let (conf_rate, conf_fiat) = confirmed_fiat(price_service, invoice).await;
-                        let changed = invoices::mark_confirmed(pool, &invoice.id, conf_rate, conf_fiat).await?;
+                        let changed =
+                            invoices::mark_confirmed(pool, &invoice.id, conf_rate, conf_fiat)
+                                .await?;
                         if changed {
                             let overpaid =
                                 invoice.received_zatoshis > invoice.price_zatoshis + 1000;
@@ -531,7 +555,9 @@ async fn scan_blocks(
 
                             // Scan for ZIP 321 fee output that mempool path may have missed
                             if config.fee_enabled() {
-                                match mempool::fetch_raw_tx(http, &config.cipherscan_api_url, txid).await {
+                                match mempool::fetch_raw_tx(http, &config.cipherscan_api_url, txid)
+                                    .await
+                                {
                                     Ok(raw_hex) => {
                                         try_detect_fee(pool, config, &raw_hex, &invoice.id).await;
                                     }
@@ -542,7 +568,7 @@ async fn scan_blocks(
                             }
                         }
                     }
-                    Ok(false) => {}
+                    Ok(_) => {}
                     Err(e) => tracing::debug!(txid, error = %e, "Confirmation check failed"),
                 }
             }
@@ -579,7 +605,9 @@ async fn scan_blocks(
         }
         *last_height.write().await = Some(current_height);
         metrics::global().set_last_block_height(current_height);
-        if let Err(e) = crate::db::set_scanner_state(pool, "last_height", &current_height.to_string()).await {
+        if let Err(e) =
+            crate::db::set_scanner_state(pool, "last_height", &current_height.to_string()).await
+        {
             tracing::warn!(error = %e, "Failed to persist last_height");
         }
         return Ok(());
@@ -593,7 +621,9 @@ async fn scan_blocks(
         if let Some(ts) = oldest_ts {
             let now = chrono::Utc::now();
             if let Ok(created) = chrono::DateTime::parse_from_rfc3339(&ts) {
-                let secs_ago = (now - created.with_timezone(&chrono::Utc)).num_seconds().max(0) as u64;
+                let secs_ago = (now - created.with_timezone(&chrono::Utc))
+                    .num_seconds()
+                    .max(0) as u64;
                 let blocks_ago = secs_ago / 75 + 100;
                 let earliest_block = current_height.saturating_sub(blocks_ago);
                 if earliest_block > persisted_start {
@@ -647,31 +677,30 @@ async fn scan_blocks(
         let campaign_addresses = active_campaigns;
 
         for txid in &block_txids {
-            if seen.read().await.contains_key(txid) {
-                continue;
-            }
-
-            let raw_hex = match mempool::fetch_raw_tx(http, &config.cipherscan_api_url, txid).await
-            {
-                Ok(hex) => hex,
-                Err(_) => continue,
-            };
+            // Block processing is independent of the mempool cache. On failure,
+            // leave the checkpoint unchanged so the entire batch can be retried.
+            let raw_hex = mempool::fetch_raw_tx(http, &config.cipherscan_api_url, txid).await?;
+            decrypt::validate_raw_transaction(&raw_hex)?;
 
             let mut invoice_totals: HashMap<String, (invoices::Invoice, i64)> = HashMap::new();
-            let mut campaign_totals: HashMap<String, (crate::payment_links::CampaignAddress, i64)> = HashMap::new();
+            let mut campaign_totals: HashMap<String, (crate::payment_links::CampaignAddress, i64)> =
+                HashMap::new();
 
-            for (_merchant_id, keys) in cached_keys.iter() {
+            for (merchant_id, keys) in cached_keys.iter() {
                 if let Ok(outputs) = decrypt::try_decrypt_with_keys(&raw_hex, keys) {
                     for output in &outputs {
                         let recipient_hex = hex::encode(output.recipient_raw);
                         if let Some(invoice) =
-                            block_invoice_index.find(&recipient_hex, &output.memo)
+                            block_invoice_index.find(merchant_id, &recipient_hex, &output.memo)
                         {
                             let entry = invoice_totals
                                 .entry(invoice.id.clone())
                                 .or_insert((invoice.clone(), 0));
                             entry.1 += output.amount_zatoshis as i64;
-                        } else if let Some(campaign) = campaign_addresses.iter().find(|c| c.campaign_address_hex == recipient_hex) {
+                        } else if let Some(campaign) = campaign_addresses
+                            .iter()
+                            .find(|c| c.campaign_address_hex == recipient_hex)
+                        {
                             let entry = campaign_totals
                                 .entry(campaign.link_id.clone())
                                 .or_insert((campaign.clone(), 0));
@@ -696,11 +725,8 @@ async fn scan_blocks(
                     continue;
                 }
 
-                let new_received = if invoice.status == "underpaid" {
-                    invoices::record_payment(pool, invoice_id, txid, *tx_total).await?
-                } else {
-                    *tx_total
-                };
+                let new_received =
+                    invoices::record_payment(pool, invoice_id, txid, *tx_total).await?;
 
                 let min = (invoice.price_zatoshis as f64 * decrypt::SLIPPAGE_TOLERANCE) as i64;
 
@@ -711,23 +737,8 @@ async fn scan_blocks(
                         invoices::mark_detected(pool, invoice_id, txid, new_received).await?;
                     if detected {
                         metrics::global().record_payment_detected();
-                        let (conf_rate, conf_fiat) = confirmed_fiat(price_service, invoice).await;
-                        let confirmed = invoices::mark_confirmed(pool, invoice_id, conf_rate, conf_fiat).await?;
-                        if confirmed {
-                            let overpaid = new_received > invoice.price_zatoshis + 1000;
-                            spawn_payment_webhook(
-                                pool,
-                                webhook_http,
-                                invoice_id,
-                                "confirmed",
-                                txid,
-                                invoice.price_zatoshis,
-                                new_received,
-                                overpaid,
-                                &config.encryption_key,
-                            );
-                            on_invoice_confirmed(pool, webhook_http, config, invoice).await;
-                        }
+                        // Confirmation is performed on the next scan after checking
+                        // every contributing transaction, including mempool top-ups.
                         try_detect_fee(pool, config, &raw_hex, invoice_id).await;
                     }
                 } else if new_received < min && invoice.status == "pending" {
@@ -746,7 +757,8 @@ async fn scan_blocks(
                 }
             }
 
-            invoice_detection::apply_campaign_totals(pool, txid, &campaign_totals, price_service).await;
+            invoice_detection::apply_campaign_totals(pool, txid, &campaign_totals, price_service)
+                .await;
 
             seen.write().await.insert(txid.clone(), Instant::now());
         }
@@ -795,8 +807,13 @@ async fn on_invoice_confirmed(
 
             if let Ok(r) = marked {
                 if r.rows_affected() > 0 {
-                    if let Err(e) =
-                        crate::payment_links::increment_raised(pool, link_id, amount_cents, invoice.received_zatoshis).await
+                    if let Err(e) = crate::payment_links::increment_raised(
+                        pool,
+                        link_id,
+                        amount_cents,
+                        invoice.received_zatoshis,
+                    )
+                    .await
                     {
                         tracing::error!(invoice_id = %invoice.id, error = %e, "Failed to increment campaign total_raised");
                     }
@@ -1131,7 +1148,9 @@ async fn handle_luma_registration(
     }
 
     // Call Luma get_guest to retrieve check-in QR and full guest record
-    let guest_data = match crate::luma::get_guest(outbound_http, &api_key, luma_event_id, &email).await {
+    let guest_data = match crate::luma::get_guest(outbound_http, &api_key, luma_event_id, &email)
+        .await
+    {
         Ok(Some(g)) => serde_json::to_string(&g).unwrap_or_else(|_| "{}".into()),
         Ok(None) => {
             tracing::warn!(invoice_id = %invoice.id, "Luma get_guest returned empty after add");
@@ -1341,5 +1360,54 @@ async fn try_detect_fee(pool: &SqlitePool, config: &Config, raw_hex: &str, invoi
         Err(e) => {
             tracing::debug!(error = %e, "Fee UFVK decryption failed (non-critical)");
         }
+    }
+}
+
+#[cfg(test)]
+mod payment_confirmation_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    #[tokio::test]
+    async fn unconfirmed_partial_payment_never_counts_toward_fulfillment() {
+        let pool = crate::repair_tests::pool().await;
+        crate::repair_tests::merchant(&pool, "a").await;
+        crate::repair_tests::invoice(&pool, "one", "a").await;
+        invoices::record_payment(&pool, "one", "first", 400)
+            .await
+            .unwrap();
+        invoices::record_payment(&pool, "one", "second", 600)
+            .await
+            .unwrap();
+        invoices::mark_detected(&pool, "one", "second", 1000)
+            .await
+            .unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            for mut stream in listener.incoming().take(2).map(Result::unwrap) {
+                let mut buf = [0u8; 2048];
+                let n = stream.read(&mut buf).unwrap();
+                let request = String::from_utf8_lossy(&buf[..n]);
+                let body = if request.contains("/first ") {
+                    "{\"confirmations\":0,\"block_height\":100}"
+                } else {
+                    "{\"confirmations\":2}"
+                };
+                write!(stream,"HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
+            }
+        });
+        let total = confirmed_payment_total(&pool, &reqwest::Client::new(), &url, "one")
+            .await
+            .unwrap();
+        assert_eq!(total, 600);
+        assert_eq!(
+            invoices::get_invoice(&pool, "one")
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "detected"
+        );
+        server.join().unwrap();
     }
 }

@@ -1,20 +1,14 @@
 services:
-  db:
-    image: postgres:16-alpine
+  api:
+    build: .
+    restart: unless-stopped
+    env_file: .env
     environment:
-      POSTGRES_USER: cipherpay
-      POSTGRES_PASSWORD: cipherpay
-      POSTGRES_DB: cipherpay
+      API_HOST: 0.0.0.0
+      DATABASE_URL: sqlite:/data/cipherpay.db
     ports:
-      - "5433:5432"
+      - "127.0.0.1:3080:3080"
     volumes:
-      - pgdata:/var/lib/postgresql/data
-      - ./migrations:/docker-entrypoint-initdb.d
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U cipherpay"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
+      - cipherpay-data:/data
 volumes:
-  pgdata:
+  cipherpay-data:

@@ -115,17 +115,21 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
     // never deployed; this migration only affects local dev DBs that ran the
     // earlier programmatic_registration_v2026_04_28 migration. Production never
     // had it, so this is a no-op there. SQLite's DROP COLUMN requires sqlite >= 3.35.
-    run_tracked_migration(&pool, "remove_programmatic_registration_v2026_05_01", || async {
-        sqlx::query("DROP TABLE IF EXISTS registration_requests")
-            .execute(&pool)
-            .await
-            .ok();
-        sqlx::query("ALTER TABLE merchants DROP COLUMN merchant_type")
-            .execute(&pool)
-            .await
-            .ok();
-        Ok(())
-    })
+    run_tracked_migration(
+        &pool,
+        "remove_programmatic_registration_v2026_05_01",
+        || async {
+            sqlx::query("DROP TABLE IF EXISTS registration_requests")
+                .execute(&pool)
+                .await
+                .ok();
+            sqlx::query("ALTER TABLE merchants DROP COLUMN merchant_type")
+                .execute(&pool)
+                .await
+                .ok();
+            Ok(())
+        },
+    )
     .await?;
 
     // Restricted API keys: per-merchant scoped credentials. A row with key_type='full'
@@ -184,21 +188,21 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
     .await?;
 
     run_tracked_migration(&pool, "pos_pin_v2026_05_11", || async {
-      sqlx::query("ALTER TABLE merchants ADD COLUMN pos_pin_hash TEXT")
-          .execute(&pool)
-          .await
-          .ok();
-      sqlx::query("ALTER TABLE sessions ADD COLUMN pos_scoped INTEGER NOT NULL DEFAULT 0")
-          .execute(&pool)
-          .await
-          .ok();
-      Ok(())
-  })
-  .await?;
+        sqlx::query("ALTER TABLE merchants ADD COLUMN pos_pin_hash TEXT")
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("ALTER TABLE sessions ADD COLUMN pos_scoped INTEGER NOT NULL DEFAULT 0")
+            .execute(&pool)
+            .await
+            .ok();
+        Ok(())
+    })
+    .await?;
 
-  run_tracked_migration(&pool, "invoice_payments_v2026_06_12", || async {
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS invoice_payments (
+    run_tracked_migration(&pool, "invoice_payments_v2026_06_12", || async {
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS invoice_payments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             invoice_id TEXT NOT NULL REFERENCES invoices(id),
             txid TEXT NOT NULL,
@@ -206,34 +210,32 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
             UNIQUE(invoice_id, txid)
         )",
-    )
-    .execute(&pool)
-    .await
-    .ok();
+        )
+        .execute(&pool)
+        .await
+        .ok();
 
-    sqlx::query(
+        sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_invoice_payments_invoice ON invoice_payments(invoice_id)",
     )
     .execute(&pool)
     .await
     .ok();
 
-    Ok(())
-})
-.await?;
+        Ok(())
+    })
+    .await?;
 
+    run_tracked_migration(&pool, "accounting_v2026_06_21", || async {
+        for sql in &[
+            "ALTER TABLE invoices ADD COLUMN confirmed_rate REAL",
+            "ALTER TABLE invoices ADD COLUMN confirmed_fiat_amount REAL",
+        ] {
+            sqlx::query(sql).execute(&pool).await.ok();
+        }
 
-
-run_tracked_migration(&pool, "accounting_v2026_06_21", || async {
-  for sql in &[
-      "ALTER TABLE invoices ADD COLUMN confirmed_rate REAL",
-      "ALTER TABLE invoices ADD COLUMN confirmed_fiat_amount REAL",
-  ] {
-      sqlx::query(sql).execute(&pool).await.ok();
-  }
-
-  sqlx::query(
-      "CREATE TABLE IF NOT EXISTS ledger_tokens (
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS ledger_tokens (
           id TEXT PRIMARY KEY,
           merchant_id TEXT NOT NULL REFERENCES merchants(id) ON DELETE CASCADE,
           label TEXT NOT NULL DEFAULT '',
@@ -241,23 +243,23 @@ run_tracked_migration(&pool, "accounting_v2026_06_21", || async {
           created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
           revoked_at TEXT
       )",
-  )
-  .execute(&pool)
-  .await
-  .ok();
+        )
+        .execute(&pool)
+        .await
+        .ok();
 
-  sqlx::query(
-      "CREATE INDEX IF NOT EXISTS idx_ledger_tokens_merchant ON ledger_tokens(merchant_id)",
-  )
-  .execute(&pool)
-  .await
-  .ok();
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_ledger_tokens_merchant ON ledger_tokens(merchant_id)",
+        )
+        .execute(&pool)
+        .await
+        .ok();
 
-  Ok(())
-})
-.await?;
+        Ok(())
+    })
+    .await?;
 
-run_tracked_migration(&pool, "campaign_catchall_addresses_v2026_06_30", || async {
+    run_tracked_migration(&pool, "campaign_catchall_addresses_v2026_06_30", || async {
     for sql in &[
         "ALTER TABLE payment_links ADD COLUMN campaign_address_hex TEXT",
         "ALTER TABLE payment_links ADD COLUMN campaign_diversifier_index INTEGER",
@@ -290,23 +292,57 @@ run_tracked_migration(&pool, "campaign_catchall_addresses_v2026_06_30", || async
 })
 .await?;
 
-run_tracked_migration(&pool, "campaign_zec_tracking_v2026_06_30", || async {
-    sqlx::query("ALTER TABLE payment_links ADD COLUMN total_raised_zatoshis INTEGER NOT NULL DEFAULT 0")
+    run_tracked_migration(&pool, "campaign_zec_tracking_v2026_06_30", || async {
+        sqlx::query(
+            "ALTER TABLE payment_links ADD COLUMN total_raised_zatoshis INTEGER NOT NULL DEFAULT 0",
+        )
         .execute(&pool)
         .await
         .ok();
-    Ok(())
-})
-.await?;
+        Ok(())
+    })
+    .await?;
 
-run_tracked_migration(&pool, "campaign_directory_v2026_07_04", || async {
-    sqlx::query("ALTER TABLE payment_links ADD COLUMN listed INTEGER NOT NULL DEFAULT 1")
-        .execute(&pool)
-        .await
-        .ok();
-    Ok(())
-})
-.await?;
+    run_tracked_migration(&pool, "campaign_directory_v2026_07_04", || async {
+        sqlx::query("ALTER TABLE payment_links ADD COLUMN listed INTEGER NOT NULL DEFAULT 1")
+            .execute(&pool)
+            .await
+            .ok();
+        Ok(())
+    })
+    .await?;
+
+    run_tracked_migration(&pool, "audit_repairs_v2026_09_08", || async {
+        let mut tx = pool.begin().await?;
+        for sql in [
+            "CREATE TABLE payment_consumptions (txid TEXT PRIMARY KEY, purpose TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')))",
+            "INSERT OR IGNORE INTO payment_consumptions (txid, purpose) SELECT lower(deposit_txid), 'session' FROM agent_sessions",
+            "INSERT OR IGNORE INTO payment_consumptions (txid, purpose) SELECT lower(txid), 'legacy-x402' FROM x402_verifications WHERE status = 'verified'",
+            "CREATE TABLE session_charges (session_id TEXT NOT NULL, request_id TEXT NOT NULL, resource TEXT NOT NULL, amount INTEGER NOT NULL, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')), PRIMARY KEY(session_id, request_id))",
+            "CREATE TABLE x402_idempotency_v2 (merchant_id TEXT NOT NULL, idempotency_key TEXT NOT NULL, request_hash TEXT NOT NULL, response_json TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')), PRIMARY KEY(merchant_id, idempotency_key))",
+            "DELETE FROM x402_idempotency",
+        ] { sqlx::query(sql).execute(&mut *tx).await?; }
+        tx.commit().await?;
+        Ok(())
+    }).await?;
+
+    run_tracked_migration(&pool, "payment_outbox_v2026_09_08", || async {
+        sqlx::query("CREATE TRIGGER invoice_payment_outbox AFTER UPDATE OF status ON invoices
+            WHEN NEW.status != OLD.status AND NEW.status IN ('detected','underpaid','confirmed','expired','refunded')
+            BEGIN
+                INSERT INTO webhook_deliveries (id, invoice_id, merchant_id, url, payload, status, attempts, next_retry_at, event_type)
+                SELECT lower(hex(randomblob(16))), NEW.id, m.id, m.webhook_url,
+                    json_object('event',NEW.status,'invoice_id',NEW.id,'txid',NEW.detected_txid,
+                        'timestamp',strftime('%Y-%m-%dT%H:%M:%SZ','now'),
+                        'price_zec',NEW.price_zatoshis / 100000000.0,
+                        'received_zec',NEW.received_zatoshis / 100000000.0,
+                        'overpaid',json(CASE WHEN NEW.received_zatoshis > NEW.price_zatoshis + 1000 THEN 'true' ELSE 'false' END)),
+                    'pending', 0, strftime('%Y-%m-%dT%H:%M:%SZ','now'), NEW.status
+                FROM merchants m WHERE m.id = NEW.merchant_id AND m.webhook_url IS NOT NULL AND m.webhook_url != '';
+            END")
+            .execute(&pool).await?;
+        Ok(())
+    }).await?;
 
     Ok(pool)
 }

@@ -71,9 +71,10 @@ pub async fn get_chain_height(http: &reqwest::Client, api_url: &str) -> anyhow::
             status.as_u16()
         ));
     }
-    let resp: BlockchainInfoResponse = response.json().await.map_err(|e| {
-        anyhow::anyhow!("Failed to parse blockchain-info JSON: {e}")
-    })?;
+    let resp: BlockchainInfoResponse = response
+        .json()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to parse blockchain-info JSON: {e}"))?;
 
     resp.blocks
         .or(resp.headers)
@@ -104,18 +105,23 @@ async fn fetch_single_block_txids(
                 if !status.is_success() {
                     last_err = Some(anyhow::anyhow!(
                         "CipherScan API returned HTTP {} for block {}",
-                        status.as_u16(), height
+                        status.as_u16(),
+                        height
                     ));
                     continue;
                 }
                 match r.json::<serde_json::Value>().await {
                     Ok(v) => v,
                     Err(e) => {
-                        last_err = Some(anyhow::anyhow!("Failed to parse block {} response: {}", height, e));
+                        last_err = Some(anyhow::anyhow!(
+                            "Failed to parse block {} response: {}",
+                            height,
+                            e
+                        ));
                         continue;
                     }
                 }
-            },
+            }
             Err(e) => {
                 last_err = Some(anyhow::anyhow!("Failed to fetch block {}: {}", height, e));
                 continue;
@@ -220,21 +226,45 @@ pub async fn check_tx_confirmed(
     if !status.is_success() {
         return Err(anyhow::anyhow!(
             "CipherScan API returned HTTP {} for tx {}",
-            status.as_u16(), txid
+            status.as_u16(),
+            txid
         ));
     }
     let resp: serde_json::Value = response.json().await?;
 
-    let confirmed = resp["block_height"].as_u64().is_some()
-        || resp["blockHeight"].as_u64().is_some()
-        || resp["confirmations"].as_u64().map_or(false, |c| c >= 1);
+    let confirmed = transaction_confirmed(&resp);
 
     Ok(confirmed)
 }
 
+fn transaction_confirmed(resp: &serde_json::Value) -> bool {
+    if let Some(confirmations) = resp.get("confirmations") {
+        return confirmations.as_u64().is_some_and(|c| c >= 1);
+    }
+    resp["block_height"]
+        .as_u64()
+        .or_else(|| resp["blockHeight"].as_u64())
+        .is_some_and(|h| h > 0)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::extract_block_txids;
+    use super::{extract_block_txids, transaction_confirmed};
+    #[test]
+    fn reorged_and_unconfirmed_transactions_do_not_count() {
+        assert!(!transaction_confirmed(
+            &serde_json::json!({"block_height":100,"confirmations":0})
+        ));
+        assert!(!transaction_confirmed(
+            &serde_json::json!({"block_height":100,"confirmations":-1})
+        ));
+        assert!(!transaction_confirmed(
+            &serde_json::json!({"block_height":0})
+        ));
+        assert!(transaction_confirmed(
+            &serde_json::json!({"block_height":100,"confirmations":2})
+        ));
+    }
 
     #[test]
     fn extracts_txids_from_transactions_shape() {

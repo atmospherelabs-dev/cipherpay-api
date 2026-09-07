@@ -218,15 +218,6 @@ pub async fn mark_detected(
     txid: &str,
     received_zatoshis: i64,
 ) -> anyhow::Result<bool> {
-    sqlx::query(
-        "INSERT OR IGNORE INTO invoice_payments (invoice_id, txid, zatoshis) VALUES (?, ?, ?)",
-    )
-    .bind(invoice_id)
-    .bind(txid)
-    .bind(received_zatoshis)
-    .execute(pool)
-    .await?;
-
     let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let new_expires = (Utc::now() + Duration::minutes(30))
         .format("%Y-%m-%dT%H:%M:%SZ")
@@ -332,15 +323,6 @@ pub async fn mark_underpaid(
     received_zatoshis: i64,
     txid: &str,
 ) -> anyhow::Result<()> {
-    sqlx::query(
-        "INSERT OR IGNORE INTO invoice_payments (invoice_id, txid, zatoshis) VALUES (?, ?, ?)",
-    )
-    .bind(invoice_id)
-    .bind(txid)
-    .bind(received_zatoshis)
-    .execute(pool)
-    .await?;
-
     let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let new_expires = (Utc::now() + Duration::minutes(10))
         .format("%Y-%m-%dT%H:%M:%SZ")

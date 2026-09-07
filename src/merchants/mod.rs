@@ -525,74 +525,39 @@ pub async fn has_outstanding_balance(pool: &SqlitePool, merchant_id: &str) -> an
 }
 
 pub async fn delete_merchant(pool: &SqlitePool, merchant_id: &str) -> anyhow::Result<()> {
-    // Disable FK enforcement during cascade delete — we manage the order explicitly,
-    // and stale FK schemas from past table-repair migrations can cause spurious errors.
-    let mut conn = pool.acquire().await?;
-    sqlx::query("PRAGMA foreign_keys = OFF")
-        .execute(&mut *conn)
+    let mut tx = pool.begin().await?;
+    // Resolve cycles at commit without ever disabling FK enforcement on a pooled connection.
+    sqlx::query("PRAGMA defer_foreign_keys = ON")
+        .execute(&mut *tx)
         .await?;
-
-    sqlx::query("DELETE FROM sessions WHERE merchant_id = ?")
-        .bind(merchant_id)
-        .execute(&mut *conn)
-        .await?;
-    let _ = sqlx::query("DELETE FROM agent_sessions WHERE merchant_id = ?")
-        .bind(merchant_id)
-        .execute(&mut *conn)
-        .await;
-    sqlx::query("DELETE FROM recovery_tokens WHERE merchant_id = ?")
-        .bind(merchant_id)
-        .execute(&mut *conn)
-        .await?;
-    sqlx::query("DELETE FROM fee_ledger WHERE merchant_id = ?")
-        .bind(merchant_id)
-        .execute(&mut *conn)
-        .await?;
-    sqlx::query(
-        "DELETE FROM webhook_deliveries WHERE invoice_id IN (SELECT id FROM invoices WHERE merchant_id = ?)"
-    ).bind(merchant_id).execute(&mut *conn).await?;
-    sqlx::query("DELETE FROM tickets WHERE merchant_id = ?")
-        .bind(merchant_id)
-        .execute(&mut *conn)
-        .await?;
-    let _ = sqlx::query("DELETE FROM payment_links WHERE merchant_id = ?")
-        .bind(merchant_id)
-        .execute(&mut *conn)
-        .await;
-    sqlx::query("DELETE FROM billing_cycles WHERE merchant_id = ?")
-        .bind(merchant_id)
-        .execute(&mut *conn)
-        .await?;
-    sqlx::query("DELETE FROM subscriptions WHERE merchant_id = ?")
-        .bind(merchant_id)
-        .execute(&mut *conn)
-        .await?;
-    sqlx::query("DELETE FROM invoices WHERE merchant_id = ?")
-        .bind(merchant_id)
-        .execute(&mut *conn)
-        .await?;
-    sqlx::query("DELETE FROM events WHERE merchant_id = ?")
-        .bind(merchant_id)
-        .execute(&mut *conn)
-        .await?;
-    sqlx::query(
+    for sql in [
+        "DELETE FROM session_charges WHERE session_id IN (SELECT id FROM agent_sessions WHERE merchant_id = ?)",
+        "DELETE FROM invoice_payments WHERE invoice_id IN (SELECT id FROM invoices WHERE merchant_id = ?)",
+        "DELETE FROM campaign_donations WHERE link_id IN (SELECT id FROM payment_links WHERE merchant_id = ?)",
+        "DELETE FROM webhook_deliveries WHERE merchant_id = ?",
+        "DELETE FROM tickets WHERE merchant_id = ?",
+        "DELETE FROM fee_ledger WHERE merchant_id = ?",
+        "DELETE FROM billing_cycles WHERE merchant_id = ?",
+        "DELETE FROM email_events WHERE merchant_id = ?",
+        "DELETE FROM session_requests WHERE merchant_id = ?",
+        "DELETE FROM agent_sessions WHERE merchant_id = ?",
+        "DELETE FROM sessions WHERE merchant_id = ?",
+        "DELETE FROM recovery_tokens WHERE merchant_id = ?",
+        "DELETE FROM merchant_api_keys WHERE merchant_id = ?",
+        "DELETE FROM passkey_credentials WHERE merchant_id = ?",
+        "DELETE FROM passkey_challenges WHERE merchant_id = ?",
+        "DELETE FROM ledger_tokens WHERE merchant_id = ?",
+        "DELETE FROM x402_verifications WHERE merchant_id = ?",
+        "DELETE FROM x402_idempotency_v2 WHERE merchant_id = ?",
+        "DELETE FROM payment_links WHERE merchant_id = ?",
+        "DELETE FROM subscriptions WHERE merchant_id = ?",
+        "DELETE FROM invoices WHERE merchant_id = ?",
+        "DELETE FROM events WHERE merchant_id = ?",
         "DELETE FROM prices WHERE product_id IN (SELECT id FROM products WHERE merchant_id = ?)",
-    )
-    .bind(merchant_id)
-    .execute(&mut *conn)
-    .await?;
-    sqlx::query("DELETE FROM products WHERE merchant_id = ?")
-        .bind(merchant_id)
-        .execute(&mut *conn)
-        .await?;
-    sqlx::query("DELETE FROM merchants WHERE id = ?")
-        .bind(merchant_id)
-        .execute(&mut *conn)
-        .await?;
-
-    sqlx::query("PRAGMA foreign_keys = ON")
-        .execute(&mut *conn)
-        .await?;
+        "DELETE FROM products WHERE merchant_id = ?",
+        "DELETE FROM merchants WHERE id = ?",
+    ] { sqlx::query(sql).bind(merchant_id).execute(&mut *tx).await?; }
+    tx.commit().await?;
 
     tracing::info!(merchant_id, "Merchant account deleted");
     Ok(())

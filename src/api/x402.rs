@@ -1,5 +1,6 @@
 use actix_web::{web, HttpRequest, HttpResponse};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
@@ -106,15 +107,15 @@ pub async fn verify(
                 }));
             }
         };
-        let min_acceptable = (expected_zatoshis as f64 * SLIPPAGE_TOLERANCE) as u64;
+        let min_acceptable = expected_zatoshis;
 
         if received_zatoshis >= min_acceptable {
             return HttpResponse::Ok().json(VerifyResponse {
-                valid: true,
+                valid: false,
                 received_zec: received_zatoshis as f64 / 100_000_000.0,
                 received_zatoshis,
                 previously_verified: true,
-                reason: None,
+                reason: Some("Payment already verified; use a new payment".to_string()),
             });
         } else {
             let reason = format!(
@@ -185,7 +186,15 @@ pub async fn verify(
         return HttpResponse::Ok().json(resp);
     }
 
-    let total_zatoshis: u64 = outputs.iter().map(|o| o.amount_zatoshis).sum();
+    let receiver = match crate::invoices::matching::orchard_receiver(&merchant.payment_address) {
+        Some(r) => r,
+        None => return HttpResponse::BadRequest().finish(),
+    };
+    let total_zatoshis: u64 = outputs
+        .iter()
+        .filter(|o| hex::encode(o.recipient_raw) == receiver)
+        .map(|o| o.amount_zatoshis)
+        .sum();
     let total_zec = total_zatoshis as f64 / 100_000_000.0;
     let expected_zatoshis = match zec_to_zatoshis(body.expected_amount_zec) {
         Some(amount) => amount,
@@ -195,9 +204,27 @@ pub async fn verify(
             }));
         }
     };
-    let min_acceptable = (expected_zatoshis as f64 * SLIPPAGE_TOLERANCE) as u64;
+    let min_acceptable = expected_zatoshis;
 
     if total_zatoshis >= min_acceptable {
+        let consumed = match pool.acquire().await {
+            Ok(mut conn) => {
+                crate::sessions::consume_payment(&mut conn, &body.txid, "legacy-x402").await
+            }
+            Err(e) => Err(e.into()),
+        };
+        match consumed {
+            Ok(true) => {}
+            Ok(false) => {
+                return HttpResponse::Conflict().json(problem_details(
+                    409,
+                    "payment-replayed",
+                    "Payment Replayed",
+                    "Transaction already consumed",
+                ))
+            }
+            Err(_) => return HttpResponse::InternalServerError().finish(),
+        }
         log_verification(
             &pool,
             &merchant.id,
@@ -431,7 +458,7 @@ fn zec_to_zatoshis(amount_zec: f64) -> Option<u64> {
     }
 
     let scaled = (amount_zec * 100_000_000.0).round();
-    if scaled < 0.0 || scaled > u64::MAX as f64 {
+    if scaled < 1.0 || scaled > 2_100_000_000_000_000.0 {
         return None;
     }
 
@@ -442,7 +469,7 @@ fn zec_to_zatoshis(amount_zec: f64) -> Option<u64> {
 // x402 V2 spec-compliant facilitator endpoints
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct PaymentRequirementsV2 {
     scheme: Option<String>,
     network: Option<String>,
@@ -455,12 +482,12 @@ struct PaymentRequirementsV2 {
     extra: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct ZcashPayload {
     txid: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct PaymentPayloadV2 {
     #[serde(rename = "x402Version")]
     x402_version: Option<u32>,
@@ -470,7 +497,7 @@ struct PaymentPayloadV2 {
     extensions: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct VerifyRequestV2 {
     #[serde(rename = "x402Version")]
     pub x402_version: Option<u32>,
@@ -481,7 +508,7 @@ pub struct VerifyRequestV2 {
 }
 
 /// Optional session config sent alongside settle to auto-create a session.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct SettleSessionConfig {
     #[serde(rename = "costPerRequest")]
     cost_per_request: Option<i64>,
@@ -490,7 +517,7 @@ struct SettleSessionConfig {
 }
 
 /// Extended settle request: standard x402 V2 fields + optional session bridge.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct SettleRequestV2 {
     #[serde(rename = "x402Version")]
     pub x402_version: Option<u32>,
@@ -548,12 +575,7 @@ struct SettleResponseV2 {
 // RFC 9457 Problem Details (https://www.rfc-editor.org/rfc/rfc9457)
 // ---------------------------------------------------------------------------
 
-fn problem_details(
-    status: u16,
-    error_type: &str,
-    title: &str,
-    detail: &str,
-) -> serde_json::Value {
+fn problem_details(status: u16, error_type: &str, title: &str, detail: &str) -> serde_json::Value {
     serde_json::json!({
         "type": format!("https://cipherpay.app/errors/{}", error_type),
         "title": title,
@@ -568,6 +590,32 @@ fn parse_v2_fields(
     payload: &PaymentPayloadV2,
     requirements: &PaymentRequirementsV2,
 ) -> Result<(String, u64, String), HttpResponse> {
+    if payload.x402_version != Some(2)
+        || requirements.scheme.as_deref() != Some("exact")
+        || requirements.asset.as_deref() != Some("ZEC")
+        || requirements.pay_to.as_deref().unwrap_or("").is_empty()
+        || requirements.max_timeout_seconds.unwrap_or(0) == 0
+    {
+        return Err(HttpResponse::BadRequest().json(problem_details(
+            400,
+            "invalid-payment-requirements",
+            "Invalid Payment Requirements",
+            "Require V2 exact ZEC payment, payTo and positive timeout",
+        )));
+    }
+    if let Some(accepted) = &payload.accepted {
+        let expected = serde_json::to_value(requirements).unwrap_or_default();
+        for field in ["scheme", "network", "amount", "payTo", "asset"] {
+            if accepted.get(field) != expected.get(field) {
+                return Err(HttpResponse::BadRequest().json(problem_details(
+                    400,
+                    "requirements-mismatch",
+                    "Requirements Mismatch",
+                    "Accepted payment differs from resource requirements",
+                )));
+            }
+        }
+    }
     let txid = payload
         .payload
         .as_ref()
@@ -598,7 +646,7 @@ fn parse_v2_fields(
             ))
     })?;
 
-    if expected_zatoshis == 0 {
+    if expected_zatoshis == 0 || expected_zatoshis > 2_100_000_000_000_000 {
         return Err(HttpResponse::BadRequest()
             .insert_header(("Content-Type", "application/problem+json"))
             .json(problem_details(
@@ -615,7 +663,7 @@ fn parse_v2_fields(
         .unwrap_or("zcash:mainnet")
         .to_string();
 
-    Ok((txid.to_string(), expected_zatoshis, network))
+    Ok((txid.to_ascii_lowercase(), expected_zatoshis, network))
 }
 
 fn parse_v2_request(body: &VerifyRequestV2) -> Result<(String, u64, String), HttpResponse> {
@@ -634,6 +682,7 @@ async fn verify_core_v2(
     txid: &str,
     expected_zatoshis: u64,
     network: &str,
+    pay_to: &str,
     api_key: &str,
 ) -> Result<(bool, Option<String>, u64), HttpResponse> {
     let merchant = match merchants::authenticate(pool, api_key, &config.encryption_key).await {
@@ -641,77 +690,155 @@ async fn verify_core_v2(
         Ok(None) => {
             return Err(HttpResponse::Unauthorized()
                 .insert_header(("Content-Type", "application/problem+json"))
-                .json(problem_details(401, "unauthorized", "Unauthorized", "Invalid API key")));
+                .json(problem_details(
+                    401,
+                    "unauthorized",
+                    "Unauthorized",
+                    "Invalid API key",
+                )));
         }
         Err(e) => {
             tracing::error!(error = %e, "x402 v2 auth error");
             return Err(HttpResponse::InternalServerError()
                 .insert_header(("Content-Type", "application/problem+json"))
-                .json(problem_details(500, "internal-error", "Internal Error", "Unexpected verification error")));
+                .json(problem_details(
+                    500,
+                    "internal-error",
+                    "Internal Error",
+                    "Unexpected verification error",
+                )));
         }
     };
 
+    let expected_network = if config.is_testnet() {
+        "zcash:testnet"
+    } else {
+        "zcash:mainnet"
+    };
+    if network != expected_network || pay_to != merchant.payment_address {
+        return Err(HttpResponse::BadRequest().json(problem_details(
+            400,
+            "requirements-mismatch",
+            "Requirements Mismatch",
+            "Network and payTo must match this merchant",
+        )));
+    }
+    let receiver = crate::invoices::matching::orchard_receiver(pay_to).ok_or_else(|| {
+        HttpResponse::BadRequest().json(problem_details(
+            400,
+            "invalid-pay-to",
+            "Invalid Recipient",
+            "Orchard receiver required",
+        ))
+    })?;
     if config.fee_enabled() {
-        if let Ok(status) =
-            crate::billing::get_merchant_billing_status(pool, &merchant.id).await
-        {
+        if let Ok(status) = crate::billing::get_merchant_billing_status(pool, &merchant.id).await {
             if merchant_billing_blocked(&status) {
                 return Err(HttpResponse::PaymentRequired()
                     .insert_header(("Content-Type", "application/problem+json"))
-                    .json(problem_details(402, "merchant-billing-blocked", "Merchant Billing Blocked", "Merchant account has outstanding fees")));
+                    .json(problem_details(
+                        402,
+                        "merchant-billing-blocked",
+                        "Merchant Billing Blocked",
+                        "Merchant account has outstanding fees",
+                    )));
             }
         }
     }
 
     let protocol = "x402";
-    let min_acceptable = (expected_zatoshis as f64 * SLIPPAGE_TOLERANCE) as u64;
+    let min_acceptable = expected_zatoshis;
 
-    if let Some(received_zatoshis) =
-        get_existing_verified(pool, &merchant.id, txid, protocol).await
+    if !crate::scanner::blocks::check_tx_confirmed(http_client, &config.cipherscan_api_url, txid)
+        .await
+        .unwrap_or(false)
     {
-        if received_zatoshis >= min_acceptable {
-            return Ok((true, None, received_zatoshis));
-        } else {
-            return Ok((
-                false,
-                Some("insufficient_funds".to_string()),
-                received_zatoshis,
-            ));
-        }
+        return Ok((false, Some("payment_not_confirmed".to_string()), 0));
     }
-
-    let raw_hex =
-        match mempool::fetch_raw_tx(http_client, &config.cipherscan_api_url, txid).await {
-            Ok(hex) => hex,
-            Err(e) => {
-                tracing::warn!(txid = %txid, error = %e, "x402 v2: failed to fetch raw tx");
-                log_verification(pool, &merchant.id, txid, 0, "rejected", Some("Transaction not found"), protocol).await;
-                return Ok((false, Some("invalid_transaction_state".to_string()), 0));
-            }
-        };
+    let raw_hex = match mempool::fetch_raw_tx(http_client, &config.cipherscan_api_url, txid).await {
+        Ok(hex) => hex,
+        Err(e) => {
+            tracing::warn!(txid = %txid, error = %e, "x402 v2: failed to fetch raw tx");
+            log_verification(
+                pool,
+                &merchant.id,
+                txid,
+                0,
+                "rejected",
+                Some("Transaction not found"),
+                protocol,
+            )
+            .await;
+            return Ok((false, Some("invalid_transaction_state".to_string()), 0));
+        }
+    };
 
     let outputs = match decrypt::try_decrypt_all_outputs_ivk(&raw_hex, &merchant.ufvk) {
         Ok(o) => o,
         Err(e) => {
             tracing::warn!(txid = %txid, error = %e, "x402 v2: decryption error");
-            log_verification(pool, &merchant.id, txid, 0, "rejected", Some("Decryption failed"), protocol).await;
+            log_verification(
+                pool,
+                &merchant.id,
+                txid,
+                0,
+                "rejected",
+                Some("Decryption failed"),
+                protocol,
+            )
+            .await;
             return Ok((false, Some("invalid_transaction_state".to_string()), 0));
         }
     };
 
     if outputs.is_empty() {
-        log_verification(pool, &merchant.id, txid, 0, "rejected", Some("No outputs addressed to this merchant"), protocol).await;
+        log_verification(
+            pool,
+            &merchant.id,
+            txid,
+            0,
+            "rejected",
+            Some("No outputs addressed to this merchant"),
+            protocol,
+        )
+        .await;
         return Ok((false, Some("invalid_payload".to_string()), 0));
     }
 
-    let total_zatoshis: u64 = outputs.iter().map(|o| o.amount_zatoshis).sum();
+    let total_zatoshis: u64 = outputs
+        .iter()
+        .filter(|o| hex::encode(o.recipient_raw) == receiver)
+        .map(|o| o.amount_zatoshis)
+        .sum();
 
     if total_zatoshis >= min_acceptable {
-        log_verification(pool, &merchant.id, txid, total_zatoshis, "verified", None, protocol).await;
+        log_verification(
+            pool,
+            &merchant.id,
+            txid,
+            total_zatoshis,
+            "verified",
+            None,
+            protocol,
+        )
+        .await;
         Ok((true, None, total_zatoshis))
     } else {
-        log_verification(pool, &merchant.id, txid, total_zatoshis, "rejected", Some("Insufficient amount"), protocol).await;
-        Ok((false, Some("insufficient_funds".to_string()), total_zatoshis))
+        log_verification(
+            pool,
+            &merchant.id,
+            txid,
+            total_zatoshis,
+            "rejected",
+            Some("Insufficient amount"),
+            protocol,
+        )
+        .await;
+        Ok((
+            false,
+            Some("insufficient_funds".to_string()),
+            total_zatoshis,
+        ))
     }
 }
 
@@ -728,7 +855,12 @@ pub async fn verify_v2(
         None => {
             return HttpResponse::Unauthorized()
                 .insert_header(("Content-Type", "application/problem+json"))
-                .json(problem_details(401, "unauthorized", "Unauthorized", "Missing or invalid Authorization header"));
+                .json(problem_details(
+                    401,
+                    "unauthorized",
+                    "Unauthorized",
+                    "Missing or invalid Authorization header",
+                ));
         }
     };
 
@@ -737,14 +869,23 @@ pub async fn verify_v2(
         Err(resp) => return resp,
     };
 
-    match verify_core_v2(pool.get_ref(), &config, &http_client, &txid, expected_zatoshis, &network, &api_key).await {
-        Ok((is_valid, invalid_reason, _)) => {
-            HttpResponse::Ok().json(VerifyResponseV2 {
-                is_valid,
-                invalid_reason,
-                payer: None,
-            })
-        }
+    match verify_core_v2(
+        pool.get_ref(),
+        &config,
+        &http_client,
+        &txid,
+        expected_zatoshis,
+        &network,
+        body.payment_requirements.pay_to.as_deref().unwrap_or(""),
+        &api_key,
+    )
+    .await
+    {
+        Ok((is_valid, invalid_reason, _)) => HttpResponse::Ok().json(VerifyResponseV2 {
+            is_valid,
+            invalid_reason,
+            payer: None,
+        }),
         Err(resp) => resp,
     }
 }
@@ -767,154 +908,208 @@ pub async fn settle_v2(
         None => {
             return HttpResponse::Unauthorized()
                 .insert_header(("Content-Type", "application/problem+json"))
-                .json(problem_details(401, "unauthorized", "Unauthorized", "Missing or invalid Authorization header"));
+                .json(problem_details(
+                    401,
+                    "unauthorized",
+                    "Unauthorized",
+                    "Missing or invalid Authorization header",
+                ));
         }
     };
 
-    // Idempotency-Key: check header first, fall back to body field
-    let idempotency_key = req
+    let merchant =
+        match merchants::authenticate(pool.get_ref(), &api_key, &config.encryption_key).await {
+            Ok(Some(m)) => m,
+            _ => {
+                return HttpResponse::Unauthorized().json(problem_details(
+                    401,
+                    "unauthorized",
+                    "Unauthorized",
+                    "Invalid API key",
+                ))
+            }
+        };
+    let key = req
         .headers()
         .get("Idempotency-Key")
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
+        .map(str::to_string)
         .or_else(|| body.idempotency_key.clone());
-
-    if let Some(ref key) = idempotency_key {
-        if let Some(cached) = get_idempotent_response(pool.get_ref(), key).await {
-            return HttpResponse::Ok()
-                .insert_header(("Idempotency-Replayed", "true"))
-                .json(cached);
-        }
+    if key.as_ref().is_some_and(|k| k.is_empty() || k.len() > 128) {
+        return HttpResponse::BadRequest().json(problem_details(
+            400,
+            "invalid-idempotency-key",
+            "Invalid Key",
+            "Use 1-128 characters",
+        ));
     }
-
-    let (txid, expected_zatoshis, network) = match parse_settle_request(&body) {
-        Ok(v) => v,
-        Err(resp) => return resp,
-    };
-
-    match verify_core_v2(pool.get_ref(), &config, &http_client, &txid, expected_zatoshis, &network, &api_key).await {
-        Ok((true, _, total_zatoshis)) => {
-            // Auto-session: if requested and payment verified, create a session
-            let session_info = if let Some(ref session_cfg) = body.session {
-                match try_auto_session(pool.get_ref(), &api_key, &config, &txid, total_zatoshis, session_cfg).await {
-                    Ok(Some(info)) => Some(info),
-                    Ok(None) => None,
-                    Err(e) => {
-                        tracing::warn!(error = %e, "Auto-session creation failed (settle still succeeds)");
-                        None
-                    }
-                }
-            } else {
-                None
-            };
-
-            let response = SettleResponseV2 {
-                success: true,
-                transaction: txid,
-                network,
-                payer: None,
-                error_reason: None,
-                amount: Some(total_zatoshis.to_string()),
-                session: session_info,
-            };
-
-            if let Some(ref key) = idempotency_key {
-                store_idempotent_response(pool.get_ref(), key, &response).await;
+    let digest = hex::encode(Sha256::digest(
+        serde_json::to_vec(&*body).unwrap_or_default(),
+    ));
+    if let Some(key) = &key {
+        match cached_settlement(
+            pool.get_ref(),
+            &merchant.id,
+            key,
+            &digest,
+            &config.encryption_key,
+        )
+        .await
+        {
+            Ok(Some(response)) => {
+                return HttpResponse::Ok()
+                    .insert_header(("Idempotency-Replayed", "true"))
+                    .json(response)
             }
-
-            HttpResponse::Ok().json(response)
+            Ok(None) => {}
+            Err(_) => {
+                return HttpResponse::Conflict().json(problem_details(
+                    409,
+                    "idempotency-conflict",
+                    "Idempotency Conflict",
+                    "Key belongs to another request or cannot be recovered",
+                ))
+            }
         }
-        Ok((false, reason, _)) => {
-            HttpResponse::Ok().json(SettleResponseV2 {
-                success: false,
-                transaction: String::new(),
-                network,
-                payer: None,
-                error_reason: reason,
-                amount: None,
-                session: None,
-            })
-        }
-        Err(resp) => resp,
     }
-}
-
-/// Try to auto-create a session from a settled payment.
-async fn try_auto_session(
-    pool: &SqlitePool,
-    api_key: &str,
-    config: &Config,
-    txid: &str,
-    total_zatoshis: u64,
-    session_cfg: &SettleSessionConfig,
-) -> Result<Option<SessionInfo>, anyhow::Error> {
-    if crate::sessions::txid_already_used(pool, txid).await {
-        return Ok(None);
-    }
-
-    let merchant = match merchants::authenticate(pool, api_key, &config.encryption_key).await? {
-        Some(m) => m,
-        None => return Ok(None),
+    let (txid, amount, network) = match parse_settle_request(&body) {
+        Ok(v) => v,
+        Err(r) => return r,
     };
-
-    let cost_per_request = session_cfg.cost_per_request.unwrap_or(1_000);
-    if cost_per_request <= 0 || (total_zatoshis as i64) < cost_per_request {
-        return Ok(None);
-    }
-
-    let session = crate::sessions::create_session_with_cost(
-        pool,
-        &merchant.id,
-        txid,
-        total_zatoshis as i64,
-        session_cfg.refund_address.as_deref(),
-        session_cfg.cost_per_request,
+    match verify_core_v2(
+        pool.get_ref(),
+        &config,
+        &http_client,
+        &txid,
+        amount,
+        &network,
+        body.payment_requirements.pay_to.as_deref().unwrap_or(""),
+        &api_key,
     )
-    .await?;
-
-    Ok(Some(SessionInfo {
-        token: session.bearer_token,
-        session_id: session.id,
-        balance_remaining: session.balance_remaining,
-        cost_per_request: session.cost_per_request,
-        expires_at: session.expires_at,
-    }))
-}
-
-// ---------------------------------------------------------------------------
-// Idempotency-Key storage (x402_idempotency table)
-// ---------------------------------------------------------------------------
-
-async fn get_idempotent_response(pool: &SqlitePool, key: &str) -> Option<serde_json::Value> {
-    let row = sqlx::query_scalar::<_, String>(
-        "SELECT response_json FROM x402_idempotency
-         WHERE idempotency_key = ? AND created_at >= strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-24 hours')"
-    )
-    .bind(key)
-    .fetch_optional(pool)
     .await
-    .ok()?;
-
-    row.and_then(|json_str| serde_json::from_str(&json_str).ok())
+    {
+        Ok((true, _, total)) => {
+            match commit_settlement(
+                pool.get_ref(),
+                &merchant.id,
+                &txid,
+                amount,
+                total,
+                &network,
+                body.session.as_ref(),
+                key.as_deref(),
+                &digest,
+                &config.encryption_key,
+            )
+            .await
+            {
+                Ok(Some(response)) => HttpResponse::Ok().json(response),
+                Ok(None) => HttpResponse::Conflict().json(problem_details(
+                    409,
+                    "payment-replayed",
+                    "Payment Replayed",
+                    "This transaction has already been consumed",
+                )),
+                Err(e) => {
+                    tracing::error!(error = %e, "Settlement commit failed");
+                    HttpResponse::InternalServerError().finish()
+                }
+            }
+        }
+        Ok((false, reason, _)) => HttpResponse::Ok().json(SettleResponseV2 {
+            success: false,
+            transaction: String::new(),
+            network,
+            payer: None,
+            error_reason: reason,
+            amount: None,
+            session: None,
+        }),
+        Err(r) => r,
+    }
 }
 
-async fn store_idempotent_response(pool: &SqlitePool, key: &str, response: &SettleResponseV2) {
-    let json_str = match serde_json::to_string(response) {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-
-    let result = sqlx::query(
-        "INSERT OR IGNORE INTO x402_idempotency (idempotency_key, response_json) VALUES (?, ?)"
-    )
-    .bind(key)
-    .bind(&json_str)
-    .execute(pool)
-    .await;
-
-    if let Err(e) = result {
-        tracing::warn!(error = %e, "Failed to store idempotent response");
+async fn cached_settlement(
+    pool: &SqlitePool,
+    merchant: &str,
+    key: &str,
+    digest: &str,
+    encryption_key: &str,
+) -> anyhow::Result<Option<serde_json::Value>> {
+    let row = sqlx::query_as::<_, (String, String)>("SELECT request_hash, response_json FROM x402_idempotency_v2 WHERE merchant_id = ? AND idempotency_key = ? AND created_at >= strftime('%Y-%m-%dT%H:%M:%SZ','now','-24 hours')")
+        .bind(merchant).bind(key).fetch_optional(pool).await?;
+    if let Some((hash, encrypted)) = row {
+        anyhow::ensure!(hash == digest, "Idempotency request mismatch");
+        return Ok(Some(serde_json::from_str(&crate::crypto::decrypt(
+            &encrypted,
+            encryption_key,
+        )?)?));
     }
+    Ok(None)
+}
+
+async fn commit_settlement(
+    pool: &SqlitePool,
+    merchant: &str,
+    txid: &str,
+    price: u64,
+    total: u64,
+    network: &str,
+    session: Option<&SettleSessionConfig>,
+    key: Option<&str>,
+    digest: &str,
+    encryption_key: &str,
+) -> anyhow::Result<Option<SettleResponseV2>> {
+    let mut tx = pool.begin().await?;
+    if !crate::sessions::consume_payment(&mut tx, txid, "x402").await? {
+        return Ok(None);
+    }
+    // Only the surplus funds a session; the current fulfilled request is already paid for.
+    let remaining = total.saturating_sub(price) as i64;
+    let session_info = if let Some(cfg) = session {
+        let cost = cfg.cost_per_request.unwrap_or(1000);
+        anyhow::ensure!(cost > 0, "Invalid session cost");
+        if remaining >= cost {
+            let s = crate::sessions::insert_session(
+                &mut tx,
+                merchant,
+                txid,
+                remaining,
+                cfg.refund_address.as_deref(),
+                Some(cost),
+            )
+            .await?;
+            Some(SessionInfo {
+                token: s.bearer_token,
+                session_id: s.id,
+                balance_remaining: s.balance_remaining,
+                cost_per_request: s.cost_per_request,
+                expires_at: s.expires_at,
+            })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let response = SettleResponseV2 {
+        success: true,
+        transaction: txid.to_string(),
+        network: network.to_string(),
+        payer: None,
+        error_reason: None,
+        amount: Some(total.to_string()),
+        session: session_info,
+    };
+    if let Some(key) = key {
+        let encrypted = crate::crypto::encrypt(&serde_json::to_string(&response)?, encryption_key)?;
+        sqlx::query("DELETE FROM x402_idempotency_v2 WHERE merchant_id = ? AND idempotency_key = ? AND created_at < strftime('%Y-%m-%dT%H:%M:%SZ','now','-24 hours')")
+            .bind(merchant).bind(key).execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO x402_idempotency_v2 (merchant_id, idempotency_key, request_hash, response_json) VALUES (?, ?, ?, ?)")
+            .bind(merchant).bind(key).bind(digest).bind(encrypted).execute(&mut *tx).await?;
+    }
+    tx.commit().await?;
+    Ok(Some(response))
 }
 
 /// GET /api/x402/supported — x402 V2 spec-compliant discovery endpoint.
@@ -936,4 +1131,118 @@ pub async fn supported(config: web::Data<Config>) -> HttpResponse {
             "extensions": [],
             "signers": {},
         }))
+}
+
+#[cfg(test)]
+mod repair_tests {
+    use super::*;
+    #[tokio::test]
+    async fn settlement_consumption_and_cache_are_tenant_bound() {
+        let pool = crate::repair_tests::pool().await;
+        crate::repair_tests::merchant(&pool, "a").await;
+        crate::repair_tests::merchant(&pool, "b").await;
+        let encryption_key = "11".repeat(32);
+        let config = SettleSessionConfig {
+            cost_per_request: Some(1000),
+            refund_address: None,
+        };
+        let first = commit_settlement(
+            &pool,
+            "a",
+            "tx",
+            1000,
+            5000,
+            "zcash:mainnet",
+            Some(&config),
+            Some("key"),
+            "digest",
+            &encryption_key,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(first.session.unwrap().balance_remaining, 4000);
+        assert!(commit_settlement(
+            &pool,
+            "a",
+            "tx",
+            1000,
+            5000,
+            "zcash:mainnet",
+            None,
+            None,
+            "digest",
+            &encryption_key
+        )
+        .await
+        .unwrap()
+        .is_none());
+        assert!(
+            cached_settlement(&pool, "b", "key", "digest", &encryption_key)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            cached_settlement(&pool, "a", "key", "different-body", &encryption_key)
+                .await
+                .is_err()
+        );
+        assert!(
+            cached_settlement(&pool, "a", "key", "digest", &encryption_key)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let stored: String = sqlx::query_scalar("SELECT response_json FROM x402_idempotency_v2")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(!stored.contains("cps_"));
+        assert!(
+            crate::sessions::create_session(&pool, "a", "tx", 5000, None)
+                .await
+                .is_err()
+        );
+    }
+    #[tokio::test]
+    async fn failed_settlement_rolls_back_consumption() {
+        let pool = crate::repair_tests::pool().await;
+        crate::repair_tests::merchant(&pool, "a").await;
+        // Invalid encryption config fails cache persistence; the payment must remain spendable.
+        assert!(commit_settlement(
+            &pool,
+            "a",
+            "tx",
+            1000,
+            1000,
+            "zcash:mainnet",
+            None,
+            Some("key"),
+            "digest",
+            ""
+        )
+        .await
+        .is_err());
+        assert!(!crate::sessions::txid_already_used(&pool, "tx").await);
+    }
+    #[actix_web::test]
+    async fn unauthenticated_settle_cannot_read_cached_credentials() {
+        let pool = crate::repair_tests::pool().await;
+        sqlx::query("INSERT INTO x402_idempotency_v2 VALUES ('a','known-key','hash','sensitive','2099-01-01T00:00:00Z')").execute(&pool).await.unwrap();
+        let config = Config::from_env().unwrap();
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(web::Data::new(pool))
+                .app_data(web::Data::new(config))
+                .app_data(web::Data::new(reqwest::Client::new()))
+                .route("/settle", web::post().to(settle_v2)),
+        )
+        .await;
+        let req=actix_web::test::TestRequest::post().uri("/settle").insert_header(("Authorization","Bearer invalid"))
+            .insert_header(("Idempotency-Key","known-key"))
+            .set_json(serde_json::json!({"x402Version":2,"paymentPayload":{"x402Version":2,"payload":{"txid":"a".repeat(64)}},"paymentRequirements":{"scheme":"exact","network":"zcash:mainnet","asset":"ZEC","amount":"1000","payTo":"address","maxTimeoutSeconds":300}})).to_request();
+        let response = actix_web::test::call_service(&app, req).await;
+        assert_eq!(response.status(), actix_web::http::StatusCode::UNAUTHORIZED);
+    }
 }

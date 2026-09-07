@@ -429,8 +429,7 @@ pub async fn export_csv(
                 let received_zec = crate::invoices::zatoshis_to_zec(rz);
                 let product = r
                     .get::<Option<String>, _>("product_name")
-                    .unwrap_or_default()
-                    .replace(',', " ");
+                    .unwrap_or_default();
                 let cur = r
                     .get::<Option<String>, _>("currency")
                     .unwrap_or_else(|| "EUR".to_string());
@@ -438,27 +437,39 @@ pub async fn export_csv(
                 let conf_rate = r.get::<Option<f64>, _>("confirmed_rate");
                 let conf_fiat = r.get::<Option<f64>, _>("confirmed_fiat_amount");
 
-                csv.push_str(&format!(
-                    "{},{},{},{},{:.2},{:.8},{:.4},{},{},{:.8},{},{},{},{}\n",
+                let fields = [
                     r.get::<String, _>("id"),
                     r.get::<String, _>("memo_code"),
                     product,
                     cur,
-                    amt,
-                    r.get::<f64, _>("price_zec"),
-                    r.get::<f64, _>("zec_rate_at_creation"),
-                    conf_rate.map_or(String::new(), |v| format!("{:.4}", v)),
-                    conf_fiat.map_or(String::new(), |v| format!("{:.2}", v)),
-                    received_zec,
+                    format!("{amt:.2}"),
+                    format!("{:.8}", r.get::<f64, _>("price_zec")),
+                    format!("{:.4}", r.get::<f64, _>("zec_rate_at_creation")),
+                    conf_rate.map_or(String::new(), |v| format!("{v:.4}")),
+                    conf_fiat.map_or(String::new(), |v| format!("{v:.2}")),
+                    format!("{received_zec:.8}"),
                     r.get::<String, _>("status"),
-                    r.get::<Option<String>, _>("detected_txid").unwrap_or_default(),
+                    r.get::<Option<String>, _>("detected_txid")
+                        .unwrap_or_default(),
                     r.get::<String, _>("created_at"),
-                    r.get::<Option<String>, _>("confirmed_at").unwrap_or_default(),
-                ));
+                    r.get::<Option<String>, _>("confirmed_at")
+                        .unwrap_or_default(),
+                ];
+                csv.push_str(
+                    &fields
+                        .iter()
+                        .map(|v| csv_cell(v))
+                        .collect::<Vec<_>>()
+                        .join(","),
+                );
+                csv.push_str("\r\n");
             }
             actix_web::HttpResponse::Ok()
                 .content_type("text/csv; charset=utf-8")
-                .insert_header(("Content-Disposition", "attachment; filename=cipherpay-invoices.csv"))
+                .insert_header((
+                    "Content-Disposition",
+                    "attachment; filename=cipherpay-invoices.csv",
+                ))
                 .body(csv)
         }
         Err(e) => {
@@ -477,15 +488,15 @@ pub async fn ledger_by_token(
 ) -> actix_web::HttpResponse {
     let token = path.into_inner();
 
-    let token_row = sqlx::query(
-        "SELECT merchant_id, expires_at, revoked_at FROM ledger_tokens WHERE id = ?",
-    )
-    .bind(&token)
-    .fetch_optional(pool.get_ref())
-    .await;
+    let token_row =
+        sqlx::query("SELECT merchant_id, expires_at, revoked_at FROM ledger_tokens WHERE id = ?")
+            .bind(&token)
+            .fetch_optional(pool.get_ref())
+            .await;
 
     let not_found = || {
-        actix_web::HttpResponse::NotFound().json(serde_json::json!({"error": "Invalid or expired token"}))
+        actix_web::HttpResponse::NotFound()
+            .json(serde_json::json!({"error": "Invalid or expired token"}))
     };
 
     let merchant_id = match token_row {
@@ -495,7 +506,9 @@ pub async fn ledger_by_token(
                 return not_found();
             }
             if let Some(exp) = row.get::<Option<String>, _>("expires_at") {
-                if let Ok(exp_dt) = chrono::NaiveDateTime::parse_from_str(&exp, "%Y-%m-%dT%H:%M:%SZ") {
+                if let Ok(exp_dt) =
+                    chrono::NaiveDateTime::parse_from_str(&exp, "%Y-%m-%dT%H:%M:%SZ")
+                {
                     if exp_dt < chrono::Utc::now().naive_utc() {
                         return not_found();
                     }
@@ -550,7 +563,8 @@ pub async fn ledger_by_token(
         }
         Err(e) => {
             tracing::error!(error = %e, "Ledger token query failed");
-            actix_web::HttpResponse::InternalServerError().json(serde_json::json!({"error": "Internal error"}))
+            actix_web::HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": "Internal error"}))
         }
     }
 }
@@ -613,7 +627,8 @@ pub async fn create_ledger_token(
         })),
         Err(e) => {
             tracing::error!(error = %e, "Failed to create ledger token");
-            actix_web::HttpResponse::InternalServerError().json(serde_json::json!({"error": "Failed to create token"}))
+            actix_web::HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": "Failed to create token"}))
         }
     }
 }
@@ -645,10 +660,12 @@ pub async fn revoke_ledger_token(
         Ok(r) if r.rows_affected() > 0 => {
             actix_web::HttpResponse::Ok().json(serde_json::json!({"status": "revoked"}))
         }
-        Ok(_) => actix_web::HttpResponse::NotFound().json(serde_json::json!({"error": "Token not found or already revoked"})),
+        Ok(_) => actix_web::HttpResponse::NotFound()
+            .json(serde_json::json!({"error": "Token not found or already revoked"})),
         Err(e) => {
             tracing::error!(error = %e, "Failed to revoke ledger token");
-            actix_web::HttpResponse::InternalServerError().json(serde_json::json!({"error": "Internal error"}))
+            actix_web::HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": "Internal error"}))
         }
     }
 }
@@ -689,7 +706,30 @@ pub async fn list_ledger_tokens(
         }
         Err(e) => {
             tracing::error!(error = %e, "Failed to list ledger tokens");
-            actix_web::HttpResponse::InternalServerError().json(serde_json::json!({"error": "Internal error"}))
+            actix_web::HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": "Internal error"}))
         }
+    }
+}
+
+/// Quote complete CSV cells and prevent spreadsheet formula evaluation.
+fn csv_cell(value: &str) -> String {
+    let unsafe_prefix = value.trim_start().starts_with(['=', '+', '-', '@'])
+        || value.starts_with(['\t', '\r', '\n']);
+    let value = if unsafe_prefix {
+        format!("'{value}")
+    } else {
+        value.to_string()
+    };
+    format!("\"{}\"", value.replace('"', "\"\""))
+}
+#[cfg(test)]
+mod export_tests {
+    use super::csv_cell;
+    #[test]
+    fn csv_preserves_quotes_newlines_and_neutralizes_formulas() {
+        assert_eq!(csv_cell("a,\"b\"\nc"), "\"a,\"\"b\"\"\nc\"");
+        assert_eq!(csv_cell(" =1+1"), "\"' =1+1\"");
+        assert_eq!(csv_cell("normal"), "\"normal\"");
     }
 }

@@ -1,30 +1,19 @@
-name: Security Audit
-
+name: Security and regression checks
 on:
   push:
-    branches: [main]
   pull_request:
   schedule:
     - cron: '0 6 * * 1'
-
 jobs:
-  cargo-audit:
+  verify:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --locked
       - run: cargo install cargo-audit --locked
-      # --deny unmaintained,unsound but NOT yanked:
-      #   core2 is yanked but all zcash crates depend on it — upstream issue.
-      #   Track: https://github.com/zcash/corez
-      # RUSTSEC-2023-0071: Marvin Attack on rsa (transitive, no direct exposure)
-      # RUSTSEC-2026-0097: (previous advisory, retained for safety)
-      # RUSTSEC-2026-0105: core2 unmaintained — zcash upstream dependency
-      # RUSTSEC-2026-0173: proc-macro-error2 unmaintained — transitive via getset (orchard/zcash_primitives)
-      - run: >-
-          cargo audit
-          --deny unmaintained --deny unsound
-          --ignore RUSTSEC-2023-0071
-          --ignore RUSTSEC-2026-0097
-          --ignore RUSTSEC-2026-0105
-          --ignore RUSTSEC-2026-0173
+      # Neither package is compiled for our supported server targets. SQLx keeps
+      # optional MySQL RSA dependencies in Cargo.lock; atomic-polyfill is for
+      # embedded AVR/ARM targets. Assert the deployment graph before exempting.
+      - run: python3 scripts/check-dependency-exposure.py
+      - run: cargo audit --deny unmaintained --deny unsound --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2023-0089
