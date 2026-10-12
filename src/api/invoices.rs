@@ -314,6 +314,7 @@ pub async fn finalize(
             } else if msg.contains("draft or expired")
                 || msg.contains("already detected")
                 || msg.contains("period has ended")
+                || msg.contains("not eligible for renewal")
             {
                 HttpResponse::Conflict().json(serde_json::json!({ "error": msg }))
             } else {

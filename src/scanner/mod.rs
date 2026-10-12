@@ -915,60 +915,38 @@ async fn on_invoice_confirmed(
 
     // Advance subscription period immediately on payment (with status guard)
     if let Some(ref sub_id) = invoice.subscription_id {
-        // Guard: re-check subscription status before advancing. A paused, canceled,
-        // or pause-scheduled subscription must not be renewed by a stale invoice.
-        let should_advance = match crate::subscriptions::get_subscription(pool, sub_id).await {
-            Ok(Some(s)) => s.status == "active" && s.pause_at_period_end == 0,
+        match crate::subscriptions::renew_from_confirmed_invoice(pool, &invoice.id).await {
+            Ok(Some(sub)) => {
+                tracing::info!(
+                    sub_id,
+                    invoice_id = %invoice.id,
+                    new_period_end = %sub.current_period_end,
+                    "Subscription advanced on payment confirmation"
+                );
+                let payload = serde_json::json!({
+                    "subscription_id": sub.id,
+                    "invoice_id": invoice.id,
+                    "new_period_start": sub.current_period_start,
+                    "new_period_end": sub.current_period_end,
+                });
+                if let Err(e) = crate::webhooks::dispatch_event(
+                    pool,
+                    outbound_http,
+                    &invoice.merchant_id,
+                    "subscription.renewed",
+                    payload,
+                    &config.encryption_key,
+                )
+                .await
+                {
+                    tracing::error!(sub_id, error = %e, "Failed to dispatch subscription.renewed webhook");
+                }
+            }
             Ok(None) => {
-                tracing::warn!(sub_id, "Subscription not found for confirmed invoice");
-                false
+                tracing::debug!(sub_id, "Renewal invoice already applied or ineligible");
             }
             Err(e) => {
-                tracing::error!(sub_id, error = %e, "Failed to load subscription for renewal guard");
-                false
-            }
-        };
-
-        if !should_advance {
-            tracing::debug!(
-                sub_id,
-                invoice_id = %invoice.id,
-                "Skipping subscription advance — subscription is not active or is scheduled to pause"
-            );
-        } else {
-            match crate::subscriptions::advance_subscription_period(pool, sub_id).await {
-                Ok(Some(sub)) => {
-                    tracing::info!(
-                        sub_id,
-                        invoice_id = %invoice.id,
-                        new_period_end = %sub.current_period_end,
-                        "Subscription advanced on payment confirmation"
-                    );
-                    let payload = serde_json::json!({
-                        "subscription_id": sub.id,
-                        "invoice_id": invoice.id,
-                        "new_period_start": sub.current_period_start,
-                        "new_period_end": sub.current_period_end,
-                    });
-                    if let Err(e) = crate::webhooks::dispatch_event(
-                        pool,
-                        outbound_http,
-                        &invoice.merchant_id,
-                        "subscription.renewed",
-                        payload,
-                        &config.encryption_key,
-                    )
-                    .await
-                    {
-                        tracing::error!(sub_id, error = %e, "Failed to dispatch subscription.renewed webhook");
-                    }
-                }
-                Ok(None) => {
-                    tracing::warn!(sub_id, "Subscription not found for confirmed invoice");
-                }
-                Err(e) => {
-                    tracing::error!(sub_id, error = %e, "Failed to advance subscription period");
-                }
+                tracing::error!(sub_id, error = %e, "Failed to advance subscription period");
             }
         }
     }

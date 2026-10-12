@@ -501,9 +501,15 @@ pub async fn finalize_invoice(
         let sub = crate::subscriptions::get_subscription(pool, sub_id).await?;
         if let Some(s) = sub {
             let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-            if now > s.current_period_end {
+            if now >= s.current_period_end {
                 anyhow::bail!("Subscription billing period has ended");
             }
+            if s.status != "active" || s.pause_at_period_end != 0 || s.cancel_at_period_end != 0
+                || s.current_invoice_id.as_deref() != Some(invoice_id) {
+                anyhow::bail!("Subscription is not eligible for renewal");
+            }
+        } else {
+            anyhow::bail!("Subscription not found");
         }
     }
 
@@ -571,7 +577,7 @@ pub async fn finalize_invoice(
          price_zec = ?, price_eur = ?, price_usd = ?,
          zec_rate_at_creation = ?, price_zatoshis = ?,
          zcash_uri = ?, expires_at = ?
-         WHERE id = ? AND status IN ('draft', 'expired')",
+         WHERE id = ? AND status IN ('draft', 'expired') AND received_zatoshis=0 AND detected_txid IS NULL",
     )
     .bind(price_zec)
     .bind(price_eur)

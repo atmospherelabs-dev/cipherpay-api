@@ -19,6 +19,14 @@ pub struct Subscription {
     pub pause_at_period_end: i32,
 }
 
+impl Subscription {
+    pub fn has_access_at(&self, now: chrono::DateTime<Utc>) -> bool {
+        self.status == "active"
+            && chrono::DateTime::parse_from_rfc3339(&self.current_period_end)
+                .is_ok_and(|end| now < end)
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CreateSubscriptionRequest {
     pub price_id: String,
@@ -215,7 +223,10 @@ pub async fn pause_subscription(
     };
 
     if sub.status != "active" {
-        anyhow::bail!("Only active subscriptions can be paused (current: {})", sub.status);
+        anyhow::bail!(
+            "Only active subscriptions can be paused (current: {})",
+            sub.status
+        );
     }
     if sub.cancel_at_period_end != 0 {
         anyhow::bail!("Cannot pause a subscription that is scheduled for cancellation");
@@ -514,10 +525,13 @@ pub async fn process_renewals(
     }
 
     // 3. Advance paid periods (subscriptions past period_end with confirmed invoice)
-    // Note: subscription.renewed webhook is dispatched by the scanner on payment confirmation.
     // This step is a fallback for edge cases (e.g., server restart during scan).
+    // Only the caller that consumes the invoice dispatches subscription.renewed.
     let q = format!(
-        "SELECT {} FROM subscriptions WHERE status = 'active' AND current_period_end <= ? AND cancel_at_period_end = 0 AND pause_at_period_end = 0 LIMIT 500",
+        "SELECT {} FROM subscriptions WHERE
+         (status = 'active' OR (status = 'past_due' AND EXISTS (
+             SELECT 1 FROM invoices WHERE invoices.id = subscriptions.current_invoice_id AND invoices.status = 'confirmed'
+         ))) AND current_period_end <= ? AND cancel_at_period_end = 0 AND pause_at_period_end = 0 LIMIT 500",
         SUB_COLS
     );
     let past_due_candidates: Vec<Subscription> = sqlx::query_as::<_, Subscription>(&q)
@@ -536,8 +550,22 @@ pub async fn process_renewals(
 
                 if let Some((ref status,)) = inv_status {
                     if status == "confirmed" {
-                        // Just advance the period — webhook already dispatched by scanner
-                        if advance_subscription_period(pool, &sub.id).await?.is_some() {
+                        if let Some(renewed) = renew_from_confirmed_invoice(pool, inv_id).await? {
+                            let payload = serde_json::json!({
+                                "subscription_id": renewed.id,
+                                "invoice_id": inv_id,
+                                "new_period_start": renewed.current_period_start,
+                                "new_period_end": renewed.current_period_end,
+                            });
+                            let _ = crate::webhooks::dispatch_event(
+                                pool,
+                                http,
+                                &sub.merchant_id,
+                                "subscription.renewed",
+                                payload,
+                                encryption_key,
+                            )
+                            .await;
                             actions += 1;
                         }
                         continue;
@@ -546,14 +574,23 @@ pub async fn process_renewals(
             }
         }
 
+        if sub.status == "past_due" {
+            continue;
+        }
+
         // 4. Period ended without confirmed payment → past_due
         tracing::info!(sub_id = %sub.id, "Subscription past due (period ended without payment)");
-        sqlx::query(
-            "UPDATE subscriptions SET status = 'past_due' WHERE id = ? AND status = 'active'",
+        let overdue = sqlx::query(
+            "UPDATE subscriptions SET status = 'past_due'
+             WHERE id = ? AND status = 'active' AND current_period_end = ?",
         )
         .bind(&sub.id)
+        .bind(&sub.current_period_end)
         .execute(pool)
         .await?;
+        if overdue.rows_affected() == 0 {
+            continue; // A concurrent confirmed renewal already advanced this period.
+        }
 
         // Expire the draft invoice if it exists
         if let Some(ref inv_id) = sub.current_invoice_id {
@@ -589,7 +626,74 @@ pub async fn process_renewals(
     Ok(actions)
 }
 
-/// Advance a subscription to its next billing period. Called when invoice is confirmed.
+/// Apply a confirmed renewal exactly once, including a quote paid after access expired.
+/// An open quote never grants access; the scanner must confirm sufficient funds first.
+pub async fn renew_from_confirmed_invoice(
+    pool: &SqlitePool,
+    invoice_id: &str,
+) -> anyhow::Result<Option<Subscription>> {
+    let invoice = match crate::invoices::get_invoice(pool, invoice_id).await? {
+        Some(i)
+            if i.status == "confirmed"
+                && i.price_zatoshis > 0
+                && i.received_zatoshis
+                    >= (i.price_zatoshis as f64 * crate::scanner::decrypt::SLIPPAGE_TOLERANCE) as i64
+                && i.confirmed_at
+                    .as_ref()
+                    .is_some_and(|at| at <= &i.expires_at) =>
+        {
+            i
+        }
+        _ => return Ok(None),
+    };
+    let sub_id = match invoice.subscription_id.as_deref() {
+        Some(id) => id,
+        None => return Ok(None),
+    };
+    let sub = match get_subscription(pool, sub_id).await? {
+        Some(s)
+            if (s.status == "active" || s.status == "past_due")
+                && s.pause_at_period_end == 0
+                && s.cancel_at_period_end == 0
+                && s.current_invoice_id.as_deref() == Some(invoice_id)
+                && s.merchant_id == invoice.merchant_id
+                && invoice.price_id.as_deref() == Some(s.price_id.as_str()) =>
+        {
+            s
+        }
+        _ => return Ok(None),
+    };
+    let price = crate::prices::get_price(pool, &sub.price_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Subscription price not found"))?;
+    let period_end =
+        chrono::DateTime::parse_from_rfc3339(&sub.current_period_end)?.with_timezone(&Utc);
+    let new_start = period_end.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let new_end = compute_period_end(
+        &period_end,
+        price.billing_interval.as_deref().unwrap_or("month"),
+        price.interval_count.unwrap_or(1),
+    )
+    .format("%Y-%m-%dT%H:%M:%SZ")
+    .to_string();
+
+    // Matching the invoice and old boundary makes concurrent/repeated application a no-op.
+    let result = sqlx::query(
+        "UPDATE subscriptions SET status = 'active', current_period_start = ?,
+         current_period_end = ?, current_invoice_id = NULL
+         WHERE id = ? AND current_invoice_id = ? AND current_period_end = ?
+         AND status IN ('active', 'past_due') AND pause_at_period_end = 0 AND cancel_at_period_end = 0
+         AND EXISTS (SELECT 1 FROM invoices WHERE invoices.id = subscriptions.current_invoice_id AND invoices.status = 'confirmed')"
+    )
+    .bind(&new_start).bind(&new_end).bind(sub_id).bind(invoice_id)
+    .bind(&sub.current_period_end).execute(pool).await?;
+    if result.rows_affected() == 0 {
+        return Ok(None);
+    }
+    get_subscription(pool, sub_id).await
+}
+
+/// Advance without payment evidence for the testnet-only simulation endpoint.
 pub async fn advance_subscription_period(
     pool: &SqlitePool,
     sub_id: &str,
@@ -610,9 +714,12 @@ pub async fn advance_subscription_period(
 
     let interval = price.billing_interval.as_deref().unwrap_or("month");
     let count = price.interval_count.unwrap_or(1);
-    let now_dt = Utc::now();
-    let new_start = now_dt.format("%Y-%m-%dT%H:%M:%SZ").to_string();
-    let new_end = compute_period_end(&now_dt, interval, count)
+    // A renewal buys the next period, including when it is paid early.
+    // Keep the existing billing boundary instead of discarding paid time.
+    let period_end =
+        chrono::DateTime::parse_from_rfc3339(&sub.current_period_end)?.with_timezone(&Utc);
+    let new_start = period_end.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let new_end = compute_period_end(&period_end, interval, count)
         .format("%Y-%m-%dT%H:%M:%SZ")
         .to_string();
 
@@ -686,6 +793,288 @@ mod tests {
         create_subscription(pool, merchant_id, &req).await.unwrap()
     }
 
+    async fn seed_confirmed_renewal(pool: &SqlitePool, sub: &Subscription) -> String {
+        let invoice_id = format!("renewal_{}", sub.id);
+        let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let expiry = (Utc::now() + ChronoDuration::minutes(10))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        sqlx::query("INSERT INTO invoices (id, merchant_id, memo_code, price_eur, price_zec, zec_rate_at_creation, status, expires_at, confirmed_at, subscription_id, price_id, price_zatoshis, received_zatoshis)
+            VALUES (?, ?, ?, 9.99, 0.1, 100.0, 'confirmed', ?, ?, ?, ?, 10000000, 10000000)")
+            .bind(&invoice_id).bind(&sub.merchant_id).bind(&invoice_id)
+            .bind(&expiry).bind(&now).bind(&sub.id).bind(&sub.price_id)
+            .execute(pool).await.unwrap();
+        sqlx::query("UPDATE subscriptions SET current_invoice_id = ? WHERE id = ?")
+            .bind(&invoice_id)
+            .bind(&sub.id)
+            .execute(pool)
+            .await
+            .unwrap();
+        invoice_id
+    }
+
+    #[tokio::test]
+    async fn early_renewal_preserves_remaining_paid_days() {
+        let pool = setup_pool().await;
+        seed_merchant(&pool, "renewal").await;
+        seed_product_and_price(&pool, "renewal", "renewal_product", "renewal_price").await;
+        let sub = create_test_sub(&pool, "renewal", "renewal_price").await;
+        let old_end = (Utc::now() + ChronoDuration::days(3))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        sqlx::query("UPDATE subscriptions SET current_period_end = ? WHERE id = ?")
+            .bind(&old_end)
+            .bind(&sub.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let invoice_id = seed_confirmed_renewal(&pool, &sub).await;
+        let (first, second) = tokio::join!(
+            renew_from_confirmed_invoice(&pool, &invoice_id),
+            renew_from_confirmed_invoice(&pool, &invoice_id),
+        );
+        let first = first.unwrap();
+        let second = second.unwrap();
+        assert_ne!(first.is_some(), second.is_some());
+        let renewed = first.or(second).unwrap();
+        let expected_end = (chrono::DateTime::parse_from_rfc3339(&old_end).unwrap()
+            + ChronoDuration::days(30))
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+        assert_eq!(renewed.current_period_start, old_end);
+        assert_eq!(renewed.current_period_end, expected_end);
+        assert!(renew_from_confirmed_invoice(&pool, &invoice_id)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn confirmed_renewal_keeps_billing_boundary_after_delayed_processing() {
+        let pool = setup_pool().await;
+        seed_merchant(&pool, "delayed").await;
+        seed_product_and_price(&pool, "delayed", "delayed_product", "delayed_price").await;
+        let sub = create_test_sub(&pool, "delayed", "delayed_price").await;
+        let old_end = (Utc::now() - ChronoDuration::minutes(5))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        sqlx::query("UPDATE subscriptions SET current_period_end = ? WHERE id = ?")
+            .bind(&old_end)
+            .bind(&sub.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let invoice_id = seed_confirmed_renewal(&pool, &sub).await;
+        sqlx::query("UPDATE subscriptions SET status = 'past_due' WHERE id = ?")
+            .bind(&sub.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let expired = get_subscription(&pool, &sub.id).await.unwrap().unwrap();
+        assert!(!expired.has_access_at(Utc::now()));
+        let renewed = renew_from_confirmed_invoice(&pool, &invoice_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let expected_end = (chrono::DateTime::parse_from_rfc3339(&old_end).unwrap()
+            + ChronoDuration::days(30))
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+        assert_eq!(renewed.current_period_start, old_end);
+        assert_eq!(renewed.current_period_end, expected_end);
+        assert!(renewed.has_access_at(Utc::now()));
+    }
+
+    #[tokio::test]
+    async fn renewal_rejects_unpaid_partial_stale_and_canceled_invoices() {
+        let pool = setup_pool().await;
+        seed_merchant(&pool, "guard").await;
+        seed_product_and_price(&pool, "guard", "guard_product", "guard_price").await;
+        let sub = create_test_sub(&pool, "guard", "guard_price").await;
+        let invoice_id = seed_confirmed_renewal(&pool, &sub).await;
+
+        for status in ["draft", "pending", "detected", "underpaid", "expired"] {
+            sqlx::query("UPDATE invoices SET status = ? WHERE id = ?")
+                .bind(status)
+                .bind(&invoice_id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            assert!(renew_from_confirmed_invoice(&pool, &invoice_id)
+                .await
+                .unwrap()
+                .is_none());
+        }
+        sqlx::query("UPDATE invoices SET status = 'confirmed', received_zatoshis = 1 WHERE id = ?")
+            .bind(&invoice_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(renew_from_confirmed_invoice(&pool, &invoice_id)
+            .await
+            .unwrap()
+            .is_none());
+        sqlx::query("UPDATE invoices SET received_zatoshis = price_zatoshis, expires_at = '2020-01-01T00:00:00Z' WHERE id = ?")
+            .bind(&invoice_id).execute(&pool).await.unwrap();
+        assert!(renew_from_confirmed_invoice(&pool, &invoice_id)
+            .await
+            .unwrap()
+            .is_none());
+        sqlx::query("UPDATE invoices SET expires_at = '2099-01-01T00:00:00Z' WHERE id = ?")
+            .bind(&invoice_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        for status in ["paused", "canceled"] {
+            sqlx::query("UPDATE subscriptions SET status = ? WHERE id = ?")
+                .bind(status)
+                .bind(&sub.id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            assert!(renew_from_confirmed_invoice(&pool, &invoice_id)
+                .await
+                .unwrap()
+                .is_none());
+        }
+        sqlx::query(
+            "UPDATE subscriptions SET status = 'active', current_invoice_id = NULL WHERE id = ?",
+        )
+        .bind(&sub.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(renew_from_confirmed_invoice(&pool, &invoice_id)
+            .await
+            .unwrap()
+            .is_none());
+        let unchanged = get_subscription(&pool, &sub.id).await.unwrap().unwrap();
+        assert_eq!(unchanged.current_period_end, sub.current_period_end);
+    }
+
+    #[tokio::test]
+    async fn renewal_job_recovers_confirmed_quote_after_subscription_became_past_due() {
+        let pool = setup_pool().await;
+        seed_merchant(&pool, "recovery").await;
+        seed_product_and_price(&pool, "recovery", "recovery_product", "recovery_price").await;
+        let sub = create_test_sub(&pool, "recovery", "recovery_price").await;
+        let invoice_id = seed_confirmed_renewal(&pool, &sub).await;
+        let past = (Utc::now() - ChronoDuration::minutes(5))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        sqlx::query(
+            "UPDATE subscriptions SET status = 'past_due', current_period_end = ? WHERE id = ?",
+        )
+        .bind(&past)
+        .bind(&sub.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let actions = process_renewals(
+            &pool,
+            &reqwest::Client::new(),
+            "test_key",
+            &std::collections::HashMap::new(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(actions, 1);
+        let renewed = get_subscription(&pool, &sub.id).await.unwrap().unwrap();
+        assert_eq!(renewed.current_period_start, past);
+        assert!(renewed.has_access_at(Utc::now()));
+        assert!(renew_from_confirmed_invoice(&pool, &invoice_id)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn locking_and_relocking_unpaid_invoice_never_extends_subscription() {
+        let pool = setup_pool().await;
+        seed_merchant(&pool, "unpaid").await;
+        seed_product_and_price(&pool, "unpaid", "unpaid_product", "unpaid_price").await;
+        let sub = create_test_sub(&pool, "unpaid", "unpaid_price").await;
+        let old_end = (Utc::now() + ChronoDuration::minutes(5))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        sqlx::query("UPDATE subscriptions SET current_period_end = ?, current_invoice_id = 'unpaid_invoice' WHERE id = ?")
+            .bind(&old_end)
+            .bind(&sub.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO invoices (id, merchant_id, memo_code, price_eur, price_zec, zec_rate_at_creation, amount, currency, status, expires_at, subscription_id)
+            VALUES ('unpaid_invoice', 'unpaid', 'unpaid_memo', 20.0, 0.0, 0.0, 20.0, 'USD', 'draft', ?, ?)")
+            .bind(&old_end)
+            .bind(&sub.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let rates = crate::invoices::pricing::ZecRates {
+            zec_eur: 100.0,
+            zec_usd: 100.0,
+            zec_brl: 100.0,
+            zec_gbp: 100.0,
+            zec_cad: 100.0,
+            zec_jpy: 100.0,
+            zec_mxn: 100.0,
+            zec_ars: 100.0,
+            zec_ngn: 100.0,
+            zec_chf: 100.0,
+            zec_inr: 100.0,
+            updated_at: Utc::now(),
+        };
+
+        for _ in 0..2 {
+            let invoice = crate::invoices::finalize_invoice(&pool, "unpaid_invoice", &rates, None)
+                .await
+                .unwrap();
+            assert_eq!(invoice.status, "pending");
+            assert!(invoice.expires_at > old_end);
+            let unchanged = get_subscription(&pool, &sub.id).await.unwrap().unwrap();
+            assert_eq!(unchanged.current_period_end, old_end);
+            let boundary = chrono::DateTime::parse_from_rfc3339(&old_end)
+                .unwrap()
+                .with_timezone(&Utc);
+            assert!(unchanged.has_access_at(boundary - ChronoDuration::seconds(1)));
+            assert!(!unchanged.has_access_at(boundary));
+            assert!(!unchanged.has_access_at(boundary + ChronoDuration::minutes(1)));
+            sqlx::query("UPDATE invoices SET status = 'expired' WHERE id = 'unpaid_invoice'")
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        let past = (Utc::now() - ChronoDuration::seconds(1))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        sqlx::query("UPDATE subscriptions SET current_period_end = ? WHERE id = ?")
+            .bind(&past)
+            .bind(&sub.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let err = crate::invoices::finalize_invoice(&pool, "unpaid_invoice", &rates, None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("billing period has ended"));
+        process_renewals(
+            &pool,
+            &reqwest::Client::new(),
+            "test_key",
+            &std::collections::HashMap::new(),
+            None,
+        )
+        .await
+        .unwrap();
+        let ended = get_subscription(&pool, &sub.id).await.unwrap().unwrap();
+        assert_eq!(ended.status, "past_due");
+        assert_eq!(ended.current_period_end, past);
+    }
+
     #[tokio::test]
     async fn pause_active_sub_sets_flag() {
         let pool = setup_pool().await;
@@ -696,7 +1085,10 @@ mod tests {
         seed_product_and_price(&pool, m, prod, price).await;
         let sub = create_test_sub(&pool, m, price).await;
 
-        let paused = pause_subscription(&pool, &sub.id, m).await.unwrap().unwrap();
+        let paused = pause_subscription(&pool, &sub.id, m)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(paused.status, "active");
         assert_eq!(paused.pause_at_period_end, 1);
     }
@@ -740,7 +1132,10 @@ mod tests {
         cancel_subscription(&pool, &sub.id, m, true).await.unwrap();
         let err = pause_subscription(&pool, &sub.id, m).await;
         assert!(err.is_err());
-        assert!(err.unwrap_err().to_string().contains("scheduled for cancellation"));
+        assert!(err
+            .unwrap_err()
+            .to_string()
+            .contains("scheduled for cancellation"));
     }
 
     #[tokio::test]
@@ -770,7 +1165,10 @@ mod tests {
             .await
             .unwrap();
 
-        let paused = pause_subscription(&pool, &sub.id, m).await.unwrap().unwrap();
+        let paused = pause_subscription(&pool, &sub.id, m)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(paused.pause_at_period_end, 1);
         assert!(paused.current_invoice_id.is_none());
 
@@ -891,11 +1289,13 @@ mod tests {
         seed_product_and_price(&pool, m, "prod10", "price10").await;
         let sub = create_test_sub(&pool, m, "price10").await;
 
-        sqlx::query("UPDATE subscriptions SET status = 'paused', pause_at_period_end = 0 WHERE id = ?")
-            .bind(&sub.id)
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "UPDATE subscriptions SET status = 'paused', pause_at_period_end = 0 WHERE id = ?",
+        )
+        .bind(&sub.id)
+        .execute(&pool)
+        .await
+        .unwrap();
 
         // Deactivate the price
         sqlx::query("UPDATE prices SET active = 0 WHERE id = 'price10'")
@@ -949,11 +1349,13 @@ mod tests {
         let sub = create_test_sub(&pool, m, "price12").await;
 
         // Set to paused
-        sqlx::query("UPDATE subscriptions SET status = 'paused', pause_at_period_end = 0 WHERE id = ?")
-            .bind(&sub.id)
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "UPDATE subscriptions SET status = 'paused', pause_at_period_end = 0 WHERE id = ?",
+        )
+        .bind(&sub.id)
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let http = reqwest::Client::new();
         let ufvks = std::collections::HashMap::new();
