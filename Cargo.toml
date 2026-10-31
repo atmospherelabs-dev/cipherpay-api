@@ -7,7 +7,10 @@ license = "MIT"
 
 [dependencies]
 # Web framework
-actix-web = "4"
+# Defaults minus compress-* and http2: the server binds plain HTTP and uses no
+# Compress middleware, but those features auto-decode zstd/brotli/gzip request
+# bodies and pull in h2 0.3 and zstd-safe 7 (RUSTSEC-2026-0258, -0391..0410).
+actix-web = { version = "4", default-features = false, features = ["macros", "cookies", "unicode", "compat"] }
 actix-cors = "0.7"
 actix-web-lab = "0.24"
 actix-governor = "0.7"
