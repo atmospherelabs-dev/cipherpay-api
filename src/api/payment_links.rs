@@ -424,9 +424,10 @@ async fn resolve_donation(
                 .frontend_url
                 .as_deref()
                 .unwrap_or("https://cipherpay.app");
-            let checkout_url = format!("{}/pay/{}", frontend_url, resp.invoice_id);
+            let checkout_url = format!("{}/pay/{}#checkout={}", frontend_url, resp.invoice_id, resp.checkout_token);
 
             HttpResponse::Created().json(serde_json::json!({
+                "checkout_token": resp.checkout_token,
                 "invoice_id": resp.invoice_id,
                 "checkout_url": checkout_url,
                 "payment_address": resp.payment_address,
@@ -568,7 +569,9 @@ async fn resolve_payment(
                 checkout_url = format!("{}?return_url={}", checkout_url, encoded);
             }
 
+            checkout_url.push_str(&format!("#checkout={}", resp.checkout_token));
             HttpResponse::Created().json(serde_json::json!({
+                "checkout_token": resp.checkout_token,
                 "invoice_id": resp.invoice_id,
                 "checkout_url": checkout_url,
                 "payment_address": resp.payment_address,

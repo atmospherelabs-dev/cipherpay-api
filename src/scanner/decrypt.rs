@@ -112,6 +112,13 @@ pub fn derive_uivk_from_ufvk(ufvk_str: &str) -> Result<String> {
 }
 
 /// Trial-decrypt all Orchard and Ironwood outputs using pre-computed keys (fast path).
+pub fn validate_raw_transaction(raw_hex: &str) -> Result<()> {
+    let bytes = hex::decode(raw_hex)?;
+    anyhow::ensure!(bytes.len() >= 4, "Truncated raw transaction");
+    Transaction::read(&mut Cursor::new(&bytes[..]), BranchId::Nu6_3)?;
+    Ok(())
+}
+
 pub fn try_decrypt_with_keys(raw_hex: &str, keys: &CachedKeys) -> Result<Vec<DecryptedOutput>> {
     let tx_bytes = hex::decode(raw_hex)?;
     if tx_bytes.len() < 4 {

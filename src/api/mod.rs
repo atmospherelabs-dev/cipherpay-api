@@ -1,13 +1,13 @@
 pub mod admin;
 pub mod auth;
 pub mod billing_routes;
-pub mod passkey;
 pub mod events;
 pub mod invoice_routes;
 pub mod invoices;
 pub mod keys;
 pub mod luma;
 pub mod merchants;
+pub mod passkey;
 pub mod payment_links;
 pub mod pos;
 pub mod prices;
@@ -58,7 +58,36 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
 
     cfg.service(
         web::scope("/api")
+            .route("/admin/crosschain", web::get().to(crate::crosschain::operations::admin_issues))
+            .route("/admin/crosschain/{id}/retry", web::post().to(crate::crosschain::operations::retry))
             .route("/health", web::get().to(system::health))
+            .route("/invoices/{id}/checkout-access", web::get().to(crate::crosschain::security::access))
+            .service(
+                web::resource("/crosschain/assets")
+                    .wrap(Governor::new(&public_read_limit))
+                    .route(web::get().to(crate::crosschain::assets)),
+            )
+            .service(
+                web::resource("/invoices/{id}/crosschain/send")
+                    .wrap(Governor::new(&checkout_rate_limit))
+                    .route(web::post().to(crate::crosschain::wallet_send)),
+            )
+            .service(
+                web::resource("/invoices/{id}/crosschain/eligibility")
+                    .wrap(Governor::new(&checkout_rate_limit))
+                    .route(web::get().to(crate::crosschain::eligibility)),
+            )
+            .service(
+                web::resource("/invoices/{id}/crosschain/preview")
+                    .wrap(Governor::new(&checkout_rate_limit))
+                    .route(web::post().to(crate::crosschain::preview)),
+            )
+            .service(
+                web::resource("/invoices/{id}/crosschain")
+                    .wrap(Governor::new(&checkout_rate_limit))
+                    .route(web::get().to(crate::crosschain::status))
+                    .route(web::post().to(crate::crosschain::create)),
+            )
             // Registration POST is a Resource (not a Route inside the parent
             // scope) so the rate limiter actually runs. actix-web 4's
             // `Route::wrap` is a no-op for short-circuiting middleware like
@@ -73,6 +102,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .service(
                 web::scope("/merchants")
                     .route("/me", web::get().to(auth::me))
+                    .route("/me/referral", web::post().to(crate::referrals::apply))
                     .route("/me", web::patch().to(auth::update_me))
                     .route("/me/invoices", web::get().to(auth::my_invoices))
                     .route(
@@ -83,6 +113,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                         "/me/regenerate-dashboard-token",
                         web::post().to(auth::regenerate_dashboard_token),
                     )
+                    .route("/me/webhook-config", web::get().to(auth::webhook_config))
+                    .route("/me/connect-shopify", web::post().to(auth::connect_shopify))
                     .route(
                         "/me/regenerate-webhook-secret",
                         web::post().to(auth::regenerate_webhook_secret),
@@ -101,10 +133,22 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                     )
                     .route("/me/delete", web::post().to(billing_routes::delete_account))
                     .route("/me/webhooks", web::get().to(auth::my_webhooks))
-                    .route("/me/ledger-tokens", web::get().to(invoice_routes::list_ledger_tokens))
-                    .route("/me/ledger-tokens", web::post().to(invoice_routes::create_ledger_token))
-                    .route("/me/ledger-tokens/{token_id}", web::delete().to(invoice_routes::revoke_ledger_token))
-                    .route("/me/webhooks/{id}/retry", web::post().to(auth::retry_webhook))
+                    .route(
+                        "/me/ledger-tokens",
+                        web::get().to(invoice_routes::list_ledger_tokens),
+                    )
+                    .route(
+                        "/me/ledger-tokens",
+                        web::post().to(invoice_routes::create_ledger_token),
+                    )
+                    .route(
+                        "/me/ledger-tokens/{token_id}",
+                        web::delete().to(invoice_routes::revoke_ledger_token),
+                    )
+                    .route(
+                        "/me/webhooks/{id}/retry",
+                        web::post().to(auth::retry_webhook),
+                    )
                     .route("/me/x402/history", web::get().to(x402::history))
                     .route("/me/sessions", web::get().to(sessions::history))
                     .route("/me/keys", web::post().to(keys::create))
@@ -129,10 +173,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                         "/passkey/register/complete",
                         web::post().to(passkey::register_complete),
                     )
-                    .route(
-                        "/passkey/login/begin",
-                        web::post().to(passkey::login_begin),
-                    )
+                    .route("/passkey/login/begin", web::post().to(passkey::login_begin))
                     .route(
                         "/passkey/login/complete",
                         web::post().to(passkey::login_complete),
@@ -223,7 +264,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             // Invoice endpoints (API key auth)
             .route("/invoices", web::post().to(invoices::create))
             .route("/invoices", web::get().to(invoice_routes::list_invoices))
-            .route("/invoices/export/csv", web::get().to(invoice_routes::export_csv))
+            .route(
+                "/invoices/export/csv",
+                web::get().to(invoice_routes::export_csv),
+            )
             .route(
                 "/invoices/lookup/{memo_code}",
                 web::get().to(invoice_routes::lookup_by_memo),
@@ -252,7 +296,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             )
             .route("/invoices/{id}/qr", web::get().to(invoice_routes::qr_code))
             // Shared ledger (public, token-auth)
-            .route("/ledger/{token}", web::get().to(invoice_routes::ledger_by_token))
+            .route(
+                "/ledger/{token}",
+                web::get().to(invoice_routes::ledger_by_token),
+            )
             // Ticket endpoints
             .route(
                 "/tickets/invoice/{invoice_id}",
@@ -286,8 +333,9 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                             .wrap(Governor::new(&session_rate_limit))
                             .route(web::post().to(sessions::open)),
                     )
-                    .route("/validate", web::get().to(sessions::validate))
-                    .route("/deduct", web::post().to(sessions::deduct))
+                    .route("/validate", web::get().to(sessions::legacy_validate))
+                    .route("/validate", web::post().to(sessions::validate))
+                    .route("/deduct", web::post().to(sessions::validate))
                     .route("/{id}", web::get().to(sessions::get_status))
                     .route("/{id}/close", web::post().to(sessions::close)),
             )
@@ -300,8 +348,14 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/admin/system", web::get().to(admin::system))
             .route("/admin/test-email", web::post().to(admin::test_email))
             .route("/admin/rescan-fees", web::post().to(admin::rescan_fees))
-            .route("/admin/scanner-metrics", web::get().to(admin::scanner_metrics))
-            .route("/admin/backfill-campaign-addresses", web::post().to(admin::backfill_campaign_addresses)),
+            .route(
+                "/admin/scanner-metrics",
+                web::get().to(admin::scanner_metrics),
+            )
+            .route(
+                "/admin/backfill-campaign-addresses",
+                web::post().to(admin::backfill_campaign_addresses),
+            ),
     );
 
     cfg.route(
@@ -571,7 +625,8 @@ async fn checkout(
         refund_address: body.refund_address.clone(),
     };
 
-    let fee_config = crate::billing::fee_config_for_merchant(pool.get_ref(), &merchant.id, &config).await;
+    let fee_config =
+        crate::billing::fee_config_for_merchant(pool.get_ref(), &merchant.id, &config).await;
 
     match crate::invoices::create_invoice(
         pool.get_ref(),
@@ -667,6 +722,7 @@ async fn checkout(
                         .collect();
                     checkout_url = format!("{}?return_url={}", checkout_url, encoded);
                 }
+                checkout_url.push_str(&format!("#checkout={}", resp.checkout_token));
                 obj.insert(
                     "checkout_url".to_string(),
                     serde_json::Value::String(checkout_url),

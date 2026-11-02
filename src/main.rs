@@ -3,6 +3,7 @@ mod api;
 mod api_keys;
 mod billing;
 mod config;
+mod crosschain;
 mod crypto;
 mod db;
 mod email;
@@ -13,6 +14,9 @@ mod merchants;
 mod payment_links;
 mod prices;
 mod products;
+mod referrals;
+#[cfg(test)]
+mod repair_tests;
 mod scanner;
 mod sessions;
 mod subscriptions;
@@ -34,6 +38,25 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| "cipherpay=info".into()),
         )
         .init();
+
+    if std::env::args().any(|arg| arg == "--check-database") {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = db::create_pool(&database_url).await?;
+        let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
+            .fetch_one(&pool)
+            .await?;
+        anyhow::ensure!(integrity == "ok", "Database integrity check failed");
+        let violations = sqlx::query("PRAGMA foreign_key_check")
+            .fetch_all(&pool)
+            .await?;
+        anyhow::ensure!(
+            violations.is_empty(),
+            "Database has {} foreign-key violations",
+            violations.len()
+        );
+        println!("Database migrations, integrity and foreign keys: OK");
+        return Ok(());
+    }
 
     let config = config::Config::from_env()?;
     config.validate()?;
@@ -77,7 +100,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .await?;
     }
-    // Internal client for CipherScan (carries X-Service-Key)
+    // Internal client for ZecBlock (carries X-Service-Key)
     let mut scanner_headers = reqwest::header::HeaderMap::new();
     scanner_headers.insert(
         "User-Agent",
@@ -121,16 +144,23 @@ async fn main() -> anyhow::Result<()> {
     let scanner_webhook_http = http_client.clone();
     let scanner_prices = price_service.clone();
     tokio::spawn(async move {
-        scanner::run(scanner_config, scanner_pool, scanner_client, scanner_webhook_http, scanner_prices).await;
+        scanner::run(
+            scanner_config,
+            scanner_pool,
+            scanner_client,
+            scanner_webhook_http,
+            scanner_prices,
+        )
+        .await;
     });
 
     let retry_pool = pool.clone();
     let retry_http = http_client.clone();
     let retry_enc_key = config.encryption_key.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
         loop {
-            interval.tick().await;
+            tokio::select! { _ = interval.tick() => {}, _ = webhooks::notified() => {} }
             let _ = webhooks::retry_failed(&retry_pool, &retry_http, &retry_enc_key).await;
         }
     });
@@ -249,6 +279,13 @@ async fn main() -> anyhow::Result<()> {
         .finish()
         .expect("Failed to build rate limiter");
 
+    let crosschain = web::Data::new(crosschain::Gateway::from_env(&config)?);
+    crosschain::fees::start_worker(
+        pool.clone(),
+        crosschain.clone(),
+        config.encryption_key.clone(),
+    );
+
     HttpServer::new(move || {
         let cors = if config.is_testnet() {
             Cors::default()
@@ -292,6 +329,7 @@ async fn main() -> anyhow::Result<()> {
             .app_data(web::Data::new(config.clone()))
             .app_data(web::Data::new(price_service.clone()))
             .app_data(web::Data::new(http_client.clone()))
+            .app_data(crosschain.clone())
             .configure(api::configure)
             .route("/", web::get().to(serve_ui))
             .service(web::resource("/widget/{filename}").route(web::get().to(serve_widget)))

@@ -3,6 +3,9 @@ use uuid::Uuid;
 
 use crate::config::Config;
 
+mod payments;
+pub use payments::{migrate_payment_email_queue, run_payment_email_worker};
+
 pub async fn send_recovery_email(config: &Config, to: &str, token: &str) -> anyhow::Result<()> {
     let from = config
         .smtp_from

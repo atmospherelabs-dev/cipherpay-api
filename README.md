@@ -242,6 +242,8 @@ cargo build --release
 # Binary at target/release/cipherpay
 ```
 
+The hosted service deploys CI-built releases from `main`; see [docs/RELEASING.md](docs/RELEASING.md).
+
 See the companion frontend at [cipherpay-web](https://github.com/atmospherelabs-dev/cipherpay-web) for the hosted checkout and merchant dashboard.
 
 ## Related

@@ -22,11 +22,12 @@ pub(super) fn collect_mempool_invoice_totals(
     invoice_index: &matching::InvoiceIndex<'_>,
     campaign_addresses: &[crate::payment_links::CampaignAddress],
     source: MempoolSource,
-) -> (InvoiceTotals, CampaignTotals) {
+) -> anyhow::Result<(InvoiceTotals, CampaignTotals)> {
+    super::decrypt::validate_raw_transaction(raw_hex)?;
     let mut invoice_totals = HashMap::new();
     let mut campaign_totals: CampaignTotals = HashMap::new();
 
-    for (_merchant_id, keys) in cached_keys {
+    for (merchant_id, keys) in cached_keys {
         match super::decrypt::try_decrypt_with_keys(raw_hex, keys) {
             Ok(outputs) => {
                 for output in &outputs {
@@ -37,19 +38,17 @@ pub(super) fn collect_mempool_invoice_totals(
                             tracing::debug!(txid = %txid, "[WS] Decrypted mempool output");
                         }
                     }
-                    tracing::debug!(
-                        txid,
-                        memo = %output.memo,
-                        amount = output.amount_zec,
-                        "Decrypted output details"
-                    );
-
-                    if let Some(invoice) = invoice_index.find(&recipient_hex, &output.memo) {
+                    if let Some(invoice) =
+                        invoice_index.find(merchant_id, &recipient_hex, &output.memo)
+                    {
                         let entry = invoice_totals
                             .entry(invoice.id.clone())
                             .or_insert((invoice.clone(), 0));
                         entry.1 += output.amount_zatoshis as i64;
-                    } else if let Some(campaign) = campaign_addresses.iter().find(|c| c.campaign_address_hex == recipient_hex) {
+                    } else if let Some(campaign) = campaign_addresses
+                        .iter()
+                        .find(|c| c.campaign_address_hex == recipient_hex)
+                    {
                         let entry = campaign_totals
                             .entry(campaign.link_id.clone())
                             .or_insert((campaign.clone(), 0));
@@ -61,7 +60,7 @@ pub(super) fn collect_mempool_invoice_totals(
         }
     }
 
-    (invoice_totals, campaign_totals)
+    Ok((invoice_totals, campaign_totals))
 }
 
 /// Returns list of invoice IDs that were newly marked as detected (for fee scanning).
@@ -75,6 +74,7 @@ pub(super) async fn apply_mempool_invoice_totals(
     let mut newly_detected = Vec::new();
 
     for (invoice_id, (invoice, tx_total)) in invoice_totals {
+        if !crate::crosschain::security::accepts_payment(pool, invoice_id, txid).await? { continue; }
         let dust_min = std::cmp::max(
             (invoice.price_zatoshis as f64 * super::decrypt::DUST_THRESHOLD_FRACTION) as i64,
             super::decrypt::DUST_THRESHOLD_MIN_ZATOSHIS,
@@ -84,13 +84,9 @@ pub(super) async fn apply_mempool_invoice_totals(
             continue;
         }
 
-        let new_received = if invoice.status == "underpaid" {
-            invoices::record_payment(pool, invoice_id, txid, *tx_total).await?
-        } else {
-            *tx_total
-        };
+        let new_received = invoices::record_payment(pool, invoice_id, txid, *tx_total).await?;
 
-        let min = (invoice.price_zatoshis as f64 * super::decrypt::SLIPPAGE_TOLERANCE) as i64;
+        let min = invoice.minimum_payment_zatoshis();
 
         if new_received >= min {
             let changed = invoices::mark_detected(pool, invoice_id, txid, new_received).await?;
@@ -160,8 +156,15 @@ pub(super) async fn apply_campaign_totals(
             }
         };
         match crate::payment_links::record_campaign_donation(
-            pool, link_id, txid, *zat_total, cents, &campaign.currency,
-        ).await {
+            pool,
+            link_id,
+            txid,
+            *zat_total,
+            cents,
+            &campaign.currency,
+        )
+        .await
+        {
             Ok(true) => {
                 tracing::info!(
                     link_id,

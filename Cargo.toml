@@ -7,10 +7,10 @@ license = "MIT"
 
 [dependencies]
 # Web framework
-# Defaults minus compress-* and http2: the server binds plain HTTP and uses no
-# Compress middleware, but those features auto-decode zstd/brotli/gzip request
-# bodies and pull in h2 0.3 and zstd-safe 7 (RUSTSEC-2026-0258, -0391..0410).
-actix-web = { version = "4", default-features = false, features = ["macros", "cookies", "unicode", "compat"] }
+# No compress-* features: the server uses no Compress middleware, but those
+# features auto-decode zstd/brotli/gzip request bodies (zstd-safe 7,
+# RUSTSEC-2026-0391..0410). http2 stays off (plain HTTP behind Caddy).
+actix-web = { version = "4", default-features = false, features = ["macros", "cookies"] }
 actix-cors = "0.7"
 actix-web-lab = "0.24"
 actix-governor = "0.7"
@@ -19,16 +19,16 @@ actix-governor = "0.7"
 tokio = { version = "1", features = ["full"] }
 
 # Database (SQLite for local dev, Postgres for production)
-sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "uuid", "chrono", "json"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "derive", "uuid", "chrono", "json"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# HTTP client (for CipherScan API + webhooks)
+# HTTP client (for ZecBlock API + webhooks)
 reqwest = { version = "0.12", features = ["json"] }
 
-# WebSocket client (for CipherScan real-time mempool push)
+# WebSocket client (for ZecBlock real-time mempool push)
 tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
 
 # Zcash crates (NU6.3 / Ironwood support)
@@ -46,6 +46,11 @@ webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"]
 
 # Crypto / hashing
 sha2 = "0.10"
+sha3 = "0.10"
+bs58 = "0.5"
+bech32 = "0.11"
+ed25519-dalek = "2"
+serde_json_canonicalizer = "0.3"
 hmac = "0.12"
 hex = "0.4"
 rand = "0.8"

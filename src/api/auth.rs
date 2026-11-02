@@ -150,16 +150,30 @@ pub async fn me(req: HttpRequest, pool: web::Data<SqlitePool>) -> HttpResponse {
             .map(|k| !k.is_empty())
             .unwrap_or(false);
 
-    let has_passkeys = super::passkey::has_passkeys(pool.get_ref(), &merchant.id).await;
-
-    let last_token_login: Option<String> = sqlx::query_scalar(
-        "SELECT last_token_login_at FROM merchants WHERE id = ?",
+    let crosschain_enabled: bool = sqlx::query_scalar("SELECT crosschain_enabled FROM merchants WHERE id=?").bind(&merchant.id).fetch_one(pool.get_ref()).await.unwrap_or(false);
+    let payment_email_notifications: bool = match sqlx::query_scalar(
+        "SELECT payment_email_notifications FROM merchants WHERE id = ?",
     )
     .bind(&merchant.id)
-    .fetch_optional(pool.get_ref())
+    .fetch_one(pool.get_ref())
     .await
-    .ok()
-    .flatten();
+    {
+        Ok(enabled) => enabled,
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to load payment email preference");
+            return HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": "Could not load payment settings"}));
+        }
+    };
+    let has_passkeys = super::passkey::has_passkeys(pool.get_ref(), &merchant.id).await;
+
+    let last_token_login: Option<String> =
+        sqlx::query_scalar("SELECT last_token_login_at FROM merchants WHERE id = ?")
+            .bind(&merchant.id)
+            .fetch_optional(pool.get_ref())
+            .await
+            .ok()
+            .flatten();
 
     HttpResponse::Ok().json(serde_json::json!({
         "id": merchant.id,
@@ -169,9 +183,11 @@ pub async fn me(req: HttpRequest, pool: web::Data<SqlitePool>) -> HttpResponse {
         "webhook_secret_preview": masked_secret,
         "has_recovery_email": merchant.recovery_email.is_some(),
         "recovery_email_preview": masked_email,
+        "payment_email_notifications": payment_email_notifications,
         "created_at": merchant.created_at,
         "stats": stats,
         "has_luma_key": has_luma_key,
+        "crosschain_enabled": crosschain_enabled,
         "has_passkeys": has_passkeys,
         "last_token_login_at": last_token_login,
     }))
@@ -209,6 +225,15 @@ pub async fn my_invoices(req: HttpRequest, pool: web::Data<SqlitePool>) -> HttpR
 
     match rows {
         Ok(invoices) => {
+            let crosschain_ids: std::collections::HashSet<String> = match sqlx::query_scalar::<_, String>(
+                "SELECT i.id FROM invoices i WHERE i.merchant_id = ? AND EXISTS (SELECT 1 FROM crosschain_attempts c WHERE c.invoice_id = i.id) ORDER BY i.created_at DESC LIMIT 100",
+            ).bind(&merchant.id).fetch_all(pool.get_ref()).await {
+                Ok(ids) => ids.into_iter().collect(),
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to load invoice payment methods");
+                    return HttpResponse::InternalServerError().json(serde_json::json!({"error":"Internal error"}));
+                }
+            };
             let event_product_ids: std::collections::HashSet<String> =
                 sqlx::query_scalar::<_, String>(
                     "SELECT product_id FROM events WHERE merchant_id = ?",
@@ -256,11 +281,14 @@ pub async fn my_invoices(req: HttpRequest, pool: web::Data<SqlitePool>) -> HttpR
                     .collect()
             };
 
+            let access: std::collections::HashMap<String,String> = sqlx::query_as::<_,(String,String)>("SELECT a.invoice_id,a.token FROM checkout_access a JOIN invoices i ON i.id=a.invoice_id WHERE i.merchant_id=?")
+                .bind(&merchant.id).fetch_all(pool.get_ref()).await.unwrap_or_default().into_iter().collect();
             let enriched: Vec<serde_json::Value> = invoices
                 .iter()
                 .map(|inv| {
                     let mut val = serde_json::to_value(inv).unwrap_or(serde_json::json!({}));
                     if let serde_json::Value::Object(ref mut map) = val {
+                        if let Some(token)=access.get(&inv.id) { map.insert("checkout_token".into(),serde_json::json!(token)); }
                         let is_event = inv
                             .product_id
                             .as_ref()
@@ -273,6 +301,10 @@ pub async fn my_invoices(req: HttpRequest, pool: web::Data<SqlitePool>) -> HttpR
                             .unwrap_or(false);
                         map.insert("is_event".into(), serde_json::json!(is_event));
                         map.insert("is_luma".into(), serde_json::json!(is_luma));
+                        map.insert(
+                            "is_crosschain".into(),
+                            serde_json::json!(crosschain_ids.contains(&inv.id)),
+                        );
                         let label = inv.price_id.as_ref().and_then(|pid| price_labels.get(pid));
                         map.insert("price_label".into(), serde_json::json!(label));
                     }
@@ -455,9 +487,7 @@ pub async fn retry_webhook(
             .json(serde_json::json!({"error": format!("Blocked: {reason}")}));
     }
 
-    let ts = chrono::Utc::now()
-        .format("%Y-%m-%dT%H:%M:%SZ")
-        .to_string();
+    let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let mut body: serde_json::Value = match serde_json::from_str(&payload) {
         Ok(v) => v,
         Err(_) => {
@@ -530,8 +560,7 @@ pub async fn retry_webhook(
             .bind(&delivery_id)
             .execute(pool.get_ref())
             .await;
-            HttpResponse::Ok()
-                .json(serde_json::json!({"status": "failed", "error": error_text}))
+            HttpResponse::Ok().json(serde_json::json!({"status": "failed", "error": error_text}))
         }
     }
 }
@@ -560,12 +589,15 @@ pub fn invalid_api_key_response() -> HttpResponse {
 pub async fn resolve_session(req: &HttpRequest, pool: &SqlitePool) -> Option<merchants::Merchant> {
     let config = req.app_data::<web::Data<crate::config::Config>>()?;
     if let Some(session_id) = extract_session_id(req) {
-        if let Ok(Some(m)) = merchants::get_by_session(pool, &session_id, &config.encryption_key).await {
+        if let Ok(Some(m)) =
+            merchants::get_by_session(pool, &session_id, &config.encryption_key).await
+        {
             return Some(m);
         }
     }
     if let Some(pos_id) = extract_pos_session_id(req) {
-        if let Ok(Some(m)) = merchants::get_by_session(pool, &pos_id, &config.encryption_key).await {
+        if let Ok(Some(m)) = merchants::get_by_session(pool, &pos_id, &config.encryption_key).await
+        {
             return Some(m);
         }
     }
@@ -574,12 +606,16 @@ pub async fn resolve_session(req: &HttpRequest, pool: &SqlitePool) -> Option<mer
 
 /// Resolve a merchant from session cookie, rejecting POS-scoped sessions.
 /// Use for account-management endpoints that must not be accessible via PIN.
-pub async fn resolve_full_session(req: &HttpRequest, pool: &SqlitePool) -> Option<merchants::Merchant> {
+pub async fn resolve_full_session(
+    req: &HttpRequest,
+    pool: &SqlitePool,
+) -> Option<merchants::Merchant> {
     let session_id = extract_session_id(req)?;
     let config = req.app_data::<web::Data<crate::config::Config>>()?;
-    let (merchant, pos_scoped) = merchants::get_by_session_with_scope(pool, &session_id, &config.encryption_key)
-        .await
-        .ok()??;
+    let (merchant, pos_scoped) =
+        merchants::get_by_session_with_scope(pool, &session_id, &config.encryption_key)
+            .await
+            .ok()??;
     if pos_scoped {
         return None;
     }
@@ -597,7 +633,9 @@ pub async fn resolve_with_kind(
     if let Some(auth) = req.headers().get("Authorization") {
         if let Ok(auth_str) = auth.to_str() {
             let key = auth_str.strip_prefix("Bearer ").unwrap_or(auth_str).trim();
-            if key.starts_with("cpay_sk_") || key.starts_with("cpay_rk_") || key.starts_with("cpay_")
+            if key.starts_with("cpay_sk_")
+                || key.starts_with("cpay_rk_")
+                || key.starts_with("cpay_")
             {
                 return merchants::authenticate_with_kind(pool, key, &config.encryption_key)
                     .await
@@ -800,10 +838,12 @@ pub struct UpdateMerchantRequest {
     pub name: Option<String>,
     pub webhook_url: Option<String>,
     pub recovery_email: Option<String>,
+    pub payment_email_notifications: Option<bool>,
     pub luma_api_key: Option<String>,
+    pub crosschain_enabled: Option<bool>,
 }
 
-/// PATCH /api/merchants/me -- update name, webhook URL, and/or recovery email.
+/// PATCH /api/merchants/me -- update merchant settings and payment email preference.
 ///
 /// Payment address is intentionally NOT editable after registration.
 /// It is cryptographically tied to the UFVK used for trial decryption.
@@ -830,93 +870,139 @@ pub async fn update_me(
         return HttpResponse::BadRequest().json(e.to_json());
     }
 
-    if let Some(ref name) = body.name {
-        sqlx::query("UPDATE merchants SET name = ? WHERE id = ?")
-            .bind(name)
-            .bind(&merchant.id)
-            .execute(pool.get_ref())
-            .await
-            .ok();
-        tracing::info!(merchant_id = %merchant.id, "Merchant name updated");
-    }
-
-    if let Some(ref url) = body.webhook_url {
-        sqlx::query("UPDATE merchants SET webhook_url = ? WHERE id = ?")
-            .bind(if url.is_empty() {
-                None
-            } else {
-                Some(url.as_str())
-            })
-            .bind(&merchant.id)
-            .execute(pool.get_ref())
-            .await
-            .ok();
-        tracing::info!(merchant_id = %merchant.id, "Webhook URL updated");
-    }
-
-    if let Some(ref email) = body.recovery_email {
-        if email.is_empty() {
-            sqlx::query("UPDATE merchants SET recovery_email = NULL, recovery_email_hash = NULL WHERE id = ?")
-                .bind(&merchant.id)
-                .execute(pool.get_ref())
-                .await
-                .ok();
+    let encrypt = |value: &str| -> anyhow::Result<String> {
+        if config.encryption_key.is_empty() {
+            Ok(value.to_string())
         } else {
-            let encrypted = if config.encryption_key.is_empty() {
-                email.clone()
-            } else {
-                match crate::crypto::encrypt(email, &config.encryption_key) {
-                    Ok(enc) => enc,
+            crate::crypto::encrypt(value, &config.encryption_key)
+        }
+    };
+    let encrypted_email = match body
+        .recovery_email
+        .as_deref()
+        .filter(|v| !v.is_empty())
+        .map(encrypt)
+        .transpose()
+    {
+        Ok(email) => email,
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to encrypt recovery email");
+            return HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": "Internal error"}));
+        }
+    };
+    let encrypted_luma_key = match body
+        .luma_api_key
+        .as_deref()
+        .filter(|v| !v.is_empty())
+        .map(encrypt)
+        .transpose()
+    {
+        Ok(key) => key,
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to encrypt Luma API key");
+            return HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": "Internal error"}));
+        }
+    };
+
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to begin merchant settings update");
+            return HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": "Could not save payment settings"}));
+        }
+    };
+
+    // Read inside the transaction so a concurrent email removal cannot leave
+    // notifications enabled without a recipient. Validate before any writes.
+    if body.payment_email_notifications == Some(true) {
+        let effective_email = if let Some(email) = body.recovery_email.as_deref() {
+            Some(email.to_string())
+        } else {
+            let stored_email: Option<String> =
+                match sqlx::query_scalar("SELECT recovery_email FROM merchants WHERE id = ?")
+                    .bind(&merchant.id)
+                    .fetch_one(&mut *tx)
+                    .await
+                {
+                    Ok(email) => email,
                     Err(e) => {
-                        tracing::error!(error = %e, "Failed to encrypt recovery email");
+                        tracing::error!(error = %e, "Failed to load notification recipient");
                         return HttpResponse::InternalServerError()
-                            .json(serde_json::json!({"error": "Internal error"}));
+                            .json(serde_json::json!({"error": "Could not save payment settings"}));
                     }
+                };
+            match stored_email
+                .map(|email| crate::crypto::decrypt_email(&email, &config.encryption_key))
+                .transpose()
+            {
+                Ok(email) => email,
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to decrypt notification recipient");
+                    return HttpResponse::InternalServerError()
+                        .json(serde_json::json!({"error": "Could not save payment settings"}));
                 }
+            }
+        };
+        let Some(email) = effective_email.as_deref().filter(|email| !email.is_empty()) else {
+            return HttpResponse::BadRequest().json(
+                validation::ValidationError::invalid(
+                    "payment_email_notifications",
+                    "add a recovery email before enabling payment notifications",
+                )
+                .to_json(),
+            );
+        };
+        if let Err(e) = validation::validate_email_format("recovery_email", email) {
+            return HttpResponse::BadRequest().json(e.to_json());
+        }
+    }
+
+    let result: Result<(), sqlx::Error> = async {
+        if let Some(enabled) = body.crosschain_enabled {
+            sqlx::query("UPDATE merchants SET crosschain_enabled = ? WHERE id = ?")
+                .bind(enabled).bind(&merchant.id).execute(&mut *tx).await?;
+        }
+        if let Some(ref name) = body.name {
+            sqlx::query("UPDATE merchants SET name = ? WHERE id = ?")
+                .bind(name).bind(&merchant.id).execute(&mut *tx).await?;
+        }
+        if let Some(ref url) = body.webhook_url {
+            sqlx::query("UPDATE merchants SET webhook_url = ? WHERE id = ?")
+                .bind(if url.is_empty() { None } else { Some(url.as_str()) })
+                .bind(&merchant.id).execute(&mut *tx).await?;
+        }
+        if let Some(ref email) = body.recovery_email {
+            let hash = if email.is_empty() { None } else {
+                Some(crate::crypto::blind_index(email, &config.encryption_key))
             };
-            let hash = crate::crypto::blind_index(email, &config.encryption_key);
             sqlx::query(
-                "UPDATE merchants SET recovery_email = ?, recovery_email_hash = ? WHERE id = ?",
+                "UPDATE merchants SET recovery_email = ?, recovery_email_hash = ?,
+                 payment_email_notifications = CASE WHEN ? THEN 0 ELSE payment_email_notifications END
+                 WHERE id = ?",
             )
-            .bind(&encrypted)
-            .bind(&hash)
-            .bind(&merchant.id)
-            .execute(pool.get_ref())
-            .await
-            .ok();
+            .bind(&encrypted_email).bind(hash).bind(email.is_empty())
+            .bind(&merchant.id).execute(&mut *tx).await?;
         }
-        tracing::info!(merchant_id = %merchant.id, "Recovery email updated");
-    }
-
-    if let Some(ref key) = body.luma_api_key {
-        if key.is_empty() {
-            sqlx::query("UPDATE merchants SET luma_api_key = NULL WHERE id = ?")
-                .bind(&merchant.id)
-                .execute(pool.get_ref())
-                .await
-                .ok();
-        } else {
-            let encrypted = if config.encryption_key.is_empty() {
-                key.clone()
-            } else {
-                match crate::crypto::encrypt(key, &config.encryption_key) {
-                    Ok(enc) => enc,
-                    Err(e) => {
-                        tracing::error!(error = %e, "Failed to encrypt Luma API key");
-                        return HttpResponse::InternalServerError()
-                            .json(serde_json::json!({"error": "Internal error"}));
-                    }
-                }
-            };
+        if let Some(enabled) = body.payment_email_notifications {
+            sqlx::query("UPDATE merchants SET payment_email_notifications = ? WHERE id = ?")
+                .bind(enabled).bind(&merchant.id).execute(&mut *tx).await?;
+        }
+        if body.luma_api_key.is_some() {
             sqlx::query("UPDATE merchants SET luma_api_key = ? WHERE id = ?")
-                .bind(&encrypted)
-                .bind(&merchant.id)
-                .execute(pool.get_ref())
-                .await
-                .ok();
+                .bind(&encrypted_luma_key).bind(&merchant.id).execute(&mut *tx).await?;
         }
-        tracing::info!(merchant_id = %merchant.id, "Luma API key updated");
+        tx.commit().await?;
+        Ok(())
+    }.await;
+    if let Err(e) = result {
+        tracing::error!(error = %e, merchant_id = %merchant.id, "Failed to update merchant settings");
+        return HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": "Could not save payment settings"}));
     }
+    tracing::info!(merchant_id = %merchant.id, "Merchant settings updated");
 
     HttpResponse::Ok().json(serde_json::json!({ "status": "updated" }))
 }
@@ -1101,6 +1187,7 @@ async fn get_merchant_stats(pool: &SqlitePool, merchant_id: &str) -> serde_json:
     .unwrap_or((0, 0, 0.0));
 
     serde_json::json!({
+        "payment_methods": crate::crosschain::fees::payment_methods(pool, merchant_id).await.ok(),
         "total_invoices": row.0,
         "confirmed": row.1,
         "total_zec": row.2,
@@ -1125,4 +1212,323 @@ fn validate_update(
         }
     }
     Ok(())
+}
+
+/// Read the existing integration secret without rotating it as a setup side effect.
+pub async fn webhook_config(
+    req: HttpRequest,
+    pool: web::Data<SqlitePool>,
+    config: web::Data<Config>,
+) -> HttpResponse {
+    let merchant = match require_full_session(&req, pool.get_ref()).await {
+        Ok(m) => m,
+        Err(r) => return r,
+    };
+    let secret = match crate::crypto::decrypt_webhook_secret(
+        &merchant.webhook_secret,
+        &config.encryption_key,
+    ) {
+        Ok(s) => s,
+        Err(_) => return HttpResponse::InternalServerError().finish(),
+    };
+    HttpResponse::Ok()
+        .insert_header(("Cache-Control", "no-store"))
+        .json(serde_json::json!({"webhook_url":merchant.webhook_url,"webhook_secret":secret}))
+}
+/// Finalize setup only if it does not replace a different integration.
+pub async fn connect_shopify(req: HttpRequest, pool: web::Data<SqlitePool>) -> HttpResponse {
+    let merchant = match require_full_session(&req, pool.get_ref()).await {
+        Ok(m) => m,
+        Err(r) => return r,
+    };
+    let target = "https://connect.cipherpay.app/api/webhook/cipherpay";
+    match sqlx::query("UPDATE merchants SET webhook_url = ? WHERE id = ? AND (webhook_url IS NULL OR webhook_url = '' OR webhook_url = ?)")
+        .bind(target).bind(&merchant.id).bind(target).execute(pool.get_ref()).await {
+        Ok(result) if result.rows_affected()==1 => HttpResponse::Ok().json(serde_json::json!({"ok":true})),
+        Ok(_) => HttpResponse::Conflict().json(serde_json::json!({"error":"A different webhook integration is already configured"})),
+        Err(_) => HttpResponse::InternalServerError().finish(),
+    }
+}
+
+#[cfg(test)]
+mod payment_email_tests {
+    use super::*;
+    use actix_web::{
+        http::{Method, StatusCode},
+        test, App,
+    };
+    use serde_json::{json, Value};
+
+    async fn fixture() -> (SqlitePool, Config) {
+        let pool = crate::repair_tests::pool().await;
+        crate::repair_tests::merchant(&pool, "email-owner").await;
+        crate::repair_tests::merchant(&pool, "other-owner").await;
+        sqlx::query(
+            "INSERT INTO sessions (id, merchant_id, expires_at, pos_scoped) VALUES
+             ('owner-session', 'email-owner', '2099-01-01T00:00:00Z', 0),
+             ('pos-session', 'email-owner', '2099-01-01T00:00:00Z', 1),
+             ('other-session', 'other-owner', '2099-01-01T00:00:00Z', 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut config = Config::from_env().unwrap();
+        config.encryption_key = "11".repeat(32);
+        config.network = "testnet".to_string();
+        config.smtp_pass = None;
+        config.smtp_from = None;
+        (pool, config)
+    }
+
+    async fn request(
+        pool: &SqlitePool,
+        config: &Config,
+        method: Method,
+        session: Option<&str>,
+        body: Option<Value>,
+    ) -> (StatusCode, Value) {
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(pool.clone()))
+                .app_data(web::Data::new(config.clone()))
+                .service(
+                    web::resource("/api/merchants/me")
+                        .route(web::get().to(me))
+                        .route(web::patch().to(update_me)),
+                ),
+        )
+        .await;
+        let mut req = test::TestRequest::default()
+            .uri("/api/merchants/me")
+            .method(method);
+        if let Some(session) = session {
+            req = req.cookie(Cookie::new(SESSION_COOKIE_LEGACY, session.to_string()));
+        }
+        if let Some(body) = body {
+            req = req.set_json(body);
+        }
+        let response = test::call_service(&app, req.to_request()).await;
+        let status = response.status();
+        let body = test::read_body_json(response).await;
+        (status, body)
+    }
+
+    #[actix_web::test]
+    async fn payment_email_requires_an_email_before_changing_any_settings() {
+        let (pool, config) = fixture().await;
+        let (status, body) =
+            request(&pool, &config, Method::GET, Some("owner-session"), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["payment_email_notifications"], false);
+        let (status, body) = request(
+            &pool,
+            &config,
+            Method::PATCH,
+            Some("owner-session"),
+            Some(json!({
+                "name": "Should not be written",
+                "crosschain_enabled": false,
+                "payment_email_notifications": true,
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["field"], "payment_email_notifications");
+        let saved: (String, bool, bool) = sqlx::query_as(
+            "SELECT name, crosschain_enabled, payment_email_notifications FROM merchants WHERE id = 'email-owner'",
+        ).fetch_one(&pool).await.unwrap();
+        assert_eq!(saved, (String::new(), true, false));
+    }
+
+    #[actix_web::test]
+    async fn payment_email_preference_can_enable_disable_and_use_encrypted_saved_email() {
+        let (pool, config) = fixture().await;
+        let (status, _) = request(
+            &pool,
+            &config,
+            Method::PATCH,
+            Some("owner-session"),
+            Some(json!({
+                "recovery_email": "owner@example.com",
+                "payment_email_notifications": true,
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let encrypted: String =
+            sqlx::query_scalar("SELECT recovery_email FROM merchants WHERE id = 'email-owner'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_ne!(encrypted, "owner@example.com");
+        assert_eq!(
+            crate::crypto::decrypt_email(&encrypted, &config.encryption_key).unwrap(),
+            "owner@example.com"
+        );
+        let (status, body) =
+            request(&pool, &config, Method::GET, Some("owner-session"), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["payment_email_notifications"], true);
+        assert_eq!(body["recovery_email_preview"], "ow***@example.com");
+        for enabled in [false, true] {
+            let (status, _) = request(
+                &pool,
+                &config,
+                Method::PATCH,
+                Some("owner-session"),
+                Some(json!({
+                    "payment_email_notifications": enabled,
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let saved: (String, bool) = sqlx::query_as("SELECT recovery_email, payment_email_notifications FROM merchants WHERE id = 'email-owner'")
+                .fetch_one(&pool).await.unwrap();
+            assert_eq!(saved, (encrypted.clone(), enabled));
+        }
+        let (status, _) = request(
+            &pool,
+            &config,
+            Method::PATCH,
+            Some("owner-session"),
+            Some(json!({
+                "name": "Changed name",
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, body) =
+            request(&pool, &config, Method::GET, Some("other-session"), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["payment_email_notifications"], false);
+        let enabled: bool = sqlx::query_scalar(
+            "SELECT payment_email_notifications FROM merchants WHERE id = 'email-owner'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(enabled);
+    }
+
+    #[actix_web::test]
+    async fn payment_email_removal_disables_notifications_and_conflicting_enable_is_rejected() {
+        let (pool, config) = fixture().await;
+        let (status, _) = request(
+            &pool,
+            &config,
+            Method::PATCH,
+            Some("owner-session"),
+            Some(json!({
+                "recovery_email": "owner@example.com",
+                "payment_email_notifications": true,
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = request(
+            &pool,
+            &config,
+            Method::PATCH,
+            Some("owner-session"),
+            Some(json!({
+                "recovery_email": "",
+                "payment_email_notifications": true,
+                "name": "Should not change",
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = request(
+            &pool,
+            &config,
+            Method::PATCH,
+            Some("owner-session"),
+            Some(json!({
+                "recovery_email": "",
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let saved: (Option<String>, Option<String>, bool, String) = sqlx::query_as(
+            "SELECT recovery_email, recovery_email_hash, payment_email_notifications, name FROM merchants WHERE id = 'email-owner'",
+        ).fetch_one(&pool).await.unwrap();
+        assert_eq!(saved, (None, None, false, String::new()));
+        sqlx::query(
+            "UPDATE merchants SET recovery_email = 'owner@invalid' WHERE id = 'email-owner'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let (status, _) = request(
+            &pool,
+            &config,
+            Method::PATCH,
+            Some("owner-session"),
+            Some(json!({
+                "payment_email_notifications": true,
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[actix_web::test]
+    async fn payment_email_settings_reject_unauthenticated_and_pos_sessions() {
+        let (pool, config) = fixture().await;
+        for session in [None, Some("pos-session")] {
+            let (status, _) = request(
+                &pool,
+                &config,
+                Method::PATCH,
+                session,
+                Some(json!({
+                    "recovery_email": "owner@example.com",
+                    "payment_email_notifications": true,
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
+        let enabled: bool = sqlx::query_scalar(
+            "SELECT payment_email_notifications FROM merchants WHERE id = 'email-owner'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(!enabled);
+    }
+
+    #[actix_web::test]
+    async fn payment_email_storage_errors_roll_back_other_settings_changes() {
+        let (pool, config) = fixture().await;
+        sqlx::query(
+            "UPDATE merchants SET recovery_email = 'owner@example.com' WHERE id = 'email-owner'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TRIGGER reject_payment_email_preference BEFORE UPDATE OF payment_email_notifications ON merchants
+             BEGIN SELECT RAISE(ABORT, 'simulated write failure'); END",
+        ).execute(&pool).await.unwrap();
+        let (status, _) = request(
+            &pool,
+            &config,
+            Method::PATCH,
+            Some("owner-session"),
+            Some(json!({
+                "name": "Should roll back",
+                "payment_email_notifications": true,
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        let saved: (String, bool) = sqlx::query_as(
+            "SELECT name, payment_email_notifications FROM merchants WHERE id = 'email-owner'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(saved, (String::new(), false));
+    }
 }

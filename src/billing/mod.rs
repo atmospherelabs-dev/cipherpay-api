@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::config::Config;
 
-pub use fee_ledger::{create_fee_entry, get_effective_fee_rate, mark_fee_collected};
+pub use fee_ledger::{create_fee_entry, get_effective_fee_rate, record_direct_receipt};
 pub use status::get_merchant_billing_status;
 pub use types::{BillingCycle, BillingSummary, MIN_SETTLEMENT_ZATOSHIS};
 
@@ -231,8 +231,8 @@ pub async fn create_settlement_invoice(
 
     sqlx::query(
         "INSERT INTO invoices (id, merchant_id, memo_code, product_name, price_eur, price_usd, currency, price_zec,
-         zec_rate_at_creation, payment_address, zcash_uri, status, expires_at, created_at, price_zatoshis)
-         VALUES (?, ?, ?, 'Fee Settlement', ?, ?, 'EUR', ?, ?, ?, ?, 'pending', ?, ?, ?)"
+         zec_rate_at_creation, payment_address, zcash_uri, status, expires_at, created_at, price_zatoshis, exact_payment)
+         VALUES (?, ?, ?, 'Fee Settlement', ?, ?, 'EUR', ?, ?, ?, ?, 'pending', ?, ?, ?, 1)"
     )
     .bind(&id)
     .bind(merchant_id)
@@ -595,11 +595,12 @@ pub async fn process_billing_cycles(
 
 /// Check if a settlement invoice was paid and restore merchant access.
 pub async fn check_settlement_payments(pool: &SqlitePool, config: &Config) -> anyhow::Result<()> {
+    crate::referrals::reconcile(pool).await?;
     let settled = sqlx::query_as::<_, BillingCycle>(
         "SELECT bc.* FROM billing_cycles bc
          JOIN invoices i ON i.id = bc.settlement_invoice_id
          WHERE bc.status IN ('invoiced', 'past_due', 'suspended')
-         AND i.status = 'confirmed'",
+         AND i.status = 'confirmed' AND i.received_zatoshis>=i.price_zatoshis",
     )
     .fetch_all(pool)
     .await?;
@@ -607,19 +608,52 @@ pub async fn check_settlement_payments(pool: &SqlitePool, config: &Config) -> an
     let enc_key = &config.encryption_key;
 
     for cycle in &settled {
-        sqlx::query(
-            "UPDATE billing_cycles
-             SET status = 'paid', outstanding_zec = 0.0, outstanding_zatoshis = 0
-             WHERE id = ?",
+        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+        let claimed=sqlx::query("UPDATE billing_cycles SET status='paid',outstanding_zec=0.0,outstanding_zatoshis=0 WHERE id=? AND status IN ('invoiced','past_due','suspended')")
+            .bind(&cycle.id).execute(&mut *tx).await?.rows_affected();
+        if claimed == 0 {
+            continue;
+        }
+        let settlement = cycle
+            .settlement_invoice_id
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("Missing settlement"))?;
+        let mut budget: i64 = sqlx::query_scalar(
+            "SELECT MIN(received_zatoshis,price_zatoshis) FROM invoices WHERE id=?",
         )
-        .bind(&cycle.id)
-        .execute(pool)
+        .bind(settlement)
+        .fetch_one(&mut *tx)
         .await?;
-
-        sqlx::query("UPDATE merchants SET billing_status = 'active' WHERE id = ?")
-            .bind(&cycle.merchant_id)
-            .execute(pool)
+        let entries: Vec<(String,i64)>=sqlx::query_as("SELECT f.invoice_id,f.fee_amount_zatoshis-f.collected_zatoshis FROM fee_ledger f JOIN billing_cycles b ON b.id=f.billing_cycle_id
+            WHERE f.merchant_id=? AND (b.id=? OR b.status='carried_over') AND f.fee_amount_zatoshis>f.collected_zatoshis ORDER BY f.created_at,f.invoice_id")
+            .bind(&cycle.merchant_id).bind(&cycle.id).fetch_all(&mut *tx).await?;
+        for (invoice, remaining) in entries {
+            let units = remaining.min(budget);
+            if units <= 0 {
+                break;
+            }
+            budget -= units;
+            sqlx::query("INSERT INTO direct_fee_receipts(invoice_id,txid,units) VALUES (?,?,?)")
+                .bind(&invoice)
+                .bind(format!("settlement:{settlement}"))
+                .bind(units)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query(
+                "UPDATE fee_ledger SET collected_zatoshis=collected_zatoshis+? WHERE invoice_id=?",
+            )
+            .bind(units)
+            .bind(&invoice)
+            .execute(&mut *tx)
             .await?;
+        }
+        sqlx::query("UPDATE merchants SET billing_status='active' WHERE id=?")
+            .bind(&cycle.merchant_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        crate::referrals::reconcile(pool).await?;
+
         tracing::info!(merchant_id = %cycle.merchant_id, "Settlement paid, merchant restored");
 
         if let Some(email) =

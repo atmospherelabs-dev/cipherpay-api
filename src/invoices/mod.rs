@@ -196,6 +196,7 @@ pub async fn create_invoice(
     );
 
     Ok(CreateInvoiceResponse {
+        checkout_token: crate::crosschain::security::token(pool, &id).await?,
         invoice_id: id,
         memo_code,
         amount,
@@ -218,28 +219,21 @@ pub async fn mark_detected(
     txid: &str,
     received_zatoshis: i64,
 ) -> anyhow::Result<bool> {
-    sqlx::query(
-        "INSERT OR IGNORE INTO invoice_payments (invoice_id, txid, zatoshis) VALUES (?, ?, ?)",
-    )
-    .bind(invoice_id)
-    .bind(txid)
-    .bind(received_zatoshis)
-    .execute(pool)
-    .await?;
-
     let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let new_expires = (Utc::now() + Duration::minutes(30))
         .format("%Y-%m-%dT%H:%M:%SZ")
         .to_string();
     let result = sqlx::query(
         "UPDATE invoices SET status = 'detected', detected_txid = ?, detected_at = ?, received_zatoshis = ?, expires_at = ?
-         WHERE id = ? AND status IN ('pending', 'underpaid')"
+         WHERE id = ? AND status IN ('pending', 'underpaid')
+         AND (exact_payment=0 OR ? >= price_zatoshis)"
     )
     .bind(txid)
     .bind(&now)
     .bind(received_zatoshis)
     .bind(&new_expires)
     .bind(invoice_id)
+    .bind(received_zatoshis)
     .execute(pool)
     .await?;
 
@@ -262,7 +256,7 @@ pub async fn mark_confirmed(
     let result = sqlx::query(
         "UPDATE invoices SET status = 'confirmed', confirmed_at = ?,
          confirmed_rate = ?, confirmed_fiat_amount = ?
-         WHERE id = ? AND status = 'detected'",
+         WHERE id = ? AND status = 'detected' AND (exact_payment=0 OR received_zatoshis >= price_zatoshis)",
     )
     .bind(&now)
     .bind(confirmed_rate)
@@ -332,15 +326,6 @@ pub async fn mark_underpaid(
     received_zatoshis: i64,
     txid: &str,
 ) -> anyhow::Result<()> {
-    sqlx::query(
-        "INSERT OR IGNORE INTO invoice_payments (invoice_id, txid, zatoshis) VALUES (?, ?, ?)",
-    )
-    .bind(invoice_id)
-    .bind(txid)
-    .bind(received_zatoshis)
-    .execute(pool)
-    .await?;
-
     let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let new_expires = (Utc::now() + Duration::minutes(10))
         .format("%Y-%m-%dT%H:%M:%SZ")
@@ -373,6 +358,9 @@ pub async fn record_payment(
     txid: &str,
     zatoshis: i64,
 ) -> anyhow::Result<i64> {
+    if !crate::crosschain::security::accepts_payment(pool, invoice_id, txid).await? {
+        return Ok(sqlx::query_scalar("SELECT received_zatoshis FROM invoices WHERE id=?").bind(invoice_id).fetch_one(pool).await?);
+    }
     let result = sqlx::query(
         "INSERT OR IGNORE INTO invoice_payments (invoice_id, txid, zatoshis) VALUES (?, ?, ?)",
     )
@@ -509,6 +497,10 @@ pub async fn finalize_invoice(
         );
     }
 
+    if invoice.exact_payment {
+        anyhow::bail!("Cross-chain payment already started. Create a new invoice instead of changing its amount.");
+    }
+
     // In-flight payment guard: prevent re-finalization if payment already detected
     if invoice.received_zatoshis > 0 || invoice.detected_txid.is_some() {
         anyhow::bail!("Payment already detected for this invoice, awaiting confirmation");
@@ -519,9 +511,15 @@ pub async fn finalize_invoice(
         let sub = crate::subscriptions::get_subscription(pool, sub_id).await?;
         if let Some(s) = sub {
             let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-            if now > s.current_period_end {
+            if now >= s.current_period_end {
                 anyhow::bail!("Subscription billing period has ended");
             }
+            if s.status != "active" || s.pause_at_period_end != 0 || s.cancel_at_period_end != 0
+                || s.current_invoice_id.as_deref() != Some(invoice_id) {
+                anyhow::bail!("Subscription is not eligible for renewal");
+            }
+        } else {
+            anyhow::bail!("Subscription not found");
         }
     }
 
@@ -589,7 +587,7 @@ pub async fn finalize_invoice(
          price_zec = ?, price_eur = ?, price_usd = ?,
          zec_rate_at_creation = ?, price_zatoshis = ?,
          zcash_uri = ?, expires_at = ?
-         WHERE id = ? AND status IN ('draft', 'expired')",
+         WHERE id = ? AND status IN ('draft', 'expired') AND exact_payment=0 AND received_zatoshis=0 AND detected_txid IS NULL",
     )
     .bind(price_zec)
     .bind(price_eur)

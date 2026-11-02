@@ -103,14 +103,7 @@ pub async fn status(
 
     match subscriptions::get_subscription(pool.get_ref(), &sub_id).await {
         Ok(Some(sub)) if sub.merchant_id == merchant.id => {
-            let now = chrono::Utc::now();
-            let period_end = chrono::DateTime::parse_from_rfc3339(&sub.current_period_end)
-                .or_else(|_| chrono::NaiveDateTime::parse_from_str(&sub.current_period_end, "%Y-%m-%dT%H:%M:%SZ")
-                    .map(|dt| dt.and_utc().fixed_offset()))
-                .ok();
-
-            let is_active = sub.status == "active"
-                && period_end.map_or(false, |end| now < end);
+            let is_active = sub.has_access_at(chrono::Utc::now());
 
             HttpResponse::Ok().json(serde_json::json!({
                 "subscription_id": sub.id,

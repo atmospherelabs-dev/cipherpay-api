@@ -3,6 +3,13 @@ use sqlx::SqlitePool;
 /// Periodic data purge: cleans up expired sessions, old webhook deliveries,
 /// expired recovery tokens, and optionally old expired/refunded invoices.
 pub async fn run_data_purge(pool: &SqlitePool, purge_days: i64) -> anyhow::Result<()> {
+    sqlx::query(
+        "DELETE FROM session_charges WHERE session_id NOT IN (SELECT id FROM agent_sessions)",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query("DELETE FROM x402_idempotency_v2 WHERE created_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-24 hours')").execute(pool).await?;
+    sqlx::query("UPDATE invoices SET attendee_name = NULL, attendee_email = NULL, luma_guest_data = NULL WHERE (status IN ('expired','refunded') AND created_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-7 days')) OR created_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-30 days')").execute(pool).await?;
     let cutoff = format!("-{} days", purge_days);
 
     let agent_sessions_purged = sqlx::query(

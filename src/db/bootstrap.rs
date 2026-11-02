@@ -2,9 +2,11 @@ use super::schema_tracking::validate_schema_state;
 use sqlx::SqlitePool;
 
 pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::Result<()> {
+    // Connection-local PRAGMAs must stay on the same connection throughout bootstrap.
+    let mut conn = pool.acquire().await?;
     // Run migrations inline
     sqlx::query(include_str!("../../migrations/001_init.sql"))
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok(); // Ignore if tables already exist
 
@@ -16,7 +18,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
         "ALTER TABLE merchants ADD COLUMN name TEXT NOT NULL DEFAULT ''",
     ];
     for sql in &upgrades {
-        sqlx::query(sql).execute(&pool).await.ok();
+        sqlx::query(sql).execute(&mut *conn).await.ok();
     }
 
     sqlx::query(
@@ -27,7 +29,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
         )",
     )
-    .execute(&pool)
+    .execute(&mut *conn)
     .await
     .ok();
 
@@ -37,7 +39,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
         "ALTER TABLE invoices ADD COLUMN zcash_uri TEXT NOT NULL DEFAULT ''",
     ];
     for sql in &invoice_upgrades {
-        sqlx::query(sql).execute(&pool).await.ok();
+        sqlx::query(sql).execute(&mut *conn).await.ok();
     }
 
     // Products table (pricing is handled by the prices table via default_price_id)
@@ -54,74 +56,74 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
         )",
     )
-    .execute(&pool)
+    .execute(&mut *conn)
     .await
     .ok();
 
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_products_merchant ON products(merchant_id)")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
 
     // Drop legacy UNIQUE constraint on slug (slug is now cosmetic, product ID is the identifier)
     sqlx::query("DROP INDEX IF EXISTS sqlite_autoindex_products_1")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
     sqlx::query("DROP INDEX IF EXISTS idx_products_slug")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
 
     // Add product_id and refund_address to invoices for existing databases
     sqlx::query("ALTER TABLE invoices ADD COLUMN product_id TEXT REFERENCES products(id)")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
 
     sqlx::query("ALTER TABLE invoices ADD COLUMN refund_address TEXT")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
 
     sqlx::query("ALTER TABLE invoices ADD COLUMN price_usd REAL")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
 
     sqlx::query("ALTER TABLE invoices ADD COLUMN refunded_at TEXT")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
 
     sqlx::query("ALTER TABLE invoices ADD COLUMN refund_txid TEXT")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
 
     sqlx::query("ALTER TABLE products ADD COLUMN default_price_id TEXT")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
 
     sqlx::query("ALTER TABLE products ADD COLUMN metadata TEXT")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
 
     sqlx::query("ALTER TABLE invoices ADD COLUMN currency TEXT")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
 
     // Disable FK checks and prevent SQLite from auto-rewriting FK references
     // in other tables during ALTER TABLE RENAME (requires legacy_alter_table).
     sqlx::query("PRAGMA foreign_keys = OFF")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
     sqlx::query("PRAGMA legacy_alter_table = ON")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
 
@@ -129,7 +131,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='invoices'
          AND sql LIKE '%CHECK%' AND (sql NOT LIKE '%refunded%' OR sql LIKE '%shipped%')",
     )
-    .fetch_one(&pool)
+    .fetch_one(&mut *conn)
     .await
     .unwrap_or(0)
         > 0;
@@ -137,11 +139,11 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
     if needs_migrate {
         tracing::info!("Migrating invoices table (removing shipped status)...");
         sqlx::query("UPDATE invoices SET status = 'confirmed' WHERE status = 'shipped'")
-            .execute(&pool)
+            .execute(&mut *conn)
             .await
             .ok();
         sqlx::query("ALTER TABLE invoices RENAME TO invoices_old")
-            .execute(&pool)
+            .execute(&mut *conn)
             .await
             .ok();
         sqlx::query(
@@ -171,7 +173,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
                 created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
             )",
         )
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
         sqlx::query(
@@ -182,60 +184,60 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
                 confirmed_at, refunded_at, expires_at, purge_after, created_at
              FROM invoices_old",
         )
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
         sqlx::query("DROP TABLE invoices_old")
-            .execute(&pool)
+            .execute(&mut *conn)
             .await
             .ok();
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_invoices_status ON invoices(status)")
-            .execute(&pool)
+            .execute(&mut *conn)
             .await
             .ok();
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_invoices_memo ON invoices(memo_code)")
-            .execute(&pool)
+            .execute(&mut *conn)
             .await
             .ok();
         tracing::info!("Invoices table migration complete");
     }
 
     sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS idx_merchants_ufvk ON merchants(ufvk)")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
 
     // Diversified addresses: per-invoice unique address derivation
     sqlx::query("ALTER TABLE merchants ADD COLUMN diversifier_index INTEGER NOT NULL DEFAULT 0")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
     sqlx::query("ALTER TABLE invoices ADD COLUMN diversifier_index INTEGER")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
     sqlx::query("ALTER TABLE invoices ADD COLUMN orchard_receiver_hex TEXT")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_invoices_orchard_receiver ON invoices(orchard_receiver_hex)",
     )
-    .execute(&pool)
+    .execute(&mut *conn)
     .await
     .ok();
 
     // Underpayment/overpayment: zatoshi-based amount tracking
     sqlx::query("ALTER TABLE invoices ADD COLUMN price_zatoshis INTEGER NOT NULL DEFAULT 0")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
     sqlx::query("ALTER TABLE invoices ADD COLUMN received_zatoshis INTEGER NOT NULL DEFAULT 0")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
     sqlx::query("UPDATE invoices SET price_zatoshis = CAST(price_zec * 100000000 AS INTEGER) WHERE price_zatoshis = 0 AND price_zec > 0")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
 
@@ -244,7 +246,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='invoices'
          AND sql LIKE '%CHECK%' AND sql NOT LIKE '%underpaid%'",
     )
-    .fetch_one(&pool)
+    .fetch_one(&mut *conn)
     .await
     .unwrap_or(0)
         > 0;
@@ -252,7 +254,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
     if needs_underpaid {
         tracing::info!("Migrating invoices table (adding underpaid status)...");
         sqlx::query("ALTER TABLE invoices RENAME TO invoices_old2")
-            .execute(&pool)
+            .execute(&mut *conn)
             .await
             .ok();
         sqlx::query(
@@ -286,7 +288,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
                 received_zatoshis INTEGER NOT NULL DEFAULT 0
             )",
         )
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
         sqlx::query(
@@ -298,25 +300,25 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
                 diversifier_index, orchard_receiver_hex, price_zatoshis, received_zatoshis
              FROM invoices_old2",
         )
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
         sqlx::query("DROP TABLE invoices_old2")
-            .execute(&pool)
+            .execute(&mut *conn)
             .await
             .ok();
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_invoices_status ON invoices(status)")
-            .execute(&pool)
+            .execute(&mut *conn)
             .await
             .ok();
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_invoices_memo ON invoices(memo_code)")
-            .execute(&pool)
+            .execute(&mut *conn)
             .await
             .ok();
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_invoices_orchard_receiver ON invoices(orchard_receiver_hex)",
         )
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
         tracing::info!("Invoices table migration (underpaid) complete");
@@ -324,11 +326,11 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
 
     // Clean up leftover temp tables from migrations
     sqlx::query("DROP TABLE IF EXISTS invoices_old")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
     sqlx::query("DROP TABLE IF EXISTS invoices_old2")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
 
@@ -336,7 +338,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
     let products_has_price_eur: bool = sqlx::query_scalar::<_, i32>(
         "SELECT COUNT(*) FROM pragma_table_info('products') WHERE name = 'price_eur'",
     )
-    .fetch_one(&pool)
+    .fetch_one(&mut *conn)
     .await
     .unwrap_or(0)
         > 0;
@@ -344,7 +346,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
     if products_has_price_eur {
         tracing::info!("Migrating products table (dropping legacy price_eur/currency columns)...");
         sqlx::query("ALTER TABLE products RENAME TO products_old")
-            .execute(&pool)
+            .execute(&mut *conn)
             .await
             .ok();
         sqlx::query(
@@ -360,7 +362,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
                 created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
             )",
         )
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
         sqlx::query(
@@ -368,21 +370,21 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
              SELECT id, merchant_id, slug, name, description, default_price_id, metadata, active, created_at
              FROM products_old",
         )
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
         sqlx::query("DROP TABLE products_old")
-            .execute(&pool)
+            .execute(&mut *conn)
             .await
             .ok();
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_products_merchant ON products(merchant_id)")
-            .execute(&pool)
+            .execute(&mut *conn)
             .await
             .ok();
         tracing::info!("Products table migration complete (price_eur/currency removed)");
     }
     sqlx::query("DROP TABLE IF EXISTS products_old")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
 
@@ -390,7 +392,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
     // by SQLite during products RENAME TABLE (pointing to products_old).
     let prices_schema: Option<String> =
         sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type='table' AND name='prices'")
-            .fetch_optional(&pool)
+            .fetch_optional(&mut *conn)
             .await
             .ok()
             .flatten();
@@ -398,7 +400,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
         if schema.contains("products_old") {
             tracing::info!("Repairing prices table FK references...");
             sqlx::query("ALTER TABLE prices RENAME TO _prices_repair")
-                .execute(&pool)
+                .execute(&mut *conn)
                 .await
                 .ok();
             sqlx::query(
@@ -414,33 +416,33 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
                     interval_count INTEGER
                 )",
             )
-            .execute(&pool)
+            .execute(&mut *conn)
             .await
             .ok();
             sqlx::query("INSERT OR IGNORE INTO prices SELECT * FROM _prices_repair")
-                .execute(&pool)
+                .execute(&mut *conn)
                 .await
                 .ok();
             sqlx::query("DROP TABLE _prices_repair")
-                .execute(&pool)
+                .execute(&mut *conn)
                 .await
                 .ok();
             sqlx::query("CREATE INDEX IF NOT EXISTS idx_prices_product ON prices(product_id)")
-                .execute(&pool)
+                .execute(&mut *conn)
                 .await
                 .ok();
             tracing::info!("prices FK repair complete");
         }
     }
     sqlx::query("DROP TABLE IF EXISTS _prices_repair")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
 
     // Repair FK references in invoices if they point to products_old
     let inv_schema: Option<String> =
         sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type='table' AND name='invoices'")
-            .fetch_optional(&pool)
+            .fetch_optional(&mut *conn)
             .await
             .ok()
             .flatten();
@@ -449,37 +451,37 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
             tracing::info!("Repairing invoices table FK references (products_old)...");
             let inv_sql = schema.replace("products_old", "products");
             sqlx::query("ALTER TABLE invoices RENAME TO _inv_repair")
-                .execute(&pool)
+                .execute(&mut *conn)
                 .await
                 .ok();
-            sqlx::query(&inv_sql).execute(&pool).await.ok();
+            sqlx::query(&inv_sql).execute(&mut *conn).await.ok();
             sqlx::query("INSERT OR IGNORE INTO invoices SELECT * FROM _inv_repair")
-                .execute(&pool)
+                .execute(&mut *conn)
                 .await
                 .ok();
             sqlx::query("DROP TABLE _inv_repair")
-                .execute(&pool)
+                .execute(&mut *conn)
                 .await
                 .ok();
             sqlx::query("CREATE INDEX IF NOT EXISTS idx_invoices_status ON invoices(status)")
-                .execute(&pool)
+                .execute(&mut *conn)
                 .await
                 .ok();
             sqlx::query("CREATE INDEX IF NOT EXISTS idx_invoices_memo ON invoices(memo_code)")
-                .execute(&pool)
+                .execute(&mut *conn)
                 .await
                 .ok();
             sqlx::query(
                 "CREATE INDEX IF NOT EXISTS idx_invoices_orchard_receiver ON invoices(orchard_receiver_hex)",
             )
-            .execute(&pool)
+            .execute(&mut *conn)
             .await
             .ok();
             tracing::info!("invoices FK repair (products_old) complete");
         }
     }
     sqlx::query("DROP TABLE IF EXISTS _inv_repair")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
 
@@ -491,7 +493,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
     let wd_schema: Option<String> = sqlx::query_scalar(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='webhook_deliveries'",
     )
-    .fetch_optional(&pool)
+    .fetch_optional(&mut *conn)
     .await
     .ok()
     .flatten();
@@ -499,7 +501,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
         if schema.contains("invoices_old") || schema.contains("_inv_repair") {
             tracing::info!("Repairing webhook_deliveries FK references...");
             sqlx::query("ALTER TABLE webhook_deliveries RENAME TO _wd_repair")
-                .execute(&pool)
+                .execute(&mut *conn)
                 .await
                 .ok();
             sqlx::query(
@@ -520,7 +522,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
                     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
                 )",
             )
-            .execute(&pool)
+            .execute(&mut *conn)
             .await
             .ok();
             sqlx::query(
@@ -531,25 +533,25 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
                     id, invoice_id, url, payload, status, attempts, last_attempt_at, next_retry_at, created_at
                  FROM _wd_repair",
             )
-            .execute(&pool)
+            .execute(&mut *conn)
             .await
             .ok();
             sqlx::query("DROP TABLE _wd_repair")
-                .execute(&pool)
+                .execute(&mut *conn)
                 .await
                 .ok();
             tracing::info!("webhook_deliveries FK repair complete");
         }
     }
     sqlx::query("DROP TABLE IF EXISTS _wd_repair")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
 
     let fl_schema: Option<String> = sqlx::query_scalar(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='fee_ledger'",
     )
-    .fetch_optional(&pool)
+    .fetch_optional(&mut *conn)
     .await
     .ok()
     .flatten();
@@ -557,7 +559,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
         if schema.contains("invoices_old") || schema.contains("_inv_repair") {
             tracing::info!("Repairing fee_ledger FK references...");
             sqlx::query("ALTER TABLE fee_ledger RENAME TO _fl_repair")
-                .execute(&pool)
+                .execute(&mut *conn)
                 .await
                 .ok();
             sqlx::query(
@@ -573,7 +575,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
                     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
                 )",
             )
-            .execute(&pool)
+            .execute(&mut *conn)
             .await
             .ok();
             sqlx::query(
@@ -587,28 +589,28 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
                     auto_collected, collected_at, billing_cycle_id, created_at
                  FROM _fl_repair",
             )
-            .execute(&pool)
+            .execute(&mut *conn)
             .await
             .ok();
             sqlx::query("DROP TABLE _fl_repair")
-                .execute(&pool)
+                .execute(&mut *conn)
                 .await
                 .ok();
             tracing::info!("fee_ledger FK repair complete");
         }
     }
     sqlx::query("DROP TABLE IF EXISTS _fl_repair")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
 
     // Re-enable FK enforcement and restore default alter-table behavior
     sqlx::query("PRAGMA legacy_alter_table = OFF")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
     sqlx::query("PRAGMA foreign_keys = ON")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
 
@@ -621,7 +623,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
         )",
     )
-    .execute(&pool)
+    .execute(&mut *conn)
     .await
     .ok();
 
@@ -634,7 +636,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
         "ALTER TABLE merchants ADD COLUMN fee_discount_until TEXT",
     ];
     for sql in &billing_upgrades {
-        sqlx::query(sql).execute(&pool).await.ok();
+        sqlx::query(sql).execute(&mut *conn).await.ok();
     }
 
     // Fee ledger
@@ -651,30 +653,30 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
         )",
     )
-    .execute(&pool)
+    .execute(&mut *conn)
     .await
     .ok();
 
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_fee_ledger_merchant ON fee_ledger(merchant_id)")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_fee_ledger_cycle ON fee_ledger(billing_cycle_id)")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
     sqlx::query(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_fee_ledger_invoice ON fee_ledger(invoice_id)",
     )
-    .execute(&pool)
+    .execute(&mut *conn)
     .await
     .ok();
     sqlx::query("ALTER TABLE fee_ledger ADD COLUMN fee_amount_zatoshis INTEGER NOT NULL DEFAULT 0")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
     sqlx::query("ALTER TABLE fee_ledger ADD COLUMN fee_rate_applied REAL")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
     sqlx::query(
@@ -682,7 +684,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
          SET fee_amount_zatoshis = ROUND(fee_amount_zec * 100000000.0)
          WHERE fee_amount_zatoshis = 0 AND fee_amount_zec > 0",
     )
-    .execute(&pool)
+    .execute(&mut *conn)
     .await
     .ok();
 
@@ -706,14 +708,14 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
         )",
     )
-    .execute(&pool)
+    .execute(&mut *conn)
     .await
     .ok();
 
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_billing_cycles_merchant ON billing_cycles(merchant_id)",
     )
-    .execute(&pool)
+    .execute(&mut *conn)
     .await
     .ok();
     for sql in &[
@@ -721,7 +723,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
         "ALTER TABLE billing_cycles ADD COLUMN auto_collected_zatoshis INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE billing_cycles ADD COLUMN outstanding_zatoshis INTEGER NOT NULL DEFAULT 0",
     ] {
-        sqlx::query(sql).execute(&pool).await.ok();
+        sqlx::query(sql).execute(&mut *conn).await.ok();
     }
     sqlx::query(
         "UPDATE billing_cycles
@@ -733,7 +735,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
            AND outstanding_zatoshis = 0
            AND (total_fees_zec > 0 OR auto_collected_zec > 0 OR outstanding_zec > 0)",
     )
-    .execute(&pool)
+    .execute(&mut *conn)
     .await
     .ok();
 
@@ -742,7 +744,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='billing_cycles'
          AND sql LIKE '%CHECK%' AND sql NOT LIKE '%carried_over%'",
     )
-    .fetch_one(&pool)
+    .fetch_one(&mut *conn)
     .await
     .unwrap_or(0)
         > 0;
@@ -750,7 +752,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
     if bc_needs_migrate {
         tracing::info!("Migrating billing_cycles table (adding carried_over status)...");
         sqlx::query("ALTER TABLE billing_cycles RENAME TO _bc_migrate")
-            .execute(&pool)
+            .execute(&mut *conn)
             .await
             .ok();
         sqlx::query(
@@ -772,7 +774,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
                 created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
             )",
         )
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
         sqlx::query(
@@ -791,17 +793,17 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
                 settlement_invoice_id, status, grace_until, created_at
              FROM _bc_migrate",
         )
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
         sqlx::query("DROP TABLE _bc_migrate")
-            .execute(&pool)
+            .execute(&mut *conn)
             .await
             .ok();
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_billing_cycles_merchant ON billing_cycles(merchant_id)",
         )
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
         tracing::info!("billing_cycles migration complete");
@@ -818,7 +820,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
             UNIQUE(merchant_id, template, entity_id)
         )",
     )
-    .execute(&pool)
+    .execute(&mut *conn)
     .await
     .ok();
 
@@ -833,12 +835,12 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
         )",
     )
-    .execute(&pool)
+    .execute(&mut *conn)
     .await
     .ok();
 
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_prices_product ON prices(product_id)")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
 
@@ -847,7 +849,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
         "ALTER TABLE prices ADD COLUMN label TEXT",
         "ALTER TABLE prices ADD COLUMN max_quantity INTEGER",
     ] {
-        sqlx::query(sql).execute(&pool).await.ok();
+        sqlx::query(sql).execute(&mut *conn).await.ok();
     }
 
     // Seed prices from existing products that don't have any prices yet (legacy: price_eur/currency)
@@ -859,7 +861,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
          WHERE NOT EXISTS (SELECT 1 FROM prices pr WHERE pr.product_id = p.id)
          AND (p.price_eur IS NOT NULL AND p.price_eur > 0)",
     )
-    .execute(&pool)
+    .execute(&mut *conn)
     .await
     .ok();
 
@@ -869,17 +871,17 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
             SELECT id FROM prices WHERE product_id = products.id AND active = 1 ORDER BY created_at ASC LIMIT 1
         ) WHERE default_price_id IS NULL AND EXISTS (SELECT 1 FROM prices pr WHERE pr.product_id = products.id)",
     )
-    .execute(&pool)
+    .execute(&mut *conn)
     .await
     .ok();
 
     // Invoice schema additions for multi-currency pricing
     sqlx::query("ALTER TABLE invoices ADD COLUMN amount REAL")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
     sqlx::query("ALTER TABLE invoices ADD COLUMN price_id TEXT")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
 
@@ -891,7 +893,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
          END
          WHERE amount IS NULL",
     )
-    .execute(&pool)
+    .execute(&mut *conn)
     .await
     .ok();
 
@@ -902,7 +904,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
             value TEXT NOT NULL
         )",
     )
-    .execute(&pool)
+    .execute(&mut *conn)
     .await
     .ok();
 
@@ -919,17 +921,17 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
         )",
     )
-    .execute(&pool)
+    .execute(&mut *conn)
     .await
     .ok();
 
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_x402_merchant ON x402_verifications(merchant_id, created_at)")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
 
     sqlx::query("ALTER TABLE x402_verifications ADD COLUMN protocol TEXT NOT NULL DEFAULT 'x402'")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
 
@@ -943,7 +945,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
                GROUP BY merchant_id, txid, protocol
            )",
     )
-    .execute(&pool)
+    .execute(&mut *conn)
     .await
     .ok();
 
@@ -952,7 +954,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
          ON x402_verifications(merchant_id, txid, protocol)
          WHERE status = 'verified'",
     )
-    .execute(&pool)
+    .execute(&mut *conn)
     .await
     .ok();
 
@@ -974,22 +976,22 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
             closed_at TEXT
         )",
     )
-    .execute(&pool)
+    .execute(&mut *conn)
     .await
     .ok();
 
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_agent_sessions_token ON agent_sessions(bearer_token)",
     )
-    .execute(&pool)
+    .execute(&mut *conn)
     .await
     .ok();
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_agent_sessions_merchant ON agent_sessions(merchant_id, status)")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
     sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_sessions_deposit_txid ON agent_sessions(deposit_txid)")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
 
@@ -1005,12 +1007,12 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
         )",
     )
-    .execute(&pool)
+    .execute(&mut *conn)
     .await
     .ok();
 
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_session_requests_merchant ON session_requests(merchant_id, status)")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
 
@@ -1029,18 +1031,18 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
         )",
     )
-    .execute(&pool)
+    .execute(&mut *conn)
     .await
     .ok();
 
     sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS idx_payment_links_slug ON payment_links(slug)")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_payment_links_merchant ON payment_links(merchant_id)",
     )
-    .execute(&pool)
+    .execute(&mut *conn)
     .await
     .ok();
 
@@ -1050,7 +1052,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
         "ALTER TABLE prices ADD COLUMN billing_interval TEXT",
         "ALTER TABLE prices ADD COLUMN interval_count INTEGER",
     ] {
-        sqlx::query(sql).execute(&pool).await.ok();
+        sqlx::query(sql).execute(&mut *conn).await.ok();
     }
 
     // Events are linked to products (composition model): billing stays product/price-based.
@@ -1068,18 +1070,18 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
         )",
     )
-    .execute(&pool)
+    .execute(&mut *conn)
     .await
     .ok();
 
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_events_merchant_created ON events(merchant_id, created_at)",
     )
-    .execute(&pool)
+    .execute(&mut *conn)
     .await
     .ok();
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_events_status ON events(status)")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
 
@@ -1098,7 +1100,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
         )",
     )
-    .execute(&pool)
+    .execute(&mut *conn)
     .await
     .ok();
 
@@ -1107,7 +1109,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
         "CREATE INDEX IF NOT EXISTS idx_tickets_product_status ON tickets(product_id, status)",
         "CREATE INDEX IF NOT EXISTS idx_tickets_merchant_created ON tickets(merchant_id, created_at)",
     ] {
-        sqlx::query(sql).execute(&pool).await.ok();
+        sqlx::query(sql).execute(&mut *conn).await.ok();
     }
 
     // Subscriptions: recurring invoice schedules (no customer data -- privacy first)
@@ -1126,23 +1128,23 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
         )",
     )
-    .execute(&pool)
+    .execute(&mut *conn)
     .await
     .ok();
 
     // Migration: add label column for existing databases
     sqlx::query("ALTER TABLE subscriptions ADD COLUMN label TEXT")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
 
     // Subscription lifecycle: link invoices to subscriptions
     sqlx::query("ALTER TABLE invoices ADD COLUMN subscription_id TEXT")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
     sqlx::query("ALTER TABLE subscriptions ADD COLUMN current_invoice_id TEXT")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
 
@@ -1151,7 +1153,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='invoices'
          AND sql LIKE '%CHECK%' AND sql NOT LIKE '%draft%'",
     )
-    .fetch_one(&pool)
+    .fetch_one(&mut *conn)
     .await
     .unwrap_or(0)
         > 0;
@@ -1159,15 +1161,15 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
     if needs_draft {
         tracing::info!("Migrating invoices table (adding draft status)...");
         sqlx::query("PRAGMA foreign_keys = OFF")
-            .execute(&pool)
+            .execute(&mut *conn)
             .await
             .ok();
         sqlx::query("PRAGMA legacy_alter_table = ON")
-            .execute(&pool)
+            .execute(&mut *conn)
             .await
             .ok();
         sqlx::query("ALTER TABLE invoices RENAME TO _inv_draft_migrate")
-            .execute(&pool)
+            .execute(&mut *conn)
             .await
             .ok();
         sqlx::query(
@@ -1205,7 +1207,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
                 subscription_id TEXT
             )",
         )
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
         sqlx::query(
@@ -1218,39 +1220,39 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
                 amount, price_id, subscription_id
              FROM _inv_draft_migrate",
         )
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
         sqlx::query("DROP TABLE _inv_draft_migrate")
-            .execute(&pool)
+            .execute(&mut *conn)
             .await
             .ok();
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_invoices_status ON invoices(status)")
-            .execute(&pool)
+            .execute(&mut *conn)
             .await
             .ok();
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_invoices_memo ON invoices(memo_code)")
-            .execute(&pool)
+            .execute(&mut *conn)
             .await
             .ok();
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_invoices_orchard_receiver ON invoices(orchard_receiver_hex)",
         )
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
         sqlx::query("PRAGMA legacy_alter_table = OFF")
-            .execute(&pool)
+            .execute(&mut *conn)
             .await
             .ok();
         sqlx::query("PRAGMA foreign_keys = ON")
-            .execute(&pool)
+            .execute(&mut *conn)
             .await
             .ok();
         tracing::info!("Invoices table migration (draft status) complete");
     }
     sqlx::query("DROP TABLE IF EXISTS _inv_draft_migrate")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
 
@@ -1267,14 +1269,14 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
             "SELECT COUNT(*) FROM pragma_table_info('{}') WHERE name = '{}'",
             table, col
         ))
-        .fetch_one(&pool)
+        .fetch_one(&mut *conn)
         .await
         .unwrap_or(0)
             > 0;
         if !exists {
             tracing::info!("Adding missing column {}.{}", table, col);
             sqlx::query(&format!("ALTER TABLE {} ADD COLUMN {} TEXT", table, col))
-                .execute(&pool)
+                .execute(&mut *conn)
                 .await
                 .ok();
         }
@@ -1283,11 +1285,11 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_subscriptions_merchant ON subscriptions(merchant_id)",
     )
-    .execute(&pool)
+    .execute(&mut *conn)
     .await
     .ok();
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_subscriptions_status ON subscriptions(status)")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
 
@@ -1298,13 +1300,13 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
         "ALTER TABLE webhook_deliveries ADD COLUMN response_status INTEGER",
         "ALTER TABLE webhook_deliveries ADD COLUMN response_error TEXT",
     ] {
-        sqlx::query(sql).execute(&pool).await.ok();
+        sqlx::query(sql).execute(&mut *conn).await.ok();
     }
 
     let webhook_schema: Option<String> = sqlx::query_scalar(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='webhook_deliveries'",
     )
-    .fetch_optional(&pool)
+    .fetch_optional(&mut *conn)
     .await
     .ok()
     .flatten();
@@ -1315,7 +1317,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
     {
         tracing::info!("Migrating webhook_deliveries for nullable invoice_id...");
         sqlx::query("ALTER TABLE webhook_deliveries RENAME TO _webhook_deliveries_migrate")
-            .execute(&pool)
+            .execute(&mut *conn)
             .await
             .ok();
         sqlx::query(
@@ -1336,7 +1338,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
                 created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
             )",
         )
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
         sqlx::query(
@@ -1350,11 +1352,11 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
              FROM _webhook_deliveries_migrate wd
              LEFT JOIN invoices i ON wd.invoice_id = i.id",
         )
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
         sqlx::query("DROP TABLE _webhook_deliveries_migrate")
-            .execute(&pool)
+            .execute(&mut *conn)
             .await
             .ok();
     }
@@ -1365,19 +1367,19 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
          )
          WHERE merchant_id IS NULL AND invoice_id IS NOT NULL",
     )
-    .execute(&pool)
+    .execute(&mut *conn)
     .await
     .ok();
 
     // Recovery email encryption: add blind-index column
     sqlx::query("ALTER TABLE merchants ADD COLUMN recovery_email_hash TEXT")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_merchants_email_hash ON merchants(recovery_email_hash)",
     )
-    .execute(&pool)
+    .execute(&mut *conn)
     .await
     .ok();
 
@@ -1394,10 +1396,10 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
         "ALTER TABLE invoices ADD COLUMN luma_retry_at TEXT",
         "ALTER TABLE invoices ADD COLUMN luma_retry_count INTEGER DEFAULT 0",
     ] {
-        sqlx::query(sql).execute(&pool).await.ok();
+        sqlx::query(sql).execute(&mut *conn).await.ok();
     }
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_events_luma ON events(luma_event_id)")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
 
@@ -1413,7 +1415,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
         "ALTER TABLE payment_links ADD COLUMN campaign_diversifier_index INTEGER",
         "ALTER TABLE payment_links ADD COLUMN campaign_address_ua TEXT",
     ] {
-        sqlx::query(sql).execute(&pool).await.ok();
+        sqlx::query(sql).execute(&mut *conn).await.ok();
     }
 
     // Direct (off-invoice) campaign donation tracking
@@ -1426,14 +1428,14 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
             fiat_cents INTEGER NOT NULL,
             currency TEXT NOT NULL DEFAULT 'USD',
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-        )"
+        )",
     )
-    .execute(&pool)
+    .execute(&mut *conn)
     .await
     .ok();
 
     sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_donations_txid_link ON campaign_donations(txid, link_id)")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
 
@@ -1443,15 +1445,21 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='payment_links'
          AND sql LIKE '%price_id TEXT NOT NULL%'",
     )
-    .fetch_one(&pool)
+    .fetch_one(&mut *conn)
     .await
     .unwrap_or(0)
         > 0;
 
     if needs_pl_migrate {
+        sqlx::query("PRAGMA foreign_keys = OFF")
+            .execute(&mut *conn)
+            .await?;
+        sqlx::query("PRAGMA legacy_alter_table = ON")
+            .execute(&mut *conn)
+            .await?;
         tracing::info!("Migrating payment_links (making price_id nullable for donation mode)...");
         sqlx::query("ALTER TABLE payment_links RENAME TO payment_links_old")
-            .execute(&pool)
+            .execute(&mut *conn)
             .await
             .ok();
         sqlx::query(
@@ -1471,7 +1479,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
                 created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
             )",
         )
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
         sqlx::query(
@@ -1480,25 +1488,31 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
                 active, total_created, mode, donation_config, total_raised, created_at
              FROM payment_links_old",
         )
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
         sqlx::query("DROP TABLE payment_links_old")
-            .execute(&pool)
+            .execute(&mut *conn)
             .await
             .ok();
         sqlx::query(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_payment_links_slug ON payment_links(slug)",
         )
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_payment_links_merchant ON payment_links(merchant_id)",
         )
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
+        sqlx::query("PRAGMA legacy_alter_table = OFF")
+            .execute(&mut *conn)
+            .await?;
+        sqlx::query("PRAGMA foreign_keys = ON")
+            .execute(&mut *conn)
+            .await?;
         tracing::info!("payment_links migration complete (price_id now nullable)");
     }
 
@@ -1513,7 +1527,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
         )",
     )
-    .execute(&pool)
+    .execute(&mut *conn)
     .await
     {
         tracing::warn!(error = %e, "passkey_credentials table creation failed (may already exist)");
@@ -1522,7 +1536,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_passkey_creds_merchant ON passkey_credentials(merchant_id)",
     )
-    .execute(&pool)
+    .execute(&mut *conn)
     .await
     .ok();
 
@@ -1537,7 +1551,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
         )",
     )
-    .execute(&pool)
+    .execute(&mut *conn)
     .await
     {
         tracing::warn!(error = %e, "passkey_challenges table creation failed (may already exist)");
@@ -1545,20 +1559,18 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
 
     // Re-auth timestamp on sessions for privileged actions
     sqlx::query("ALTER TABLE sessions ADD COLUMN reauth_at TEXT")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
-
-
 
     // Track last token-based login for auth metadata
     sqlx::query("ALTER TABLE merchants ADD COLUMN last_token_login_at TEXT")
-        .execute(&pool)
+        .execute(&mut *conn)
         .await
         .ok();
 
-        sqlx::query(
-          "CREATE TABLE IF NOT EXISTS invoice_payments (
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS invoice_payments (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               invoice_id TEXT NOT NULL REFERENCES invoices(id),
               txid TEXT NOT NULL,
@@ -1566,15 +1578,17 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
               created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
               UNIQUE(invoice_id, txid)
           )",
-      )
-      .execute(&pool)
-      .await
-      .ok();
-  
-      sqlx::query("CREATE INDEX IF NOT EXISTS idx_invoice_payments_invoice ON invoice_payments(invoice_id)")
-          .execute(&pool)
-          .await
-          .ok();
+    )
+    .execute(&mut *conn)
+    .await
+    .ok();
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_invoice_payments_invoice ON invoice_payments(invoice_id)",
+    )
+    .execute(&mut *conn)
+    .await
+    .ok();
 
     // x402 idempotency cache (Idempotency-Key header, 24h TTL)
     sqlx::query(
@@ -1584,10 +1598,11 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
         )",
     )
-    .execute(&pool)
+    .execute(&mut *conn)
     .await
     .ok();
 
+    drop(conn);
     validate_schema_state(&pool).await?;
     tracing::info!("Database ready (SQLite)");
     Ok(())

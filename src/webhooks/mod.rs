@@ -4,6 +4,17 @@ use sha2::Sha256;
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
+static HOST_ATTEMPTS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+static WAKE: tokio::sync::Notify = tokio::sync::Notify::const_new();
+pub fn wake() {
+    WAKE.notify_one();
+}
+pub async fn notified() {
+    WAKE.notified().await;
+}
+
 type HmacSha256 = Hmac<Sha256>;
 
 pub fn sign_payload_public(secret: &str, timestamp: &str, payload: &str) -> String {
@@ -39,116 +50,6 @@ fn jittered_retry_delay_secs(attempt: i64) -> i64 {
         .map(|d| d.subsec_nanos() as i64)
         .unwrap_or(0);
     base + nanos % (base / 4).max(1)
-}
-
-pub async fn dispatch_payment(
-    pool: &SqlitePool,
-    http: &reqwest::Client,
-    invoice_id: &str,
-    event: &str,
-    txid: &str,
-    price_zatoshis: i64,
-    received_zatoshis: i64,
-    overpaid: bool,
-    encryption_key: &str,
-) -> anyhow::Result<()> {
-    let merchant_row = sqlx::query_as::<_, (String, Option<String>, String)>(
-        "SELECT m.id, m.webhook_url, m.webhook_secret FROM invoices i
-         JOIN merchants m ON i.merchant_id = m.id
-         WHERE i.id = ?",
-    )
-    .bind(invoice_id)
-    .fetch_optional(pool)
-    .await?;
-
-    let (merchant_id, webhook_url, raw_secret) = match merchant_row {
-        Some((mid, Some(url), secret)) if !url.is_empty() => (mid, url, secret),
-        _ => return Ok(()),
-    };
-    let webhook_secret = crate::crypto::decrypt_webhook_secret(&raw_secret, encryption_key)?;
-
-    if let Err(reason) = crate::validation::resolve_and_check_host(&webhook_url) {
-        tracing::warn!(invoice_id, url = %webhook_url, %reason, "Webhook blocked: SSRF protection");
-        return Ok(());
-    }
-
-    let timestamp = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-
-    let payload = serde_json::json!({
-        "event": event,
-        "invoice_id": invoice_id,
-        "txid": txid,
-        "timestamp": &timestamp,
-        "price_zec": crate::invoices::zatoshis_to_zec(price_zatoshis),
-        "received_zec": crate::invoices::zatoshis_to_zec(received_zatoshis),
-        "overpaid": overpaid,
-    });
-
-    let payload_str = payload.to_string();
-    let signature = sign_payload(&webhook_secret, &timestamp, &payload_str);
-
-    let delivery_id = Uuid::new_v4().to_string();
-    let next_retry = (Utc::now() + chrono::Duration::seconds(jittered_retry_delay_secs(1)))
-        .format("%Y-%m-%dT%H:%M:%SZ")
-        .to_string();
-
-    sqlx::query(
-        "INSERT INTO webhook_deliveries (id, invoice_id, url, payload, status, attempts, last_attempt_at, next_retry_at, event_type, merchant_id)
-         VALUES (?, ?, ?, ?, 'pending', 1, ?, ?, ?, ?)"
-    )
-    .bind(&delivery_id)
-    .bind(invoice_id)
-    .bind(&webhook_url)
-    .bind(&payload_str)
-    .bind(&timestamp)
-    .bind(&next_retry)
-    .bind(event)
-    .bind(&merchant_id)
-    .execute(pool)
-    .await?;
-
-    match http
-        .post(&webhook_url)
-        .header("X-CipherPay-Signature", &signature)
-        .header("X-CipherPay-Timestamp", &timestamp)
-        .header("X-CipherPay-Delivery-Id", &delivery_id)
-        .json(&payload)
-        .timeout(std::time::Duration::from_secs(10))
-        .send()
-        .await
-    {
-        Ok(resp) if resp.status().is_success() => {
-            let status_code = resp.status().as_u16() as i32;
-            sqlx::query("UPDATE webhook_deliveries SET status = 'delivered', response_status = ? WHERE id = ?")
-                .bind(status_code)
-                .bind(&delivery_id)
-                .execute(pool)
-                .await?;
-            tracing::info!(invoice_id, event, "Payment webhook delivered");
-        }
-        Ok(resp) => {
-            let status_code = resp.status().as_u16() as i32;
-            let error_text = format!("HTTP {}", resp.status());
-            sqlx::query("UPDATE webhook_deliveries SET response_status = ?, response_error = ? WHERE id = ?")
-                .bind(status_code)
-                .bind(&error_text)
-                .bind(&delivery_id)
-                .execute(pool)
-                .await?;
-            tracing::warn!(invoice_id, event, status = %resp.status(), "Payment webhook rejected, will retry");
-        }
-        Err(e) => {
-            let error_text = e.to_string();
-            sqlx::query("UPDATE webhook_deliveries SET response_status = 0, response_error = ? WHERE id = ?")
-                .bind(&error_text)
-                .bind(&delivery_id)
-                .execute(pool)
-                .await?;
-            tracing::warn!(invoice_id, event, error = %e, "Payment webhook failed, will retry");
-        }
-    }
-
-    Ok(())
 }
 
 /// Dispatch a generic lifecycle event webhook (subscription/invoice events).
@@ -271,14 +172,13 @@ pub async fn retry_failed(
     let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
     let rows = sqlx::query_as::<_, (String, String, String, String, i64)>(
-        "SELECT wd.id, wd.url, wd.payload, m.webhook_secret, wd.attempts
-         FROM webhook_deliveries wd
-         JOIN merchants m ON wd.merchant_id = m.id
-         WHERE wd.status = 'pending'
-         AND wd.attempts < 5
-         AND (wd.next_retry_at IS NULL OR wd.next_retry_at <= ?)
-         ORDER BY wd.next_retry_at ASC
-         LIMIT 200",
+        "WITH ready AS (
+            SELECT wd.id, wd.url, wd.payload, m.webhook_secret, wd.attempts,
+                ROW_NUMBER() OVER (PARTITION BY wd.merchant_id ORDER BY wd.next_retry_at, wd.created_at) AS position
+            FROM webhook_deliveries wd JOIN merchants m ON wd.merchant_id = m.id
+            WHERE wd.status = 'pending' AND wd.attempts < 10
+              AND (wd.next_retry_at IS NULL OR wd.next_retry_at <= ?)
+        ) SELECT id, url, payload, webhook_secret, attempts FROM ready WHERE position = 1 LIMIT 200",
     )
     .bind(&now)
     .fetch_all(pool)
@@ -296,9 +196,29 @@ pub async fn retry_failed(
             .ok()
             .and_then(|u| u.host_str().map(str::to_owned))
         {
-            if !attempted_hosts.insert(host) {
+            if !attempted_hosts.insert(host.clone()) {
                 continue;
             }
+            let interval = if host == "connect.cipherpay.app" {
+                5
+            } else {
+                60
+            };
+            let mut attempts = HOST_ATTEMPTS.lock().unwrap_or_else(|e| e.into_inner());
+            attempts.retain(|_, last| last.elapsed().as_secs() < 60);
+            if attempts
+                .get(&host)
+                .is_some_and(|last| last.elapsed().as_secs() < interval)
+            {
+                continue;
+            }
+            attempts.insert(host, std::time::Instant::now());
+        }
+        let claimed = sqlx::query("UPDATE webhook_deliveries SET next_retry_at = strftime('%Y-%m-%dT%H:%M:%SZ','now','+60 seconds')
+            WHERE id = ? AND status = 'pending' AND (next_retry_at IS NULL OR next_retry_at <= ?)")
+            .bind(&id).bind(&now).execute(pool).await?;
+        if claimed.rows_affected() == 0 {
+            continue;
         }
         let secret = match crate::crypto::decrypt_webhook_secret(&raw_secret, encryption_key) {
             Ok(s) => s,
@@ -364,7 +284,7 @@ pub async fn retry_failed(
         };
 
         if success {
-            sqlx::query("UPDATE webhook_deliveries SET status = 'delivered', response_status = ?, response_error = NULL WHERE id = ?")
+            sqlx::query("UPDATE webhook_deliveries SET status = 'delivered', attempts = attempts + 1, last_attempt_at = strftime('%Y-%m-%dT%H:%M:%SZ','now'), response_status = ?, response_error = NULL WHERE id = ?")
                 .bind(resp_status)
                 .bind(&id)
                 .execute(pool)
@@ -372,7 +292,7 @@ pub async fn retry_failed(
             tracing::info!(delivery_id = %id, "Webhook retry delivered");
         } else {
             let new_attempts = attempts + 1;
-            if new_attempts >= 5 {
+            if new_attempts >= 10 {
                 sqlx::query(
                     "UPDATE webhook_deliveries SET status = 'failed', attempts = ?, last_attempt_at = ?, response_status = ?, response_error = ? WHERE id = ?"
                 )
@@ -383,7 +303,7 @@ pub async fn retry_failed(
                 .bind(&id)
                 .execute(pool)
                 .await?;
-                tracing::warn!(delivery_id = %id, "Webhook permanently failed after 5 attempts");
+                tracing::warn!(delivery_id = %id, "Webhook permanently failed after 10 attempts");
             } else {
                 let base_delay = jittered_retry_delay_secs(new_attempts);
                 // Respect Retry-After up to the 10h max backoff, but never

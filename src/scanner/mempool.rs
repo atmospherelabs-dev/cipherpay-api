@@ -5,7 +5,7 @@ const BATCH_SIZE: usize = 20;
 
 #[derive(Debug, Deserialize)]
 struct MempoolResponse {
-    transactions: Option<Vec<MempoolTx>>,
+    transactions: Vec<MempoolTx>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -13,30 +13,24 @@ struct MempoolTx {
     txid: String,
 }
 
-/// Fetches current mempool transaction IDs from CipherScan API.
+/// Fetches current mempool transaction IDs from ZecBlock API.
 pub async fn fetch_mempool_txids(
     http: &reqwest::Client,
     api_url: &str,
 ) -> anyhow::Result<Vec<String>> {
-    let url = format!("{}/api/mempool", api_url);
-    let resp: MempoolResponse = http.get(&url).send().await?.json().await?;
+    let resp: MempoolResponse = super::api::get(http, api_url, "mempool").await?;
 
-    Ok(resp
-        .transactions
-        .unwrap_or_default()
-        .into_iter()
-        .map(|tx| tx.txid)
-        .collect())
+    Ok(resp.transactions.into_iter().map(|tx| tx.txid).collect())
 }
 
-/// Fetches raw transaction hex from CipherScan API.
+/// Fetches raw transaction hex from ZecBlock API.
 pub async fn fetch_raw_tx(
     http: &reqwest::Client,
     api_url: &str,
     txid: &str,
 ) -> anyhow::Result<String> {
-    let url = format!("{}/api/tx/{}/raw", api_url, txid);
-    let resp: serde_json::Value = http.get(&url).send().await?.json().await?;
+    let resp: serde_json::Value =
+        super::api::get(http, api_url, &format!("transactions/{txid}/raw")).await?;
 
     resp["hex"]
         .as_str()
@@ -58,16 +52,11 @@ pub async fn fetch_raw_txs_batch(
             .iter()
             .map(|txid| {
                 let http = http.clone();
-                let url = format!("{}/api/tx/{}/raw", api_url, txid);
-                let txid = txid.clone();
                 async move {
-                    let resp: Result<serde_json::Value, _> =
-                        async { Ok(http.get(&url).send().await?.json().await?) }.await;
-
-                    match resp {
-                        Ok(val) => val["hex"].as_str().map(|hex| (txid, hex.to_string())),
-                        Err::<_, anyhow::Error>(_) => None,
-                    }
+                    fetch_raw_tx(&http, api_url, txid)
+                        .await
+                        .ok()
+                        .map(|hex| (txid.clone(), hex))
                 }
             })
             .collect();
