@@ -7,7 +7,10 @@ license = "MIT"
 
 [dependencies]
 # Web framework
-actix-web = { version = "4", default-features = false, features = ["macros", "cookies", "compress-gzip", "compress-brotli", "compress-zstd"] }
+# No compress-* features: the server uses no Compress middleware, but those
+# features auto-decode zstd/brotli/gzip request bodies (zstd-safe 7,
+# RUSTSEC-2026-0391..0410). http2 stays off (plain HTTP behind Caddy).
+actix-web = { version = "4", default-features = false, features = ["macros", "cookies"] }
 actix-cors = "0.7"
 actix-web-lab = "0.24"
 actix-governor = "0.7"
