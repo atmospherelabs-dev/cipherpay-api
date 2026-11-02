@@ -3,6 +3,7 @@ mod api;
 mod api_keys;
 mod billing;
 mod config;
+mod crosschain;
 mod crypto;
 mod db;
 mod email;
@@ -13,6 +14,7 @@ mod merchants;
 mod payment_links;
 mod prices;
 mod products;
+mod referrals;
 #[cfg(test)]
 mod repair_tests;
 mod scanner;
@@ -98,7 +100,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .await?;
     }
-    // Internal client for CipherScan (carries X-Service-Key)
+    // Internal client for ZecBlock (carries X-Service-Key)
     let mut scanner_headers = reqwest::header::HeaderMap::new();
     scanner_headers.insert(
         "User-Agent",
@@ -277,6 +279,13 @@ async fn main() -> anyhow::Result<()> {
         .finish()
         .expect("Failed to build rate limiter");
 
+    let crosschain = web::Data::new(crosschain::Gateway::from_env(&config)?);
+    crosschain::fees::start_worker(
+        pool.clone(),
+        crosschain.clone(),
+        config.encryption_key.clone(),
+    );
+
     HttpServer::new(move || {
         let cors = if config.is_testnet() {
             Cors::default()
@@ -320,6 +329,7 @@ async fn main() -> anyhow::Result<()> {
             .app_data(web::Data::new(config.clone()))
             .app_data(web::Data::new(price_service.clone()))
             .app_data(web::Data::new(http_client.clone()))
+            .app_data(crosschain.clone())
             .configure(api::configure)
             .route("/", web::get().to(serve_ui))
             .service(web::resource("/widget/{filename}").route(web::get().to(serve_widget)))

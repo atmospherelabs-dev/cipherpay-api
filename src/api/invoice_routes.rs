@@ -28,6 +28,7 @@ pub async fn list_invoices(
          refund_address, invoices.created_at, price_zatoshis, received_zatoshis,
          confirmed_rate, confirmed_fiat_amount,
          (EXISTS (SELECT 1 FROM events WHERE product_id = invoices.product_id)) AS is_event,
+         (EXISTS (SELECT 1 FROM crosschain_attempts WHERE invoice_id = invoices.id)) AS is_crosschain,
          pr.label AS price_label,
          invoices.is_donation, invoices.payment_link_id
          FROM invoices
@@ -75,6 +76,7 @@ pub async fn list_invoices(
                         "received_zatoshis": rz,
                         "overpaid": rz > pz + 1000 && pz > 0,
                         "is_event": r.get::<bool, _>("is_event"),
+                        "is_crosschain": r.get::<bool, _>("is_crosschain"),
                         "price_label": r.get::<Option<String>, _>("price_label"),
                         "is_donation": r.get::<i32, _>("is_donation") == 1,
                         "payment_link_id": r.get::<Option<String>, _>("payment_link_id"),

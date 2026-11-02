@@ -89,6 +89,13 @@ pub async fn health(
     };
     let _ = price_ok;
 
+    match crate::crosschain::operations::issues(&pool).await {
+        Ok(issues) => {
+            if !issues.is_empty() { degraded = true; }
+            checks.insert("crosschain".into(), serde_json::json!({"status":if issues.is_empty(){"ok"}else{"needs_review"},"attention_count":issues.len()}));
+        }
+        Err(_) => { degraded = true; checks.insert("crosschain".into(),serde_json::json!({"status":"unavailable"})); }
+    }
     let status = if unhealthy {
         "unhealthy"
     } else if degraded {

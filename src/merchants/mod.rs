@@ -525,12 +525,14 @@ pub async fn has_outstanding_balance(pool: &SqlitePool, merchant_id: &str) -> an
 }
 
 pub async fn delete_merchant(pool: &SqlitePool, merchant_id: &str) -> anyhow::Result<()> {
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    crate::referrals::before_delete(&mut tx, merchant_id).await?;
     // Resolve cycles at commit without ever disabling FK enforcement on a pooled connection.
     sqlx::query("PRAGMA defer_foreign_keys = ON")
         .execute(&mut *tx)
         .await?;
     for sql in [
+        "DELETE FROM crosschain_fee_evidence WHERE invoice_id IN (SELECT id FROM invoices WHERE merchant_id = ?)",
         "DELETE FROM session_charges WHERE session_id IN (SELECT id FROM agent_sessions WHERE merchant_id = ?)",
         "DELETE FROM invoice_payments WHERE invoice_id IN (SELECT id FROM invoices WHERE merchant_id = ?)",
         "DELETE FROM campaign_donations WHERE link_id IN (SELECT id FROM payment_links WHERE merchant_id = ?)",

@@ -196,6 +196,7 @@ pub async fn create_invoice(
     );
 
     Ok(CreateInvoiceResponse {
+        checkout_token: crate::crosschain::security::token(pool, &id).await?,
         invoice_id: id,
         memo_code,
         amount,
@@ -224,13 +225,15 @@ pub async fn mark_detected(
         .to_string();
     let result = sqlx::query(
         "UPDATE invoices SET status = 'detected', detected_txid = ?, detected_at = ?, received_zatoshis = ?, expires_at = ?
-         WHERE id = ? AND status IN ('pending', 'underpaid')"
+         WHERE id = ? AND status IN ('pending', 'underpaid')
+         AND (exact_payment=0 OR ? >= price_zatoshis)"
     )
     .bind(txid)
     .bind(&now)
     .bind(received_zatoshis)
     .bind(&new_expires)
     .bind(invoice_id)
+    .bind(received_zatoshis)
     .execute(pool)
     .await?;
 
@@ -253,7 +256,7 @@ pub async fn mark_confirmed(
     let result = sqlx::query(
         "UPDATE invoices SET status = 'confirmed', confirmed_at = ?,
          confirmed_rate = ?, confirmed_fiat_amount = ?
-         WHERE id = ? AND status = 'detected'",
+         WHERE id = ? AND status = 'detected' AND (exact_payment=0 OR received_zatoshis >= price_zatoshis)",
     )
     .bind(&now)
     .bind(confirmed_rate)
@@ -355,6 +358,9 @@ pub async fn record_payment(
     txid: &str,
     zatoshis: i64,
 ) -> anyhow::Result<i64> {
+    if !crate::crosschain::security::accepts_payment(pool, invoice_id, txid).await? {
+        return Ok(sqlx::query_scalar("SELECT received_zatoshis FROM invoices WHERE id=?").bind(invoice_id).fetch_one(pool).await?);
+    }
     let result = sqlx::query(
         "INSERT OR IGNORE INTO invoice_payments (invoice_id, txid, zatoshis) VALUES (?, ?, ?)",
     )
@@ -491,6 +497,10 @@ pub async fn finalize_invoice(
         );
     }
 
+    if invoice.exact_payment {
+        anyhow::bail!("Cross-chain payment already started. Create a new invoice instead of changing its amount.");
+    }
+
     // In-flight payment guard: prevent re-finalization if payment already detected
     if invoice.received_zatoshis > 0 || invoice.detected_txid.is_some() {
         anyhow::bail!("Payment already detected for this invoice, awaiting confirmation");
@@ -577,7 +587,7 @@ pub async fn finalize_invoice(
          price_zec = ?, price_eur = ?, price_usd = ?,
          zec_rate_at_creation = ?, price_zatoshis = ?,
          zcash_uri = ?, expires_at = ?
-         WHERE id = ? AND status IN ('draft', 'expired') AND received_zatoshis=0 AND detected_txid IS NULL",
+         WHERE id = ? AND status IN ('draft', 'expired') AND exact_payment=0 AND received_zatoshis=0 AND detected_txid IS NULL",
     )
     .bind(price_zec)
     .bind(price_eur)

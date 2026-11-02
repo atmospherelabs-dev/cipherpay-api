@@ -35,11 +35,14 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> anyhow::Result<Self> {
+        let network = env::var("NETWORK").unwrap_or_else(|_| "testnet".into());
+        let api_url = env::var("ZECBLOCK_API_URL")
+            .or_else(|_| env::var("CIPHERSCAN_API_URL"))
+            .unwrap_or_else(|_| default_explorer_url(&network).into());
         Ok(Self {
             database_url: env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:cipherpay.db".into()),
-            cipherscan_api_url: env::var("CIPHERSCAN_API_URL")
-                .unwrap_or_else(|_| "https://api.testnet.cipherscan.app".into()),
-            network: env::var("NETWORK").unwrap_or_else(|_| "testnet".into()),
+            cipherscan_api_url: api_url.trim_end_matches('/').to_string(),
+            network,
             api_host: env::var("API_HOST").unwrap_or_else(|_| "127.0.0.1".into()),
             api_port: env::var("API_PORT")
                 .unwrap_or_else(|_| "3080".into())
@@ -84,14 +87,14 @@ impl Config {
                 .unwrap_or_else(|_| "30".into())
                 .parse()?,
             admin_key: env::var("ADMIN_KEY").ok().filter(|s| !s.is_empty()),
-            cipherscan_service_key: env::var("CIPHERSCAN_SERVICE_KEY")
+            cipherscan_service_key: env::var("ZECBLOCK_SERVICE_KEY")
+                .or_else(|_| env::var("CIPHERSCAN_SERVICE_KEY"))
                 .ok()
                 .filter(|s| !s.is_empty()),
             checkout_service_key: env::var("CHECKOUT_SERVICE_KEY")
                 .ok()
                 .filter(|s| !s.is_empty()),
-            webauthn_rp_id: env::var("WEBAUTHN_RP_ID")
-                .unwrap_or_else(|_| "localhost".into()),
+            webauthn_rp_id: env::var("WEBAUTHN_RP_ID").unwrap_or_else(|_| "localhost".into()),
             webauthn_rp_origin: env::var("WEBAUTHN_RP_ORIGIN").unwrap_or_else(|_| {
                 // Derive from FRONTEND_URL if set, otherwise default to localhost
                 env::var("FRONTEND_URL")
@@ -126,5 +129,27 @@ impl Config {
             );
         }
         Ok(())
+    }
+}
+
+fn default_explorer_url(network: &str) -> &'static str {
+    if network == "testnet" {
+        "https://api.testnet.zecblock.com"
+    } else {
+        "https://api.zecblock.com"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::default_explorer_url;
+
+    #[test]
+    fn explorer_defaults_follow_network() {
+        assert_eq!(
+            default_explorer_url("testnet"),
+            "https://api.testnet.zecblock.com"
+        );
+        assert_eq!(default_explorer_url("mainnet"), "https://api.zecblock.com");
     }
 }

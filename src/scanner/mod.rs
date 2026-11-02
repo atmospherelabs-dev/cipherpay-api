@@ -1,3 +1,4 @@
+mod api;
 pub mod blocks;
 pub mod decrypt;
 mod invoice_detection;
@@ -36,7 +37,7 @@ pub async fn run(
     webhook_http: reqwest::Client,
     price_service: PriceService,
 ) {
-    // scanner_http: internal client for CipherScan API calls (carries X-Service-Key)
+    // scanner_http: internal client for ZecBlock API calls (carries X-Service-Key)
     // webhook_http: outbound client for merchant webhooks (no service keys, no redirects)
     let http = scanner_http;
     let circuit_breaker = Arc::new(blocks::CircuitBreaker::new());
@@ -129,7 +130,7 @@ pub async fn run(
                 }
                 _ = interval.tick() => {
                     if mempool_cb.is_open() {
-                        tracing::debug!("CipherScan circuit breaker open, skipping mempool scan");
+                        tracing::debug!("ZecBlock circuit breaker open, skipping mempool scan");
                         continue;
                     }
                     let mempool_start = Instant::now();
@@ -173,7 +174,7 @@ pub async fn run(
             let _ = invoices::expire_old_invoices(&block_pool).await;
 
             if block_cb.is_open() {
-                tracing::debug!("CipherScan circuit breaker open, skipping block scan");
+                tracing::debug!("ZecBlock circuit breaker open, skipping block scan");
                 continue;
             }
             let block_start = Instant::now();
@@ -231,11 +232,17 @@ pub async fn run(
         }
     });
 
+    let payment_email_handle = tokio::spawn(crate::email::run_payment_email_worker(
+        pool.clone(),
+        config.clone(),
+    ));
+
     let _ = tokio::join!(
         mempool_handle,
         block_handle,
         evict_handle,
-        luma_retry_handle
+        luma_retry_handle,
+        payment_email_handle
     );
 }
 
@@ -367,7 +374,7 @@ async fn scan_mempool(
         )
         .await?;
         for invoice_id in &detected {
-            try_detect_fee(pool, config, raw_hex, invoice_id).await;
+            try_detect_fee(pool, config, raw_hex, invoice_id, None).await;
         }
         invoice_detection::apply_campaign_totals(pool, txid, &campaign_totals, price_service).await;
         seen.write().await.insert(txid.clone(), Instant::now());
@@ -422,7 +429,7 @@ async fn process_ws_mempool_tx(
     )
     .await?;
     for invoice_id in &detected {
-        try_detect_fee(pool, config, &push.raw_hex, invoice_id).await;
+        try_detect_fee(pool, config, &push.raw_hex, invoice_id, None).await;
     }
     invoice_detection::apply_campaign_totals(pool, &push.txid, &campaign_totals, price_service)
         .await;
@@ -511,6 +518,44 @@ async fn scan_blocks(
     key_cache: &mut Option<KeyCache>,
     price_service: &PriceService,
 ) -> anyhow::Result<()> {
+    if config.fee_enabled() {
+        let fees: Vec<(String,String)>=sqlx::query_as("SELECT p.invoice_id,p.txid FROM invoice_payments p JOIN invoices i ON i.id=p.invoice_id
+            LEFT JOIN direct_fee_checks c ON c.invoice_id=p.invoice_id AND c.txid=p.txid
+            WHERE i.status='confirmed' AND (c.next_check IS NULL OR c.next_check<strftime('%s','now'))
+            AND NOT EXISTS(SELECT 1 FROM direct_fee_receipts r WHERE r.invoice_id=p.invoice_id AND r.txid=p.txid)
+            ORDER BY COALESCE(c.next_check,0) LIMIT 8")
+            .fetch_all(pool).await?;
+        for (id,txid) in fees {
+            sqlx::query("INSERT INTO direct_fee_checks VALUES (?,?,?) ON CONFLICT(invoice_id,txid) DO UPDATE SET next_check=excluded.next_check")
+                .bind(&id).bind(&txid).bind(chrono::Utc::now().timestamp()+300).execute(pool).await?;
+            if matches!(blocks::check_tx_confirmed(http,&config.cipherscan_api_url,&txid).await,Ok(true)) {
+                if let Ok(raw)=mempool::fetch_raw_tx(http,&config.cipherscan_api_url,&txid).await {
+                    try_detect_fee(pool,config,&raw,&id,Some(&txid)).await;
+                    sqlx::query("UPDATE direct_fee_checks SET next_check=? WHERE invoice_id=? AND txid=?")
+                        .bind(chrono::Utc::now().timestamp()+21600).bind(&id).bind(&txid).execute(pool).await?;
+                }
+            }
+        }
+    }
+    let deliveries: Vec<(String,String)> = sqlx::query_as("SELECT d.invoice_id,d.txid FROM crosschain_deliveries d JOIN invoices i ON i.id=d.invoice_id
+        WHERE i.status IN ('pending','underpaid') AND NOT EXISTS(SELECT 1 FROM invoice_payments p WHERE p.invoice_id=d.invoice_id AND lower(p.txid)=d.txid) LIMIT 8")
+        .fetch_all(pool).await?;
+    for (id, txid) in deliveries {
+        let Some(invoice) = invoices::get_invoice(pool,&id).await? else { continue; };
+        let merchant = crate::merchants::get_merchant_by_id(pool,&invoice.merchant_id,&config.encryption_key).await?;
+        if let Some(merchant) = merchant {
+            let ufvk = crate::crypto::decrypt_or_plaintext(&merchant.ufvk,&config.encryption_key)?;
+            if let Ok(raw) = mempool::fetch_raw_tx(http,&config.cipherscan_api_url,&txid).await {
+                if let Ok(outputs) = decrypt::try_decrypt_all_outputs_ivk(&raw,&ufvk) {
+                    let amount: i64 = outputs.iter().filter(|o|Some(hex::encode(o.recipient_raw))==invoice.orchard_receiver_hex).map(|o|o.amount_zatoshis as i64).sum();
+                    if amount>0 {
+                        let mut totals=HashMap::new(); totals.insert(id,(invoice,amount));
+                        invoice_detection::apply_mempool_invoice_totals(pool,webhook_http,config,&txid,&totals).await?;
+                    }
+                }
+            }
+        }
+    }
     let pending = invoices::get_pending_invoices(pool).await?;
 
     // Confirm detected invoices (uses direct txid lookup, no block scanning)
@@ -525,11 +570,7 @@ async fn scan_blocks(
                 match confirmed_payment_total(pool, http, &config.cipherscan_api_url, &invoice.id)
                     .await
                 {
-                    Ok(total)
-                        if total
-                            >= (invoice.price_zatoshis as f64 * decrypt::SLIPPAGE_TOLERANCE)
-                                as i64 =>
-                    {
+                    Ok(total) if total >= invoice.minimum_payment_zatoshis() => {
                         let mut invoice = invoice.clone();
                         invoice.received_zatoshis = total;
                         let invoice = &invoice;
@@ -553,19 +594,7 @@ async fn scan_blocks(
                             );
                             on_invoice_confirmed(pool, webhook_http, config, invoice).await;
 
-                            // Scan for ZIP 321 fee output that mempool path may have missed
-                            if config.fee_enabled() {
-                                match mempool::fetch_raw_tx(http, &config.cipherscan_api_url, txid)
-                                    .await
-                                {
-                                    Ok(raw_hex) => {
-                                        try_detect_fee(pool, config, &raw_hex, &invoice.id).await;
-                                    }
-                                    Err(e) => {
-                                        tracing::debug!(txid, error = %e, "Could not fetch raw tx for fee scan");
-                                    }
-                                }
-                            }
+
                         }
                     }
                     Ok(_) => {}
@@ -711,6 +740,7 @@ async fn scan_blocks(
             }
 
             for (invoice_id, (invoice, tx_total)) in &invoice_totals {
+        if !crate::crosschain::security::accepts_payment(pool, invoice_id, txid).await? { continue; }
                 let dust_min = std::cmp::max(
                     (invoice.price_zatoshis as f64 * decrypt::DUST_THRESHOLD_FRACTION) as i64,
                     decrypt::DUST_THRESHOLD_MIN_ZATOSHIS,
@@ -728,7 +758,7 @@ async fn scan_blocks(
                 let new_received =
                     invoices::record_payment(pool, invoice_id, txid, *tx_total).await?;
 
-                let min = (invoice.price_zatoshis as f64 * decrypt::SLIPPAGE_TOLERANCE) as i64;
+                let min = invoice.minimum_payment_zatoshis();
 
                 if new_received >= min
                     && (invoice.status == "pending" || invoice.status == "underpaid")
@@ -739,7 +769,7 @@ async fn scan_blocks(
                         metrics::global().record_payment_detected();
                         // Confirmation is performed on the next scan after checking
                         // every contributing transaction, including mempool top-ups.
-                        try_detect_fee(pool, config, &raw_hex, invoice_id).await;
+                        try_detect_fee(pool, config, &raw_hex, invoice_id, None).await;
                     }
                 } else if new_received < min && invoice.status == "pending" {
                     invoices::mark_underpaid(pool, invoice_id, new_received, txid).await?;
@@ -951,16 +981,14 @@ async fn on_invoice_confirmed(
         }
     }
 
+    if invoice.memo_code.starts_with("SETTLE-") { return; }
     if !config.fee_enabled() {
         return;
     }
 
-    let fee_rate = match billing::get_effective_fee_rate(pool, &invoice.merchant_id, config).await {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::error!(error = %e, "Failed to get merchant fee rate, using default");
-            config.fee_rate
-        }
+    let fee_rate = match crate::referrals::service_bps(pool, &invoice.id).await {
+        Ok(bps) => bps as f64 / 10000.0,
+        Err(e) => { tracing::error!(error=%e,"Missing invoice fee policy"); return; }
     };
 
     let fee_amount = invoice.price_zec * fee_rate;
@@ -1313,7 +1341,8 @@ async fn mark_luma_failed(pool: &SqlitePool, invoice_id: &str) {
 
 /// After a merchant payment is detected, try to decrypt the same tx against
 /// the CipherPay fee UFVK to check if the fee output was included (ZIP 321).
-async fn try_detect_fee(pool: &SqlitePool, config: &Config, raw_hex: &str, invoice_id: &str) {
+async fn try_detect_fee(pool: &SqlitePool, config: &Config, raw_hex: &str, invoice_id: &str, confirmed_txid: Option<&str>) {
+    let Some(txid)=confirmed_txid else { return; };
     let fee_ufvk = match &config.fee_ufvk {
         Some(u) => u,
         None => return,
@@ -1323,15 +1352,10 @@ async fn try_detect_fee(pool: &SqlitePool, config: &Config, raw_hex: &str, invoi
 
     match decrypt::try_decrypt_all_outputs(raw_hex, fee_ufvk) {
         Ok(outputs) => {
-            for output in &outputs {
-                if output.memo.starts_with(&fee_memo_prefix) {
-                    tracing::info!(
-                        invoice_id,
-                        fee_zec = output.amount_zec,
-                        "Fee auto-collected via ZIP 321"
-                    );
-                    let _ = billing::mark_fee_collected(pool, invoice_id).await;
-                    return;
+            let units: i64=outputs.iter().filter(|o|o.memo==fee_memo_prefix).map(|o|o.amount_zatoshis as i64).sum();
+            if units>0 {
+                if let Err(e)=billing::record_direct_receipt(pool,invoice_id,txid,units).await {
+                    tracing::error!(error=%e,invoice_id,"Could not record confirmed fee receipt");
                 }
             }
         }
@@ -1366,10 +1390,11 @@ mod payment_confirmation_tests {
                 let mut buf = [0u8; 2048];
                 let n = stream.read(&mut buf).unwrap();
                 let request = String::from_utf8_lossy(&buf[..n]);
+                assert!(request.starts_with("GET /v1/transactions/"));
                 let body = if request.contains("/first ") {
-                    "{\"confirmations\":0,\"block_height\":100}"
+                    "{\"data\":{\"confirmations\":0,\"block_height\":100},\"meta\":{}}"
                 } else {
-                    "{\"confirmations\":2}"
+                    "{\"data\":{\"confirmations\":2},\"meta\":{}}"
                 };
                 write!(stream,"HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
             }

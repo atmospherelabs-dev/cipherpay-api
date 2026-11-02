@@ -64,6 +64,12 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
     })
     .await?;
 
+    run_tracked_migration(&pool, "payment_email_preferences_v2026_10_14", || {
+        migrate_payment_email_preferences(&pool)
+    })
+    .await?;
+    crate::email::migrate_payment_email_queue(&pool).await?;
+
     run_tracked_migration(&pool, "passkey_auth_v2026_04_20", || async {
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS passkey_credentials (
@@ -344,5 +350,98 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
         Ok(())
     }).await?;
 
+    run_tracked_migration(&pool, "crosschain_v2026_10_03", || {
+        crate::crosschain::migrate(&pool)
+    })
+    .await?;
+
+    run_tracked_migration(&pool, "crosschain_fees_v2026_10_05", || {
+        crate::crosschain::fees::migrate(&pool)
+    })
+    .await?;
+
+    run_tracked_migration(&pool, "crosschain_settlements_v2026_10_06", || {
+        crate::crosschain::fees::migrate_settlements(&pool)
+    })
+    .await?;
+
+    run_tracked_migration(&pool, "checkout_security_v2026_10_06", || {
+        crate::crosschain::security::migrate(&pool)
+    }).await?;
+
+    run_tracked_migration(&pool, "referrals_v2026_10_06", || crate::referrals::migrate(&pool)).await?;
+
+    run_tracked_migration(&pool, "referral_guardrails_v2026_10_06", || crate::referrals::guardrails::migrate(&pool)).await?;
+
+    run_tracked_migration(&pool, "crosschain_controls_v2026_10_06", || crate::crosschain::operations::migrate(&pool)).await?;
+
+    run_tracked_migration(&pool, "crosschain_provider_handled_v2026_10_14", || crate::crosschain::fees::migrate_provider_handled(&pool)).await?;
+
     Ok(pool)
+}
+
+async fn migrate_payment_email_preferences(pool: &SqlitePool) -> anyhow::Result<()> {
+    sqlx::query(
+        "ALTER TABLE merchants ADD COLUMN payment_email_notifications INTEGER NOT NULL DEFAULT 0
+         CHECK (payment_email_notifications IN (0, 1))",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod payment_email_preference_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn existing_merchants_default_to_no_payment_email_and_migration_is_tracked() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query("CREATE TABLE merchants (id TEXT PRIMARY KEY)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO merchants (id) VALUES ('existing')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let name = "payment_email_preferences_v2026_10_14";
+        run_tracked_migration(&pool, name, || migrate_payment_email_preferences(&pool))
+            .await
+            .unwrap();
+        let enabled: bool = sqlx::query_scalar(
+            "SELECT payment_email_notifications FROM merchants WHERE id = 'existing'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(!enabled);
+        run_tracked_migration(&pool, name, || migrate_payment_email_preferences(&pool))
+            .await
+            .unwrap();
+        assert!(
+            sqlx::query("UPDATE merchants SET payment_email_notifications = 2")
+                .execute(&pool)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn preference_migration_failures_are_reported_and_not_marked_applied() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let name = "payment_email_preferences_v2026_10_14";
+        assert!(
+            run_tracked_migration(&pool, name, || migrate_payment_email_preferences(&pool))
+                .await
+                .is_err()
+        );
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM schema_migrations WHERE name = ?")
+                .bind(name)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "failed");
+    }
 }

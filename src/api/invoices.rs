@@ -49,7 +49,8 @@ pub async fn create(
         }
     };
 
-    let fee_config = crate::billing::fee_config_for_merchant(pool.get_ref(), &merchant.id, &config).await;
+    let fee_config =
+        crate::billing::fee_config_for_merchant(pool.get_ref(), &merchant.id, &config).await;
 
     match invoices::create_invoice(
         pool.get_ref(),
@@ -62,7 +63,11 @@ pub async fn create(
     )
     .await
     {
-        Ok(resp) => HttpResponse::Created().json(resp),
+        Ok(resp) => {
+            let url=format!("{}/pay/{}#checkout={}",config.frontend_url.as_deref().unwrap_or("https://cipherpay.app"),resp.invoice_id,resp.checkout_token);
+            let mut value=serde_json::to_value(resp).unwrap(); value["checkout_url"]=serde_json::json!(url);
+            HttpResponse::Created().insert_header(("Cache-Control","no-store")).json(value)
+        },
         Err(e) => {
             tracing::error!(error = %e, "Failed to create invoice");
             HttpResponse::InternalServerError().json(serde_json::json!({
@@ -96,6 +101,14 @@ pub async fn get(pool: web::Data<SqlitePool>, path: web::Path<String>) -> HttpRe
             let received_zec = invoices::zatoshis_to_zec(inv.received_zatoshis);
             let overpaid =
                 inv.received_zatoshis > inv.price_zatoshis + 1000 && inv.price_zatoshis > 0;
+
+            let is_crosschain = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM crosschain_attempts WHERE invoice_id=?)",
+            )
+            .bind(&inv.id)
+            .fetch_one(pool.get_ref())
+            .await
+            .unwrap_or(false);
 
             let merchant_origin =
                 get_merchant_webhook_origin(pool.get_ref(), &inv.merchant_id).await;
@@ -179,6 +192,7 @@ pub async fn get(pool: web::Data<SqlitePool>, path: web::Path<String>) -> HttpRe
                 "price_zatoshis": inv.price_zatoshis,
                 "received_zatoshis": inv.received_zatoshis,
                 "overpaid": overpaid,
+                "is_crosschain": is_crosschain,
                 "is_event": is_event,
                 "is_luma": is_luma,
                 "is_donation": inv.is_donation == 1,
@@ -275,7 +289,9 @@ pub async fn finalize(
     };
 
     let fee_config = match invoices::get_invoice(pool.get_ref(), &invoice_id).await {
-        Ok(Some(inv)) => crate::billing::fee_config_for_merchant(pool.get_ref(), &inv.merchant_id, &config).await,
+        Ok(Some(inv)) => {
+            crate::billing::fee_config_for_merchant(pool.get_ref(), &inv.merchant_id, &config).await
+        }
         _ => None,
     };
 

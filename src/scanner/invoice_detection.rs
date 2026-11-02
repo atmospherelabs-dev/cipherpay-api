@@ -74,6 +74,7 @@ pub(super) async fn apply_mempool_invoice_totals(
     let mut newly_detected = Vec::new();
 
     for (invoice_id, (invoice, tx_total)) in invoice_totals {
+        if !crate::crosschain::security::accepts_payment(pool, invoice_id, txid).await? { continue; }
         let dust_min = std::cmp::max(
             (invoice.price_zatoshis as f64 * super::decrypt::DUST_THRESHOLD_FRACTION) as i64,
             super::decrypt::DUST_THRESHOLD_MIN_ZATOSHIS,
@@ -85,7 +86,7 @@ pub(super) async fn apply_mempool_invoice_totals(
 
         let new_received = invoices::record_payment(pool, invoice_id, txid, *tx_total).await?;
 
-        let min = (invoice.price_zatoshis as f64 * super::decrypt::SLIPPAGE_TOLERANCE) as i64;
+        let min = invoice.minimum_payment_zatoshis();
 
         if new_received >= min {
             let changed = invoices::mark_detected(pool, invoice_id, txid, new_received).await?;

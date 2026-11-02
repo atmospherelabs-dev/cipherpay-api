@@ -13,7 +13,7 @@ pub async fn get_invoice(pool: &SqlitePool, id: &str) -> anyhow::Result<Option<I
          i.refund_address, i.status, i.detected_txid, i.detected_at,
          i.confirmed_at, i.refunded_at, i.refund_txid, i.expires_at, i.purge_after, i.created_at,
          i.orchard_receiver_hex, i.diversifier_index,
-         i.price_zatoshis, i.received_zatoshis,
+         i.exact_payment, i.price_zatoshis, i.received_zatoshis,
          i.subscription_id,
          i.payment_link_id, i.is_donation, i.campaign_counted,
          i.confirmed_rate, i.confirmed_fiat_amount
@@ -43,7 +43,7 @@ pub async fn get_invoice_by_memo(
          i.refund_address, i.status, i.detected_txid, i.detected_at,
          i.confirmed_at, i.refunded_at, i.refund_txid, i.expires_at, i.purge_after, i.created_at,
          i.orchard_receiver_hex, i.diversifier_index,
-         i.price_zatoshis, i.received_zatoshis,
+         i.exact_payment, i.price_zatoshis, i.received_zatoshis,
          i.subscription_id,
          i.payment_link_id, i.is_donation, i.campaign_counted,
          i.confirmed_rate, i.confirmed_fiat_amount
@@ -82,7 +82,7 @@ pub async fn get_pending_invoices(pool: &SqlitePool) -> anyhow::Result<Vec<Invoi
          refund_address, status, detected_txid, detected_at,
          confirmed_at, NULL AS refunded_at, NULL AS refund_txid, expires_at, purge_after, created_at,
          orchard_receiver_hex, diversifier_index,
-         price_zatoshis, received_zatoshis,
+         exact_payment, price_zatoshis, received_zatoshis,
          subscription_id,
          payment_link_id, is_donation, campaign_counted,
          confirmed_rate, confirmed_fiat_amount

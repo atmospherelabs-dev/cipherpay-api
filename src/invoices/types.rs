@@ -34,6 +34,9 @@ pub struct Invoice {
     #[serde(skip_serializing)]
     #[allow(dead_code)]
     pub diversifier_index: Option<i64>,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub exact_payment: bool,
     pub price_zatoshis: i64,
     pub received_zatoshis: i64,
     pub subscription_id: Option<String>,
@@ -68,6 +71,7 @@ pub struct CreateInvoiceRequest {
 
 #[derive(Debug, Serialize)]
 pub struct CreateInvoiceResponse {
+    pub checkout_token: String,
     pub invoice_id: String,
     pub memo_code: String,
     pub amount: f64,
@@ -85,4 +89,14 @@ pub struct CreateInvoiceResponse {
 pub struct FeeConfig {
     pub fee_address: String,
     pub fee_rate: f64,
+}
+
+impl Invoice {
+    pub fn minimum_payment_zatoshis(&self) -> i64 {
+        if self.exact_payment {
+            self.price_zatoshis
+        } else {
+            (self.price_zatoshis as f64 * crate::scanner::decrypt::SLIPPAGE_TOLERANCE) as i64
+        }
+    }
 }

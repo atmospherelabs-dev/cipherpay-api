@@ -790,6 +790,7 @@ pub async fn rescan_fees(
             }
         };
 
+        if !matches!(crate::scanner::blocks::check_tx_confirmed(http.get_ref(),&config.cipherscan_api_url,txid).await,Ok(true)) { skipped+=1; continue; }
         let raw_hex = match crate::scanner::mempool::fetch_raw_tx(
             http.get_ref(),
             &config.cipherscan_api_url,
@@ -808,9 +809,9 @@ pub async fn rescan_fees(
         let fee_memo_prefix = format!("FEE-{}", invoice_id);
         match crate::scanner::decrypt::try_decrypt_all_outputs(&raw_hex, &fee_ufvk) {
             Ok(outputs) => {
-                let found = outputs.iter().any(|o| o.memo.starts_with(&fee_memo_prefix));
-                if found {
-                    if let Ok(()) = crate::billing::mark_fee_collected(pool.get_ref(), invoice_id).await {
+                let units: i64 = outputs.iter().filter(|o| o.memo == fee_memo_prefix).map(|o|o.amount_zatoshis as i64).sum();
+                if units>0 {
+                    if let Ok(()) = crate::billing::record_direct_receipt(pool.get_ref(), invoice_id, txid, units).await {
                         collected += 1;
                         details.push(serde_json::json!({
                             "invoice_id": invoice_id,

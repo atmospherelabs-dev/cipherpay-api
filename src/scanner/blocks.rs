@@ -7,7 +7,7 @@ struct BlockchainInfoResponse {
     headers: Option<u64>,
 }
 
-/// Simple circuit breaker for CipherScan API resilience.
+/// Simple circuit breaker for ZecBlock API resilience.
 /// Opens after `FAILURE_THRESHOLD` consecutive failures, stays open for
 /// `COOLDOWN_SECS`, then transitions to half-open (allows one probe request).
 pub struct CircuitBreaker {
@@ -54,27 +54,16 @@ impl CircuitBreaker {
             tracing::warn!(
                 failures = prev + 1,
                 cooldown_secs = COOLDOWN_SECS,
-                "CipherScan circuit breaker OPEN"
+                "ZecBlock circuit breaker OPEN"
             );
         }
     }
 }
 
-/// Gets the current chain tip height from CipherScan API.
+/// Gets the current chain tip height from ZecBlock API.
 pub async fn get_chain_height(http: &reqwest::Client, api_url: &str) -> anyhow::Result<u64> {
-    let url = format!("{}/api/blockchain-info", api_url);
-    let response = http.get(&url).send().await?;
-    let status = response.status();
-    if !status.is_success() {
-        return Err(anyhow::anyhow!(
-            "CipherScan API returned HTTP {} for blockchain-info",
-            status.as_u16()
-        ));
-    }
-    let resp: BlockchainInfoResponse = response
-        .json()
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to parse blockchain-info JSON: {e}"))?;
+    let resp: BlockchainInfoResponse =
+        super::api::get(http, api_url, "network/blockchain-info").await?;
 
     resp.blocks
         .or(resp.headers)
@@ -90,7 +79,7 @@ async fn fetch_single_block_txids(
     api_url: &str,
     height: u64,
 ) -> anyhow::Result<Vec<String>> {
-    let url = format!("{}/api/block/{}", api_url, height);
+    let path = format!("blocks/{height}");
     let mut last_err = None;
 
     for attempt in 0..BLOCK_FETCH_RETRIES {
@@ -99,31 +88,10 @@ async fn fetch_single_block_txids(
             tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
         }
 
-        let resp = match http.get(&url).send().await {
-            Ok(r) => {
-                let status = r.status();
-                if !status.is_success() {
-                    last_err = Some(anyhow::anyhow!(
-                        "CipherScan API returned HTTP {} for block {}",
-                        status.as_u16(),
-                        height
-                    ));
-                    continue;
-                }
-                match r.json::<serde_json::Value>().await {
-                    Ok(v) => v,
-                    Err(e) => {
-                        last_err = Some(anyhow::anyhow!(
-                            "Failed to parse block {} response: {}",
-                            height,
-                            e
-                        ));
-                        continue;
-                    }
-                }
-            }
+        let resp = match super::api::get::<serde_json::Value>(http, api_url, &path).await {
+            Ok(resp) => resp,
             Err(e) => {
-                last_err = Some(anyhow::anyhow!("Failed to fetch block {}: {}", height, e));
+                last_err = Some(e);
                 continue;
             }
         };
@@ -220,17 +188,8 @@ pub async fn check_tx_confirmed(
     api_url: &str,
     txid: &str,
 ) -> anyhow::Result<bool> {
-    let url = format!("{}/api/tx/{}", api_url, txid);
-    let response = http.get(&url).send().await?;
-    let status = response.status();
-    if !status.is_success() {
-        return Err(anyhow::anyhow!(
-            "CipherScan API returned HTTP {} for tx {}",
-            status.as_u16(),
-            txid
-        ));
-    }
-    let resp: serde_json::Value = response.json().await?;
+    let resp: serde_json::Value =
+        super::api::get(http, api_url, &format!("transactions/{txid}")).await?;
 
     let confirmed = transaction_confirmed(&resp);
 

@@ -58,7 +58,36 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
 
     cfg.service(
         web::scope("/api")
+            .route("/admin/crosschain", web::get().to(crate::crosschain::operations::admin_issues))
+            .route("/admin/crosschain/{id}/retry", web::post().to(crate::crosschain::operations::retry))
             .route("/health", web::get().to(system::health))
+            .route("/invoices/{id}/checkout-access", web::get().to(crate::crosschain::security::access))
+            .service(
+                web::resource("/crosschain/assets")
+                    .wrap(Governor::new(&public_read_limit))
+                    .route(web::get().to(crate::crosschain::assets)),
+            )
+            .service(
+                web::resource("/invoices/{id}/crosschain/send")
+                    .wrap(Governor::new(&checkout_rate_limit))
+                    .route(web::post().to(crate::crosschain::wallet_send)),
+            )
+            .service(
+                web::resource("/invoices/{id}/crosschain/eligibility")
+                    .wrap(Governor::new(&checkout_rate_limit))
+                    .route(web::get().to(crate::crosschain::eligibility)),
+            )
+            .service(
+                web::resource("/invoices/{id}/crosschain/preview")
+                    .wrap(Governor::new(&checkout_rate_limit))
+                    .route(web::post().to(crate::crosschain::preview)),
+            )
+            .service(
+                web::resource("/invoices/{id}/crosschain")
+                    .wrap(Governor::new(&checkout_rate_limit))
+                    .route(web::get().to(crate::crosschain::status))
+                    .route(web::post().to(crate::crosschain::create)),
+            )
             // Registration POST is a Resource (not a Route inside the parent
             // scope) so the rate limiter actually runs. actix-web 4's
             // `Route::wrap` is a no-op for short-circuiting middleware like
@@ -73,6 +102,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .service(
                 web::scope("/merchants")
                     .route("/me", web::get().to(auth::me))
+                    .route("/me/referral", web::post().to(crate::referrals::apply))
                     .route("/me", web::patch().to(auth::update_me))
                     .route("/me/invoices", web::get().to(auth::my_invoices))
                     .route(
@@ -692,6 +722,7 @@ async fn checkout(
                         .collect();
                     checkout_url = format!("{}?return_url={}", checkout_url, encoded);
                 }
+                checkout_url.push_str(&format!("#checkout={}", resp.checkout_token));
                 obj.insert(
                     "checkout_url".to_string(),
                     serde_json::Value::String(checkout_url),

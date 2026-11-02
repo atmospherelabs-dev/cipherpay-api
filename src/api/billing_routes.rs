@@ -7,14 +7,38 @@ pub async fn billing_summary(
     req: actix_web::HttpRequest,
     pool: web::Data<SqlitePool>,
     config: web::Data<crate::config::Config>,
+    gateway: web::Data<crate::crosschain::Gateway>,
 ) -> actix_web::HttpResponse {
     let merchant = match auth::require_session(&req, pool.get_ref()).await {
         Ok(merchant) => merchant,
         Err(response) => return response,
     };
 
+    let referrals = match crate::referrals::summary(&pool,&merchant.id,&config.encryption_key).await {
+        Ok(v)=>v, Err(_)=>return actix_web::HttpResponse::InternalServerError().finish(),
+    };
+    let pending_fees: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM deferred_payment_fees WHERE merchant_id=? AND state='verifying'")
+        .bind(&merchant.id).fetch_one(pool.get_ref()).await.unwrap_or(0);
+    let crosschain = match crate::crosschain::fees::merchant_summary(
+        pool.get_ref(),
+        &merchant.id,
+        &config.encryption_key,
+        gateway.collects_fees(),
+    )
+    .await
+    {
+        Ok(summary) => summary,
+        Err(e) => {
+            tracing::error!(error=%e, "Failed to load cross-chain billing");
+            return actix_web::HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error":"Could not load billing"}));
+        }
+    };
     if !config.fee_enabled() {
         return actix_web::HttpResponse::Ok().json(serde_json::json!({
+            "crosschain": crosschain,
+            "referrals": referrals,
+            "verifying_payment_fees": pending_fees,
             "fee_enabled": false,
             "fee_rate": 0.0,
             "billing_status": "active",
@@ -24,6 +48,9 @@ pub async fn billing_summary(
 
     match crate::billing::get_billing_summary(pool.get_ref(), &merchant.id, &config).await {
         Ok(summary) => actix_web::HttpResponse::Ok().json(serde_json::json!({
+            "crosschain": crosschain,
+            "referrals": referrals,
+            "verifying_payment_fees": pending_fees,
             "fee_enabled": true,
             "fee_rate": summary.fee_rate,
             "trust_tier": summary.trust_tier,
@@ -198,8 +225,11 @@ pub async fn delete_account(
     match crate::merchants::delete_merchant(pool.get_ref(), &merchant.id).await {
         Ok(()) => actix_web::HttpResponse::Ok().json(serde_json::json!({
             "status": "deleted",
-            "message": "Your account and all associated data have been permanently deleted."
+            "message": "Your account has been deleted. Minimal referral eligibility and earned commission records are retained."
         })),
+        Err(e) if e.downcast_ref::<crate::referrals::guardrails::PendingAccountFees>().is_some() => {
+            actix_web::HttpResponse::Conflict().json(serde_json::json!({"error":e.to_string()}))
+        }
         Err(e) => {
             tracing::error!(error = %e, "Failed to delete merchant account");
             actix_web::HttpResponse::InternalServerError().json(serde_json::json!({

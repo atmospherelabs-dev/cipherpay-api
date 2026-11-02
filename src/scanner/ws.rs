@@ -13,6 +13,7 @@ pub struct MempoolPush {
 
 /// Converts an HTTP(S) API URL to its WebSocket equivalent.
 pub fn api_url_to_ws(api_url: &str) -> String {
+    let api_url = super::api::base_url(api_url);
     if api_url.starts_with("https://") {
         api_url.replacen("https://", "wss://", 1)
     } else if api_url.starts_with("http://") {
@@ -22,14 +23,14 @@ pub fn api_url_to_ws(api_url: &str) -> String {
     }
 }
 
-/// Long-running task: connect to CipherScan WebSocket, subscribe to raw_mempool,
+/// Long-running task: connect to ZecBlock WebSocket, subscribe to raw_mempool,
 /// and forward mempool transactions with raw_hex through the channel.
 /// Reconnects automatically on disconnect with exponential backoff.
 pub async fn run(ws_url: String, service_key: String, tx: mpsc::Sender<MempoolPush>) {
     let mut delay = std::time::Duration::from_secs(RECONNECT_MIN_SECS);
 
     loop {
-        tracing::info!(url = %ws_url, "[WS] Connecting to CipherScan...");
+        tracing::info!(url = %ws_url, "[WS] Connecting to ZecBlock...");
 
         match connect(&ws_url, &service_key).await {
             Ok(mut stream) => {
@@ -126,4 +127,19 @@ fn parse_mempool_tx(text: &str) -> Option<MempoolPush> {
         txid,
         raw_hex: raw_hex.to_string(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn websocket_uses_host_root_without_http_version_prefix() {
+        assert_eq!(
+            super::api_url_to_ws("https://api.zecblock.com/v1/"),
+            "wss://api.zecblock.com"
+        );
+        assert_eq!(
+            super::api_url_to_ws("http://localhost:3002/"),
+            "ws://localhost:3002"
+        );
+    }
 }
