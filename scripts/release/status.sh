@@ -13,7 +13,8 @@ if ! test -f "$info"; then
 fi
 
 sha=$(jq -r '.source_head // empty' "$info")
-dirty=$(jq -r '.dirty // .source_dirty // "unknown"' "$info")
+# Not `//`: jq treats false as missing there, which hid "dirty": false.
+dirty=$(jq -r 'if has("dirty") then .dirty elif has("source_dirty") then .source_dirty else "unknown" end' "$info")
 echo "commit:  $sha (dirty: $dirty)"
 if test "$dirty" != false; then
     echo "drift:   DIRTY (running code is not a committed revision)"
