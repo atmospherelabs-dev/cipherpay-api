@@ -1,0 +1,51 @@
+name: Release Build
+
+# Builds the production binary for every commit on main, so the server never
+# compiles (1 vCPU / 1 GB) and every deployed binary maps to a clean main commit.
+# scripts/release/stage.sh downloads these assets by commit SHA.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-build-${{ github.sha }}
+
+jobs:
+  build:
+    # Matches the CipherPay hosts (Ubuntu 24.04, glibc 2.39, OpenSSL 3).
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --locked
+      - run: cargo build --release --locked
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp target/release/cipherpay dist/cipherpay-linux-x86_64
+          git archive --format=tar.gz -o dist/source.tar.gz "$GITHUB_SHA"
+          cat > dist/build-info.json <<EOF
+          {
+            "source_head": "$GITHUB_SHA",
+            "ref": "$GITHUB_REF",
+            "dirty": false,
+            "rustc": "$(rustc --version)",
+            "runner": "ubuntu-24.04",
+            "run_url": "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID",
+            "built_at": "$(date -u +%FT%TZ)"
+          }
+          EOF
+          (cd dist && sha256sum cipherpay-linux-x86_64 source.tar.gz build-info.json > SHA256SUMS)
+      - name: Publish build-<sha> release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="build-$GITHUB_SHA"
+          gh release create "$tag" dist/* --target "$GITHUB_SHA" --prerelease \
+            --title "Build ${GITHUB_SHA::7}" \
+            --notes "Production build of $GITHUB_SHA from main. Deploy with scripts/release/stage.sh $GITHUB_SHA."
