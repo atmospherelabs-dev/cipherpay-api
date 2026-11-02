@@ -14,8 +14,12 @@ pub async fn billing_summary(
         Err(response) => return response,
     };
 
-    let referrals = match crate::referrals::summary(&pool,&merchant.id,&config.encryption_key).await {
-        Ok(v)=>v, Err(_)=>return actix_web::HttpResponse::InternalServerError().finish(),
+    let referrals = if config.referrals_enabled {
+        match crate::referrals::summary(&pool,&merchant.id,&config.encryption_key).await {
+            Ok(v)=>v, Err(_)=>return actix_web::HttpResponse::InternalServerError().finish(),
+        }
+    } else {
+        serde_json::Value::Null
     };
     let pending_fees: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM deferred_payment_fees WHERE merchant_id=? AND state='verifying'")
         .bind(&merchant.id).fetch_one(pool.get_ref()).await.unwrap_or(0);

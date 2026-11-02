@@ -31,6 +31,9 @@ pub struct Config {
     pub checkout_service_key: Option<String>,
     pub webauthn_rp_id: String,
     pub webauthn_rp_origin: String,
+    /// Referral program (codes, applying a code, billing summary). Off unless
+    /// REFERRALS_ENABLED=true; fee-policy tables and migrations run either way.
+    pub referrals_enabled: bool,
 }
 
 impl Config {
@@ -40,6 +43,7 @@ impl Config {
             .or_else(|_| env::var("CIPHERSCAN_API_URL"))
             .unwrap_or_else(|_| default_explorer_url(&network).into());
         Ok(Self {
+            referrals_enabled: flag_enabled(env::var("REFERRALS_ENABLED").ok().as_deref()),
             database_url: env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:cipherpay.db".into()),
             cipherscan_api_url: api_url.trim_end_matches('/').to_string(),
             network,
@@ -151,5 +155,23 @@ mod tests {
             "https://api.testnet.zecblock.com"
         );
         assert_eq!(default_explorer_url("mainnet"), "https://api.zecblock.com");
+    }
+}
+
+fn flag_enabled(value: Option<&str>) -> bool {
+    matches!(value.map(str::trim), Some("1" | "true" | "TRUE" | "yes"))
+}
+
+#[cfg(test)]
+mod flag_tests {
+    use super::flag_enabled;
+
+    #[test]
+    fn referrals_flag_defaults_off() {
+        assert!(!flag_enabled(None));
+        assert!(!flag_enabled(Some("")));
+        assert!(!flag_enabled(Some("false")));
+        assert!(flag_enabled(Some("true")));
+        assert!(flag_enabled(Some(" 1 ")));
     }
 }

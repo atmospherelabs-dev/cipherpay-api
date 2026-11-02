@@ -12,3 +12,9 @@
 
 # Internal docs (referral program, strategy)
 docs/REFERRAL-*
+
+# Referral source is public; it is switched off in production via REFERRALS_ENABLED.
+# Override global *REFERRAL* excludes so it is always committed.
+!src/referrals.rs
+!src/referrals/
+!src/referrals/**
