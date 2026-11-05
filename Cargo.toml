@@ -31,15 +31,17 @@ reqwest = { version = "0.12", features = ["json"] }
 # WebSocket client (for ZecBlock real-time mempool push)
 tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
 
-# Zcash crates (NU6.3 / Ironwood support)
+# Zcash crates (NU7 / consensus branch 0x77190AD9, Ironwood support)
 # Zakura Common: performance-optimized forks of librustzcash (1.5x trial decryption,
 # 21x Sinsemilla). Same APIs, lib names unchanged — `use zcash_primitives::...` and
-# `use orchard::...` still work.
-zcash_primitives = { package = "zakura-primitives", version = "1.0.1", default-features = false }
-zcash_note_encryption = "0.4.2"
-orchard = { package = "zakura-orchard", version = "1.0.1", default-features = false, features = ["std"] }
-zcash_address = "0.13"
-zcash_protocol = "0.10"
+# `use orchard::...` still work. Keep every Zcash crate on the same Zakura release so
+# BranchId, NetworkType and note-encryption traits are one set of types; mixing in
+# upstream zcash_protocol/zcash_address/zcash_note_encryption breaks that.
+zcash_primitives = { package = "zakura-primitives", version = "5.2.0", default-features = false }
+zcash_note_encryption = { package = "zakura-note-encryption", version = "5.2.0" }
+orchard = { package = "zakura-orchard", version = "5.2.0", default-features = false, features = ["std", "backend-halo2", "zip32-addresses"] }
+zcash_address = { package = "zakura-address", version = "5.2.0" }
+zcash_protocol = { package = "zakura-protocol", version = "5.2.0" }
 
 # WebAuthn / Passkeys
 webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }

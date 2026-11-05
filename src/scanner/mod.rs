@@ -463,6 +463,24 @@ async fn confirmed_fiat(
 const MAX_BLOCKS_PER_SCAN: u64 = 100;
 const MAX_BLOCKS_CATCHUP: u64 = 1000;
 
+/// Shortest target block spacing the chain uses. NU7 cuts the post-Blossom 75 s
+/// target by `NU7_POW_TARGET_SPACING_RATIO` (3) to 25 s. Converting elapsed time to a
+/// block count must assume the *shortest* spacing: overestimating the number of
+/// blocks only rescans a little more, while underestimating it skips blocks that
+/// may hold payments for pending invoices.
+const MIN_TARGET_BLOCK_SPACING_SECS: u64 = 25;
+/// Extra blocks rescanned before the oldest relevant item (about two hours at 25 s),
+/// covering clock skew and blocks arriving faster than the target.
+const RELEVANCE_SAFETY_MARGIN_BLOCKS: u64 = 300;
+
+/// Lowest height that can contain a payment for an item created `secs_ago` seconds
+/// before the chain tip at `current_height`.
+fn earliest_relevant_height(current_height: u64, secs_ago: u64) -> u64 {
+    let blocks_ago =
+        secs_ago.div_ceil(MIN_TARGET_BLOCK_SPACING_SECS) + RELEVANCE_SAFETY_MARGIN_BLOCKS;
+    current_height.saturating_sub(blocks_ago)
+}
+
 /// Find the earliest `created_at` across pending invoices and active campaigns.
 fn earliest_relevant_timestamp(
     pending: &[invoices::Invoice],
@@ -644,7 +662,8 @@ async fn scan_blocks(
 
     // When items exist, only scan from the oldest relevant creation time.
     // No point scanning blocks from before any pending invoice or campaign existed.
-    // Zcash averages ~75s per block; add a 100-block safety margin.
+    // The estimate assumes NU7's 25 s target spacing plus a safety margin, so it never
+    // skips forward past a block that could contain a relevant payment.
     let start_height = {
         let oldest_ts = earliest_relevant_timestamp(&pending, &active_campaigns);
         if let Some(ts) = oldest_ts {
@@ -653,8 +672,7 @@ async fn scan_blocks(
                 let secs_ago = (now - created.with_timezone(&chrono::Utc))
                     .num_seconds()
                     .max(0) as u64;
-                let blocks_ago = secs_ago / 75 + 100;
-                let earliest_block = current_height.saturating_sub(blocks_ago);
+                let earliest_block = earliest_relevant_height(current_height, secs_ago);
                 if earliest_block > persisted_start {
                     tracing::info!(
                         from = persisted_start,
@@ -1412,5 +1430,192 @@ mod payment_confirmation_tests {
             "detected"
         );
         server.join().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod catch_up_window_tests {
+    use super::earliest_relevant_height;
+
+    #[test]
+    fn window_covers_every_block_at_nu7_spacing() {
+        let tip = 3_600_000;
+        // An invoice created 3 hours ago spans 432 NU7 blocks (25 s). The old
+        // 75 s estimate (144 + 100 = 244 blocks) would have skipped ~188 of them.
+        let secs_ago = 3 * 3600;
+        let nu7_blocks = secs_ago / 25;
+        assert!(earliest_relevant_height(tip, secs_ago) <= tip - nu7_blocks);
+        assert!(
+            tip - (secs_ago / 75 + 100) > tip - nu7_blocks,
+            "old estimate was short"
+        );
+
+        // Exact window: ceil(elapsed / 25 s) plus the safety margin.
+        assert_eq!(earliest_relevant_height(tip, 3601), tip - (145 + 300));
+        assert_eq!(earliest_relevant_height(tip, 0), tip - 300);
+    }
+
+    #[test]
+    fn window_never_underflows() {
+        assert_eq!(earliest_relevant_height(50, 10 * 86_400), 0);
+    }
+}
+
+#[cfg(test)]
+mod nu7_block_scan_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    const ACTIVATION_HEIGHT: u64 = 4_465_026;
+    const COINBASE: (&str, &str) = (
+        "98ccf227cfa19e8ad89312500bf724090997443e6ae0656e33b2d5cec99bb608",
+        include_str!("fixtures/nu7_testnet/activation_v6_coinbase_4465026.hex"),
+    );
+    const V5: (&str, &str) = (
+        "a85b0f6a352b9699d4221a93eeadbab457862c4dec2a3ac7ccd0d2f034fc89ea",
+        include_str!("fixtures/nu7_testnet/activation_v5_4465026.hex"),
+    );
+
+    /// Explorer stub serving testnet block 4,465,026 (the NU7 activation block).
+    async fn explorer() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    let mut buf = [0; 1024];
+                    let n = socket.read(&mut buf).await.unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buf[..n]);
+                }
+                let line = String::from_utf8_lossy(&request)
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+                let path = line.split(' ').nth(1).unwrap_or("");
+                let data = match path {
+                    "/v1/network/blockchain-info" => {
+                        serde_json::json!({"blocks": ACTIVATION_HEIGHT})
+                    }
+                    "/v1/blocks/4465026" => serde_json::json!({
+                        "height": ACTIVATION_HEIGHT,
+                        "transactions": [{"txid": COINBASE.0}, {"txid": V5.0}],
+                    }),
+                    p if p == format!("/v1/transactions/{}/raw", COINBASE.0) => {
+                        serde_json::json!({"hex": COINBASE.1.trim()})
+                    }
+                    p if p == format!("/v1/transactions/{}/raw", V5.0) => {
+                        serde_json::json!({"hex": V5.1.trim()})
+                    }
+                    _ => serde_json::Value::Null,
+                };
+                let (status, body) = if data.is_null() {
+                    (404, "{}".to_string())
+                } else {
+                    (
+                        200,
+                        serde_json::json!({"data": data, "meta": {"network": "testnet"}})
+                            .to_string(),
+                    )
+                };
+                let response = format!(
+                    "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        base
+    }
+
+    fn config(api_url: String) -> Config {
+        Config {
+            database_url: "sqlite::memory:".into(),
+            cipherscan_api_url: api_url,
+            network: "testnet".into(),
+            api_host: "127.0.0.1".into(),
+            api_port: 0,
+            mempool_poll_interval_secs: 5,
+            block_poll_interval_secs: 15,
+            encryption_key: String::new(),
+            invoice_expiry_minutes: 30,
+            data_purge_days: 30,
+            coingecko_api_url: "http://127.0.0.1:9".into(),
+            price_cache_secs: 60,
+            allowed_origins: vec![],
+            cookie_domain: None,
+            frontend_url: None,
+            smtp_pass: None,
+            smtp_from: None,
+            fee_ufvk: None,
+            fee_address: None,
+            fee_rate: 0.0,
+            billing_cycle_days_new: 30,
+            billing_cycle_days_standard: 30,
+            admin_key: None,
+            cipherscan_service_key: None,
+            checkout_service_key: None,
+            webauthn_rp_id: "localhost".into(),
+            webauthn_rp_origin: "http://localhost".into(),
+            referrals_enabled: false,
+        }
+    }
+
+    /// With a pending invoice, the block scanner must parse every transaction in
+    /// the NU7 activation block and advance its checkpoint past it. Before the parser
+    /// upgrade, validation failed with "invalid consensus branch id" and the scanner
+    /// retried the same block forever.
+    #[tokio::test]
+    async fn block_scanner_crosses_nu7_activation_with_pending_invoice() {
+        use orchard::keys::{FullViewingKey, SpendingKey};
+        use zcash_address::unified::{Encoding, Fvk, Ufvk};
+
+        let pool = crate::repair_tests::pool().await;
+        crate::repair_tests::merchant(&pool, "m").await;
+        let fvk = FullViewingKey::from(&SpendingKey::from_bytes([7u8; 32]).unwrap());
+        let ufvk = Ufvk::try_from_items(vec![Fvk::Orchard(fvk.to_bytes())])
+            .unwrap()
+            .encode(&zcash_protocol::consensus::NetworkType::Test);
+        sqlx::query("UPDATE merchants SET ufvk = ? WHERE id = 'm'")
+            .bind(&ufvk)
+            .execute(&pool)
+            .await
+            .unwrap();
+        crate::repair_tests::invoice(&pool, "inv", "m").await;
+
+        let config = config(explorer().await);
+        let http = reqwest::Client::new();
+        let seen: SeenTxids = Arc::new(RwLock::new(HashMap::new()));
+        let last_height = Arc::new(RwLock::new(Some(ACTIVATION_HEIGHT - 1)));
+        let mut key_cache = None;
+        let prices = PriceService::new(&config.coingecko_api_url, 60);
+
+        scan_blocks(
+            &config,
+            &pool,
+            &http,
+            &http,
+            &seen,
+            &last_height,
+            &mut key_cache,
+            &prices,
+        )
+        .await
+        .expect("scan of the NU7 activation block must succeed");
+
+        assert_eq!(*last_height.read().await, Some(ACTIVATION_HEIGHT));
+        let persisted: Option<String> =
+            sqlx::query_scalar("SELECT value FROM scanner_state WHERE key = 'last_height'")
+                .fetch_optional(&pool)
+                .await
+                .unwrap();
+        assert_eq!(persisted.as_deref(), Some("4465026"));
+        let invoice = invoices::get_invoice(&pool, "inv").await.unwrap().unwrap();
+        assert_eq!(invoice.status, "pending");
     }
 }

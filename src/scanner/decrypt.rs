@@ -115,8 +115,21 @@ pub fn derive_uivk_from_ufvk(ufvk_str: &str) -> Result<String> {
 pub fn validate_raw_transaction(raw_hex: &str) -> Result<()> {
     let bytes = hex::decode(raw_hex)?;
     anyhow::ensure!(bytes.len() >= 4, "Truncated raw transaction");
-    Transaction::read(&mut Cursor::new(&bytes[..]), BranchId::Nu6_3)?;
+    parse_transaction(&bytes)?;
     Ok(())
+}
+
+/// Parse a raw transaction.
+///
+/// v5 and v6 transactions carry their consensus branch ID in the header (NU6.3 =
+/// `0x37A5165B`, NU7 = `0x77190AD9`) and the parser validates that header value; the
+/// argument below is used only for legacy v4 transactions, which NU7 no longer
+/// accepts. A parse failure is returned as an error, never as "no outputs", so a
+/// future network upgrade the parser does not know is visible instead of silently
+/// hiding payments.
+fn parse_transaction(bytes: &[u8]) -> Result<Transaction> {
+    Transaction::read(&mut Cursor::new(bytes), BranchId::Nu6_3)
+        .map_err(|e| anyhow::anyhow!("Transaction parse failed: {e}"))
 }
 
 pub fn try_decrypt_with_keys(raw_hex: &str, keys: &CachedKeys) -> Result<Vec<DecryptedOutput>> {
@@ -125,11 +138,7 @@ pub fn try_decrypt_with_keys(raw_hex: &str, keys: &CachedKeys) -> Result<Vec<Dec
         return Ok(vec![]);
     }
 
-    let mut cursor = Cursor::new(&tx_bytes[..]);
-    let tx = match Transaction::read(&mut cursor, BranchId::Nu6_3) {
-        Ok(tx) => tx,
-        Err(_) => return Ok(vec![]),
-    };
+    let tx = parse_transaction(&tx_bytes)?;
 
     let mut outputs = Vec::new();
 
@@ -236,11 +245,7 @@ pub fn try_decrypt_all_outputs_ivk(raw_hex: &str, key_str: &str) -> Result<Vec<D
 
     let prepared_ivk = PreparedIncomingViewingKey::new(&ivk);
 
-    let mut cursor = Cursor::new(&tx_bytes[..]);
-    let tx = match Transaction::read(&mut cursor, BranchId::Nu6_3) {
-        Ok(tx) => tx,
-        Err(_) => return Ok(vec![]),
-    };
+    let tx = parse_transaction(&tx_bytes)?;
 
     let mut outputs = Vec::new();
 
@@ -287,11 +292,7 @@ pub fn try_decrypt_all_outputs(raw_hex: &str, ufvk_str: &str) -> Result<Vec<Decr
         }
     };
 
-    let mut cursor = Cursor::new(&tx_bytes[..]);
-    let tx = match Transaction::read(&mut cursor, BranchId::Nu6_3) {
-        Ok(tx) => tx,
-        Err(_) => return Ok(vec![]),
-    };
+    let tx = parse_transaction(&tx_bytes)?;
 
     let mut outputs = Vec::new();
 
@@ -383,5 +384,119 @@ mod tests {
     fn test_try_decrypt_stub_returns_none() {
         let result = try_decrypt_memo("deadbeef", "uviewtest1dummy").unwrap();
         assert_eq!(result, None);
+    }
+
+    // Real testnet transactions around NU7 activation (testnet height 4,465,026).
+    // Pre-activation transactions carry NU6.3 branch 0x37A5165B; activation and later
+    // carry NU7 branch 0x77190AD9. The expected txids pin the parsed bytes.
+    const NU7_FIXTURES: &[(&str, &str, u32, &str)] = &[
+        (
+            "pre_activation_v6_coinbase_4465025",
+            include_str!("fixtures/nu7_testnet/pre_activation_v6_coinbase_4465025.hex"),
+            0x37A5_165B,
+            "d501345693ac4c2ca5855258f5ec55389abbfa0fc71f12d79384d8b305e4e1d3",
+        ),
+        (
+            "pre_activation_v5_4465025",
+            include_str!("fixtures/nu7_testnet/pre_activation_v5_4465025.hex"),
+            0x37A5_165B,
+            "d759e629035fc77989d8b3253d16660e5cd3beef33bd8a011ba335d0f44d7bb8",
+        ),
+        (
+            "activation_v6_coinbase_4465026",
+            include_str!("fixtures/nu7_testnet/activation_v6_coinbase_4465026.hex"),
+            0x7719_0AD9,
+            "98ccf227cfa19e8ad89312500bf724090997443e6ae0656e33b2d5cec99bb608",
+        ),
+        (
+            "activation_v5_4465026",
+            include_str!("fixtures/nu7_testnet/activation_v5_4465026.hex"),
+            0x7719_0AD9,
+            "a85b0f6a352b9699d4221a93eeadbab457862c4dec2a3ac7ccd0d2f034fc89ea",
+        ),
+        (
+            "post_v6_orchard7_ironwood2_4513429",
+            include_str!("fixtures/nu7_testnet/post_v6_orchard7_ironwood2_4513429.hex"),
+            0x7719_0AD9,
+            "462b5634f6e8bf8892db9c81260057957ac14e7bb3d8427a3dd165918a5cec25",
+        ),
+    ];
+
+    fn test_ufvk() -> String {
+        let sk = orchard::keys::SpendingKey::from_bytes([7u8; 32]).unwrap();
+        let fvk = FullViewingKey::from(&sk);
+        Ufvk::try_from_items(vec![Fvk::Orchard(fvk.to_bytes())])
+            .unwrap()
+            .encode(&NetworkType::Test)
+    }
+
+    #[test]
+    fn nu6_3_and_nu7_testnet_transactions_parse() {
+        for (name, raw_hex, branch, txid) in NU7_FIXTURES {
+            let bytes = hex::decode(raw_hex.trim()).unwrap();
+            let header_branch = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+            assert_eq!(header_branch, *branch, "{name}: fixture header branch");
+
+            validate_raw_transaction(raw_hex.trim())
+                .unwrap_or_else(|e| panic!("{name}: validate failed: {e}"));
+            let tx = parse_transaction(&bytes).unwrap();
+            assert_eq!(u32::from(tx.consensus_branch_id()), *branch, "{name}");
+            assert_eq!(tx.txid().to_string(), *txid, "{name}: txid");
+        }
+    }
+
+    #[test]
+    fn nu7_orchard_and_ironwood_bundles_are_read() {
+        let (_, raw_hex, _, _) = NU7_FIXTURES[4];
+        let tx = parse_transaction(&hex::decode(raw_hex.trim()).unwrap()).unwrap();
+        assert_eq!(tx.orchard_bundle().map(|b| b.actions().len()), Some(7));
+        assert_eq!(tx.ironwood_bundle().map(|b| b.actions().len()), Some(2));
+
+        let (_, coinbase_hex, _, _) = NU7_FIXTURES[2];
+        let coinbase = parse_transaction(&hex::decode(coinbase_hex.trim()).unwrap()).unwrap();
+        assert_eq!(
+            coinbase.ironwood_bundle().map(|b| b.actions().len()),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn nu7_trial_decryption_runs_for_every_caller_path() {
+        // A key unrelated to these transactions must decrypt nothing, without error,
+        // through each entry point the scanner, x402 and session deposits use.
+        let ufvk = test_ufvk();
+        let keys = prepare_keys(&ufvk).unwrap();
+        for (name, raw_hex, _, _) in NU7_FIXTURES {
+            let raw_hex = raw_hex.trim();
+            assert!(
+                try_decrypt_with_keys(raw_hex, &keys).unwrap().is_empty(),
+                "{name}"
+            );
+            assert!(
+                try_decrypt_all_outputs_ivk(raw_hex, &ufvk)
+                    .unwrap()
+                    .is_empty(),
+                "{name}"
+            );
+            assert!(
+                try_decrypt_all_outputs(raw_hex, &ufvk).unwrap().is_empty(),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_branch_id_is_an_error_not_an_empty_result() {
+        let (_, raw_hex, _, _) = NU7_FIXTURES[3];
+        let mut bytes = hex::decode(raw_hex.trim()).unwrap();
+        bytes[8..12].copy_from_slice(&0xDEAD_BEEFu32.to_le_bytes());
+        let mangled = hex::encode(bytes);
+
+        assert!(validate_raw_transaction(&mangled).is_err());
+        let ufvk = test_ufvk();
+        let keys = prepare_keys(&ufvk).unwrap();
+        assert!(try_decrypt_with_keys(&mangled, &keys).is_err());
+        assert!(try_decrypt_all_outputs_ivk(&mangled, &ufvk).is_err());
+        assert!(try_decrypt_all_outputs(&mangled, &ufvk).is_err());
     }
 }
