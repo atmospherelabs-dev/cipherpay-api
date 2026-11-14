@@ -19,6 +19,7 @@ jobs:
       # RUSTSEC-2026-0459 (bundled SQLite < 3.54 WAL page-size disclosure) is
       # local-only: it needs a less-trusted party to write the DB/-wal pair the
       # process opens. The API opens only its own database under its service
-      # user. Owner-approved 2026-11-14. The fix needs sqlx 0.9
-      # (libsqlite3-sys 0.39); remove this ignore with that upgrade.
+      # user. Owner-approved 2026-11-14. sqlx 0.9.0 still caps libsqlite3-sys
+      # below 0.38; remove this ignore with sqlx 0.9.1, which allows
+      # libsqlite3-sys 0.39 (https://github.com/launchbadge/sqlx/pull/4517).
       - run: cargo audit --deny unmaintained --deny unsound --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2023-0089 --ignore RUSTSEC-2026-0459
