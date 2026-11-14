@@ -174,7 +174,7 @@ pub async fn list_prices_for_product(
         "SELECT {} FROM prices WHERE product_id = ? ORDER BY currency ASC",
         PRICE_COLS
     );
-    let rows = sqlx::query_as::<_, Price>(&q)
+    let rows = sqlx::query_as::<_, Price>(sqlx::AssertSqlSafe(q))
         .bind(product_id)
         .fetch_all(pool)
         .await?;
@@ -183,7 +183,7 @@ pub async fn list_prices_for_product(
 
 pub async fn get_price(pool: &SqlitePool, id: &str) -> anyhow::Result<Option<Price>> {
     let q = format!("SELECT {} FROM prices WHERE id = ?", PRICE_COLS);
-    let row = sqlx::query_as::<_, Price>(&q)
+    let row = sqlx::query_as::<_, Price>(sqlx::AssertSqlSafe(q))
         .bind(id)
         .fetch_optional(pool)
         .await?;
@@ -199,7 +199,7 @@ pub async fn get_price_by_product_currency(
         "SELECT {} FROM prices WHERE product_id = ? AND currency = ? AND active = 1",
         PRICE_COLS
     );
-    let row = sqlx::query_as::<_, Price>(&q)
+    let row = sqlx::query_as::<_, Price>(sqlx::AssertSqlSafe(q))
         .bind(product_id)
         .bind(currency)
         .fetch_optional(pool)

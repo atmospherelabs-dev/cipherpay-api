@@ -242,7 +242,7 @@ pub async fn get_all_merchants(
     pool: &SqlitePool,
     encryption_key: &str,
 ) -> anyhow::Result<Vec<Merchant>> {
-    let rows = sqlx::query_as::<_, MerchantRow>(&format!("SELECT {MERCHANT_COLS} FROM merchants"))
+    let rows = sqlx::query_as::<_, MerchantRow>(sqlx::AssertSqlSafe(format!("SELECT {MERCHANT_COLS} FROM merchants")))
         .fetch_all(pool)
         .await?;
 
@@ -257,9 +257,9 @@ pub async fn get_merchant_by_id(
     id: &str,
     encryption_key: &str,
 ) -> anyhow::Result<Option<Merchant>> {
-    let row = sqlx::query_as::<_, MerchantRow>(&format!(
+    let row = sqlx::query_as::<_, MerchantRow>(sqlx::AssertSqlSafe(format!(
         "SELECT {MERCHANT_COLS} FROM merchants WHERE id = ?"
-    ))
+    )))
     .bind(id)
     .fetch_optional(pool)
     .await?;
@@ -328,9 +328,9 @@ pub async fn authenticate_with_kind(
 
     // 2. Legacy primary key column. Same access semantics as a `Full` key in the
     //    new table — kept so existing integrations don't have to migrate.
-    let row = sqlx::query_as::<_, MerchantRow>(&format!(
+    let row = sqlx::query_as::<_, MerchantRow>(sqlx::AssertSqlSafe(format!(
         "SELECT {MERCHANT_COLS} FROM merchants WHERE api_key_hash = ?"
-    ))
+    )))
     .bind(&key_hash)
     .fetch_optional(pool)
     .await?;
@@ -345,9 +345,9 @@ pub async fn authenticate_dashboard(
 ) -> anyhow::Result<Option<Merchant>> {
     let token_hash = hash_key(token);
 
-    let row = sqlx::query_as::<_, MerchantRow>(&format!(
+    let row = sqlx::query_as::<_, MerchantRow>(sqlx::AssertSqlSafe(format!(
         "SELECT {MERCHANT_COLS} FROM merchants WHERE dashboard_token_hash = ?"
-    ))
+    )))
     .bind(&token_hash)
     .fetch_optional(pool)
     .await?;
@@ -383,11 +383,11 @@ pub async fn get_by_session_with_scope(
         .replace("id,", "m.id,")
         .replace(", ", ", m.")
         .replacen("m.id", "m.id", 1);
-    let row = sqlx::query_as::<_, MerchantRow>(&format!(
+    let row = sqlx::query_as::<_, MerchantRow>(sqlx::AssertSqlSafe(format!(
         "SELECT {} FROM merchants m JOIN sessions s ON s.merchant_id = m.id
              WHERE s.id = ? AND s.expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
         cols
-    ))
+    )))
     .bind(session_id)
     .fetch_optional(pool)
     .await?;
@@ -475,9 +475,9 @@ pub async fn find_by_email(
     encryption_key: &str,
 ) -> anyhow::Result<Option<Merchant>> {
     let email_hash = crate::crypto::blind_index(email, encryption_key);
-    let row = sqlx::query_as::<_, MerchantRow>(&format!(
+    let row = sqlx::query_as::<_, MerchantRow>(sqlx::AssertSqlSafe(format!(
         "SELECT {MERCHANT_COLS} FROM merchants WHERE recovery_email_hash = ?"
-    ))
+    )))
     .bind(&email_hash)
     .fetch_optional(pool)
     .await?;

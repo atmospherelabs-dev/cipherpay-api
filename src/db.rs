@@ -38,7 +38,7 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
 
     // Billing email infrastructure: per-merchant fee rate, discount expiry, email idempotency
     run_tracked_migration(&pool, "billing_emails_v2026_04_10", || async {
-        for sql in &[
+        for sql in [
             "ALTER TABLE merchants ADD COLUMN fee_rate REAL",
             "ALTER TABLE merchants ADD COLUMN fee_discount_until TEXT",
             "ALTER TABLE fee_ledger ADD COLUMN fee_rate_applied REAL",
@@ -106,7 +106,7 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
         .await
         .ok();
 
-        for sql in &[
+        for sql in [
             "ALTER TABLE sessions ADD COLUMN reauth_at TEXT",
             "ALTER TABLE merchants ADD COLUMN last_token_login_at TEXT",
         ] {
@@ -233,7 +233,7 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
     .await?;
 
     run_tracked_migration(&pool, "accounting_v2026_06_21", || async {
-        for sql in &[
+        for sql in [
             "ALTER TABLE invoices ADD COLUMN confirmed_rate REAL",
             "ALTER TABLE invoices ADD COLUMN confirmed_fiat_amount REAL",
         ] {
@@ -266,7 +266,7 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
     .await?;
 
     run_tracked_migration(&pool, "campaign_catchall_addresses_v2026_06_30", || async {
-    for sql in &[
+    for sql in [
         "ALTER TABLE payment_links ADD COLUMN campaign_address_hex TEXT",
         "ALTER TABLE payment_links ADD COLUMN campaign_diversifier_index INTEGER",
         "ALTER TABLE payment_links ADD COLUMN campaign_address_ua TEXT",

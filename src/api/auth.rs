@@ -269,7 +269,8 @@ pub async fn my_invoices(req: HttpRequest, pool: web::Data<SqlitePool>) -> HttpR
                     "SELECT id, label FROM prices WHERE id IN ({}) AND label IS NOT NULL",
                     placeholders
                 );
-                let mut q = sqlx::query(&query_str);
+                // Only "?" placeholders are interpolated; every price id is bound.
+                let mut q = sqlx::query(sqlx::AssertSqlSafe(query_str));
                 for pid in &price_ids {
                     q = q.bind(pid);
                 }
@@ -343,27 +344,27 @@ pub async fn my_webhooks(
 
     let (count_sql, list_sql) = if let Some(ref _status) = query.status {
         (
-            "SELECT COUNT(*) FROM webhook_deliveries WHERE merchant_id = ? AND status = ?".to_string(),
+            "SELECT COUNT(*) FROM webhook_deliveries WHERE merchant_id = ? AND status = ?",
             "SELECT id, invoice_id, event_type, status, response_status, response_error, attempts, created_at, last_attempt_at
-             FROM webhook_deliveries WHERE merchant_id = ? AND status = ? ORDER BY created_at DESC LIMIT ? OFFSET ?".to_string(),
+             FROM webhook_deliveries WHERE merchant_id = ? AND status = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
         )
     } else {
         (
-            "SELECT COUNT(*) FROM webhook_deliveries WHERE merchant_id = ?".to_string(),
+            "SELECT COUNT(*) FROM webhook_deliveries WHERE merchant_id = ?",
             "SELECT id, invoice_id, event_type, status, response_status, response_error, attempts, created_at, last_attempt_at
-             FROM webhook_deliveries WHERE merchant_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?".to_string(),
+             FROM webhook_deliveries WHERE merchant_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
         )
     };
 
     let total: i64 = if let Some(ref status) = query.status {
-        sqlx::query_scalar::<_, i64>(&count_sql)
+        sqlx::query_scalar::<_, i64>(count_sql)
             .bind(&merchant.id)
             .bind(status)
             .fetch_one(pool.get_ref())
             .await
             .unwrap_or(0)
     } else {
-        sqlx::query_scalar::<_, i64>(&count_sql)
+        sqlx::query_scalar::<_, i64>(count_sql)
             .bind(&merchant.id)
             .fetch_one(pool.get_ref())
             .await
@@ -381,7 +382,7 @@ pub async fn my_webhooks(
         String,
         Option<String>,
     )> = if let Some(ref status) = query.status {
-        sqlx::query_as(&list_sql)
+        sqlx::query_as(list_sql)
             .bind(&merchant.id)
             .bind(status)
             .bind(limit)
@@ -390,7 +391,7 @@ pub async fn my_webhooks(
             .await
             .unwrap_or_default()
     } else {
-        sqlx::query_as(&list_sql)
+        sqlx::query_as(list_sql)
             .bind(&merchant.id)
             .bind(limit)
             .bind(offset)

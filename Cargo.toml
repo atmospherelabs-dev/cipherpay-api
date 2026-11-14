@@ -19,7 +19,7 @@ actix-governor = "0.7"
 tokio = { version = "1", features = ["full"] }
 
 # Database (SQLite for local dev, Postgres for production)
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "derive", "uuid", "chrono", "json"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite-bundled", "sqlite-unlock-notify", "derive", "uuid", "chrono", "json"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

@@ -203,10 +203,11 @@ async fn ensure_table_exists(pool: &SqlitePool, table: &str) -> anyhow::Result<(
     Ok(())
 }
 
-async fn ensure_columns(pool: &SqlitePool, table: &str, required: &[&str]) -> anyhow::Result<()> {
+async fn ensure_columns(pool: &SqlitePool, table: &'static str, required: &[&str]) -> anyhow::Result<()> {
     let pragma = format!("PRAGMA table_info({})", table);
     let rows: Vec<(i64, String, String, i64, Option<String>, i64)> =
-        sqlx::query_as(&pragma).fetch_all(pool).await?;
+        // Callers pass fixed table names; PRAGMA arguments cannot be bound.
+        sqlx::query_as(sqlx::AssertSqlSafe(pragma)).fetch_all(pool).await?;
     let existing: std::collections::HashSet<String> = rows.into_iter().map(|row| row.1).collect();
 
     for column in required {
