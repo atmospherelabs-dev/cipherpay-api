@@ -274,6 +274,7 @@ async fn main() -> anyhow::Result<()> {
     let bind_addr = format!("{}:{}", config.api_host, config.api_port);
 
     let rate_limit = GovernorConfigBuilder::default()
+        .key_extractor(crate::api::client_ip::ClientIpKeyExtractor)
         .seconds_per_request(1)
         .burst_size(60)
         .finish()

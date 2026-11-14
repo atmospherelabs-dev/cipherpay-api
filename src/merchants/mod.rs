@@ -485,6 +485,29 @@ pub async fn find_by_email(
     Ok(row.map(|r| row_to_merchant(r, encryption_key)))
 }
 
+/// Minimum time between two recovery emails for the same merchant. The
+/// previous link stays valid (1 hour), so a repeat request inside this
+/// window is answered identically but sends nothing.
+pub const RECOVERY_EMAIL_COOLDOWN_MINUTES: i64 = 15;
+
+/// True when a recovery token for this merchant was issued within the cooldown.
+pub async fn recovery_recently_requested(
+    pool: &SqlitePool,
+    merchant_id: &str,
+) -> anyhow::Result<bool> {
+    let cutoff = (chrono::Utc::now() - chrono::Duration::minutes(RECOVERY_EMAIL_COOLDOWN_MINUTES))
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+    let recent: Option<(i64,)> = sqlx::query_as(
+        "SELECT 1 FROM recovery_tokens WHERE merchant_id = ? AND created_at > ? LIMIT 1",
+    )
+    .bind(merchant_id)
+    .bind(&cutoff)
+    .fetch_optional(pool)
+    .await?;
+    Ok(recent.is_some())
+}
+
 pub async fn create_recovery_token(pool: &SqlitePool, merchant_id: &str) -> anyhow::Result<String> {
     let token = Uuid::new_v4().to_string();
     let token_hash = hash_key(&token);
@@ -603,4 +626,36 @@ pub async fn confirm_recovery_token(
 
     tracing::info!(merchant_id = %merchant_id, "Account recovered via email token");
     Ok(Some(new_token))
+}
+
+#[cfg(test)]
+mod recovery_cooldown_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cooldown_applies_only_within_window_and_per_merchant() {
+        let pool = crate::repair_tests::pool().await;
+        crate::repair_tests::merchant(&pool, "m1").await;
+        crate::repair_tests::merchant(&pool, "m2").await;
+
+        assert!(!recovery_recently_requested(&pool, "m1").await.unwrap());
+        create_recovery_token(&pool, "m1").await.unwrap();
+        assert!(recovery_recently_requested(&pool, "m1").await.unwrap());
+        assert!(!recovery_recently_requested(&pool, "m2").await.unwrap());
+
+        let old = (chrono::Utc::now()
+            - chrono::Duration::minutes(RECOVERY_EMAIL_COOLDOWN_MINUTES + 1))
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+        sqlx::query("UPDATE recovery_tokens SET created_at = ? WHERE merchant_id = 'm1'")
+            .bind(&old)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(!recovery_recently_requested(&pool, "m1").await.unwrap());
+
+        // Re-issuing replaces the old token and restarts the window.
+        create_recovery_token(&pool, "m1").await.unwrap();
+        assert!(recovery_recently_requested(&pool, "m1").await.unwrap());
+    }
 }

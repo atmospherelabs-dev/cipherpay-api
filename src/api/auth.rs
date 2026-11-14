@@ -1088,10 +1088,14 @@ pub struct RecoverRequest {
 /// POST /api/auth/recover -- request a recovery email.
 /// Uses constant-time response delay to prevent email enumeration via timing.
 pub async fn recover(
+    req: HttpRequest,
     pool: web::Data<SqlitePool>,
     config: web::Data<Config>,
     body: web::Json<RecoverRequest>,
 ) -> HttpResponse {
+    let client_ip = crate::api::client_ip::client_ip(&req)
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| "unknown".into());
     if !config.smtp_configured() {
         return HttpResponse::ServiceUnavailable().json(serde_json::json!({
             "error": "Email recovery is not configured on this instance"
@@ -1110,8 +1114,35 @@ pub async fn recover(
                 .await
             {
                 Ok(Some(m)) => m,
-                _ => return Err(()),
+                _ => {
+                    tracing::info!(client_ip = %client_ip, outcome = "no_match", "Recovery requested");
+                    return Err(());
+                }
             };
+
+        match merchants::recovery_recently_requested(pool.get_ref(), &merchant.id).await {
+            Ok(false) => {}
+            Ok(true) => {
+                tracing::warn!(
+                    client_ip = %client_ip,
+                    merchant_id = %merchant.id,
+                    outcome = "cooldown",
+                    "Recovery requested"
+                );
+                return Err(());
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to check recovery cooldown");
+                return Err(());
+            }
+        }
+
+        tracing::info!(
+            client_ip = %client_ip,
+            merchant_id = %merchant.id,
+            outcome = "sent",
+            "Recovery requested"
+        );
 
         let token = merchants::create_recovery_token(pool.get_ref(), &merchant.id)
             .await
@@ -1148,16 +1179,26 @@ pub struct RecoverConfirmRequest {
 
 /// POST /api/auth/recover/confirm -- exchange recovery token for new dashboard token
 pub async fn recover_confirm(
+    req: HttpRequest,
     pool: web::Data<SqlitePool>,
     body: web::Json<RecoverConfirmRequest>,
 ) -> HttpResponse {
+    let client_ip = crate::api::client_ip::client_ip(&req)
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| "unknown".into());
     match merchants::confirm_recovery_token(pool.get_ref(), &body.token).await {
-        Ok(Some(new_dashboard_token)) => HttpResponse::Ok().json(serde_json::json!({
-            "dashboard_token": new_dashboard_token,
-            "message": "Account recovered. Save your new dashboard token."
-        })),
+        Ok(Some(new_dashboard_token)) => {
+            tracing::info!(client_ip = %client_ip, "Recovery confirmed");
+            HttpResponse::Ok().json(serde_json::json!({
+                "dashboard_token": new_dashboard_token,
+                "message": "Account recovered. Save your new dashboard token."
+            }))
+        }
         Ok(None) => {
-            tracing::warn!("Recovery confirm failed: token not found or expired");
+            tracing::warn!(
+                client_ip = %client_ip,
+                "Recovery confirm failed: token not found or expired"
+            );
             HttpResponse::BadRequest().json(serde_json::json!({
                 "error": "Invalid or expired recovery token"
             }))

@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod auth;
+pub mod client_ip;
 pub mod billing_routes;
 pub mod events;
 pub mod invoice_routes;
@@ -26,18 +27,21 @@ use sqlx::SqlitePool;
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
     let auth_rate_limit = GovernorConfigBuilder::default()
+        .key_extractor(crate::api::client_ip::ClientIpKeyExtractor)
         .seconds_per_request(10)
         .burst_size(5)
         .finish()
         .expect("Failed to build auth rate limiter");
 
     let session_rate_limit = GovernorConfigBuilder::default()
+        .key_extractor(crate::api::client_ip::ClientIpKeyExtractor)
         .seconds_per_request(30)
         .burst_size(3)
         .finish()
         .expect("Failed to build session rate limiter");
 
     let registration_rate_limit = GovernorConfigBuilder::default()
+        .key_extractor(crate::api::client_ip::ClientIpKeyExtractor)
         .seconds_per_request(30)
         .burst_size(3)
         .use_headers()
@@ -45,12 +49,14 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .expect("Failed to build registration rate limiter");
 
     let checkout_rate_limit = GovernorConfigBuilder::default()
+        .key_extractor(crate::api::client_ip::ClientIpKeyExtractor)
         .seconds_per_request(2)
         .burst_size(10)
         .finish()
         .expect("Failed to build checkout rate limiter");
 
     let public_read_limit = GovernorConfigBuilder::default()
+        .key_extractor(crate::api::client_ip::ClientIpKeyExtractor)
         .seconds_per_request(2)
         .burst_size(15)
         .finish()
