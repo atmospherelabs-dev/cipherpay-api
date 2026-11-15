@@ -377,6 +377,8 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
 
     run_tracked_migration(&pool, "crosschain_provider_handled_v2026_10_14", || crate::crosschain::fees::migrate_provider_handled(&pool)).await?;
 
+    run_tracked_migration(&pool, "crosschain_dismissals_v2026_11_15", || crate::crosschain::operations::migrate_dismissals(&pool)).await?;
+
     Ok(pool)
 }
 
