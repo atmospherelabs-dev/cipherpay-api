@@ -635,6 +635,26 @@ pub async fn payment_methods(pool: &SqlitePool, merchant: &str) -> anyhow::Resul
     Ok(json!({"direct_zec":direct,"crosschain":crosschain,"verifying":verifying}))
 }
 
+/// Fee rows the worker should reconcile now.
+///
+/// A row whose attempt never saved a quote (setup failed before deposit
+/// instructions were shown) has no deposit to look up: `reconcile` can only
+/// resolve it once the invoice is confirmed by a direct ZEC payment. Until
+/// then it is left for manual setup review instead of failing every hour.
+async fn due_fee_checks(pool: &SqlitePool, now: i64) -> Result<Vec<String>, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT f.invoice_id FROM crosschain_fees f
+         JOIN invoices i ON i.id=f.invoice_id
+         LEFT JOIN crosschain_attempts a ON a.invoice_id=f.invoice_id
+         WHERE f.state NOT IN ('collected','direct','provider_handled') AND f.next_check<=?
+           AND (a.payload IS NOT NULL OR i.status='confirmed')
+         ORDER BY f.next_check LIMIT 8",
+    )
+    .bind(now)
+    .fetch_all(pool)
+    .await
+}
+
 pub(super) async fn resolve_direct(pool: &SqlitePool, id: &str) -> anyhow::Result<()> {
     let obligation: Option<(String,f64,f64)> = sqlx::query_as("UPDATE deferred_payment_fees SET state='direct' WHERE invoice_id=? AND state!='crosschain' RETURNING merchant_id,amount_zec,rate")
         .bind(id).fetch_optional(pool).await?;
@@ -696,8 +716,7 @@ pub fn start_worker(pool: SqlitePool, gateway: web::Data<Gateway>, key: String) 
                     .await;
                 }
             }
-            let ids = sqlx::query_scalar::<_,String>("SELECT invoice_id FROM crosschain_fees WHERE state NOT IN ('collected','direct','provider_handled') AND next_check<=? ORDER BY next_check LIMIT 8")
-                .bind(now).fetch_all(&pool).await;
+            let ids = due_fee_checks(&pool, now).await;
             let Ok(ids) = ids else {
                 tracing::error!("Could not load pending cross-chain fees");
                 continue;
@@ -932,6 +951,31 @@ mod tests {
         assert!(sqlx::query_scalar::<_,Option<String>>("SELECT received_units FROM crosschain_fees WHERE invoice_id='i'").fetch_one(&p).await.unwrap().is_none());
         assert_eq!(payment_methods(&p, "m").await.unwrap(), json!({"direct_zec":1,"crosschain":0,"verifying":0}));
         assert_eq!(merchant_summary(&p, "m", &key, true).await.unwrap()["provider_handled_count"], 0);
+    }
+
+    #[tokio::test]
+    async fn unquoted_failed_setup_is_not_rechecked_until_invoice_confirms() {
+        let (p, _key, _attempt, _data, _g) = confidential_fee_fixture().await;
+        // "other": setup failed before a quote was saved; the fee stays reserved.
+        sqlx::query("INSERT INTO crosschain_attempts(invoice_id,state) VALUES ('other','NEEDS_REVIEW')")
+            .execute(&p).await.unwrap();
+        sqlx::query("INSERT INTO crosschain_fees(invoice_id,asset_id,recipient,total_bps,cipherpay_bps,failures) VALUES ('other','usdc','cipherscan.near',145,125,564)")
+            .execute(&p).await.unwrap();
+        sqlx::query("UPDATE invoices SET status='expired' WHERE id='other'").execute(&p).await.unwrap();
+        let now = Utc::now().timestamp();
+        // The quoted attempt is still checked; the unquoted expired one is not.
+        assert_eq!(due_fee_checks(&p, now).await.unwrap(), vec!["i".to_string()]);
+        // The row is untouched and still surfaces for manual review.
+        let row: (String, i64) = sqlx::query_as("SELECT state,failures FROM crosschain_fees WHERE invoice_id='other'")
+            .fetch_one(&p).await.unwrap();
+        assert_eq!(row, ("reserved".to_string(), 564));
+        assert!(operations::issues(&p).await.unwrap().iter()
+            .any(|i| i["invoice_id"] == "other" && i["reason"] == "setup_review"));
+        // A later direct ZEC confirmation makes it eligible to resolve as direct.
+        sqlx::query("UPDATE invoices SET status='confirmed' WHERE id='other'").execute(&p).await.unwrap();
+        let mut due = due_fee_checks(&p, now).await.unwrap();
+        due.sort();
+        assert_eq!(due, vec!["i".to_string(), "other".to_string()]);
     }
 
     #[test]
