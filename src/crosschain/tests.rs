@@ -1140,3 +1140,13 @@ fn real_provider_confidential_quote() {
     let quote = checked_quote(&response, &body, &asset(), true).unwrap();
     assert_eq!(quote["confidentiality"], "basic");
 }
+
+#[tokio::test]
+async fn setup_errors_are_classified_without_provider_text() {
+    let elapsed = tokio::time::timeout(std::time::Duration::from_millis(1), std::future::pending::<()>()).await.unwrap_err();
+    assert_eq!(setup_error_kind(&anyhow::Error::from(elapsed)), "slot_timeout");
+    assert_eq!(setup_error_kind(&anyhow::Error::from(BelowMinimumOutput(5))), "below_minimum");
+    assert_eq!(setup_error_kind(&anyhow::anyhow!(NO_QUOTE)), "provider_rejected");
+    assert_eq!(setup_error_kind(&anyhow::anyhow!("signature mismatch")), "other");
+}
+

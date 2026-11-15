@@ -66,6 +66,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         web::scope("/api")
             .route("/admin/crosschain", web::get().to(crate::crosschain::operations::admin_issues))
             .route("/admin/crosschain/{id}/retry", web::post().to(crate::crosschain::operations::retry))
+            .route("/admin/crosschain/{id}/dismiss", web::post().to(crate::crosschain::operations::dismiss))
             .route("/health", web::get().to(system::health))
             .route("/invoices/{id}/checkout-access", web::get().to(crate::crosschain::security::access))
             .service(

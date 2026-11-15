@@ -255,7 +255,7 @@ impl Gateway {
             if let Some(error) = minimum_swap_usd_error(status, &body) {
                 return Err(error.into());
             }
-            bail!("No quote available for this route and amount");
+            bail!(NO_QUOTE);
         }
         let response: Value = res.json().await?;
         signatures::verify_fresh(&response)?;
@@ -263,6 +263,8 @@ impl Gateway {
         Ok(response)
     }
 }
+
+const NO_QUOTE: &str = "No quote available for this route and amount";
 
 pub async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
     let mut tx = pool.begin().await?;
@@ -868,8 +870,8 @@ pub async fn create(
         Ok(a) => HttpResponse::Ok()
             .insert_header(("Cache-Control", "no-store"))
             .json(a),
-        Err(_) => {
-            tracing::warn!(invoice_id = %id, stage = setup_stage, "Cross-chain payment setup failed; reservation preserved");
+        Err(e) => {
+            tracing::warn!(invoice_id = %id, stage = setup_stage, kind = %setup_error_kind(&e), "Cross-chain payment setup failed; reservation preserved");
             // Outcome may be ambiguous: keep the reservation rather than risk a
             // second swap. No deposit instructions have been shown to the buyer.
             let _ = sqlx::query("UPDATE crosschain_attempts SET state='NEEDS_REVIEW' WHERE invoice_id=? AND payload IS NULL")
@@ -880,6 +882,32 @@ pub async fn create(
             )
         }
     }
+}
+
+/// Coarse failure class for setup logs. Never includes provider messages,
+/// which may echo destination or refund data.
+fn setup_error_kind(e: &anyhow::Error) -> String {
+    if e.downcast_ref::<tokio::time::error::Elapsed>().is_some() {
+        return "slot_timeout".into();
+    }
+    if e.downcast_ref::<BelowMinimumOutput>().is_some() || e.downcast_ref::<BelowMinimumSwapUsd>().is_some() {
+        return "below_minimum".into();
+    }
+    if let Some(r) = e.downcast_ref::<reqwest::Error>() {
+        return if r.is_timeout() { "provider_timeout".into() }
+            else if r.is_connect() { "provider_connect".into() }
+            else if r.is_decode() { "provider_decode".into() }
+            else if let Some(s) = r.status() { format!("provider_http_{}", s.as_u16()) }
+            else { "provider_request".into() };
+    }
+    if e.downcast_ref::<sqlx::Error>().is_some() {
+        return "database".into();
+    }
+    // Our own message for a non-success provider status (see `Gateway::quote`).
+    if e.to_string() == NO_QUOTE {
+        return "provider_rejected".into();
+    }
+    "other".into()
 }
 
 async fn read_attempt(pool: &SqlitePool, id: &str, key: &str) -> anyhow::Result<Option<Value>> {
