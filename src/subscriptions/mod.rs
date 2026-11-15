@@ -105,7 +105,7 @@ pub async fn create_subscription(
 
 pub async fn get_subscription(pool: &SqlitePool, id: &str) -> anyhow::Result<Option<Subscription>> {
     let q = format!("SELECT {} FROM subscriptions WHERE id = ?", SUB_COLS);
-    let row = sqlx::query_as::<_, Subscription>(&q)
+    let row = sqlx::query_as::<_, Subscription>(sqlx::AssertSqlSafe(q))
         .bind(id)
         .fetch_optional(pool)
         .await?;
@@ -120,7 +120,7 @@ pub async fn list_subscriptions(
         "SELECT {} FROM subscriptions WHERE merchant_id = ? ORDER BY created_at DESC",
         SUB_COLS
     );
-    let rows = sqlx::query_as::<_, Subscription>(&q)
+    let rows = sqlx::query_as::<_, Subscription>(sqlx::AssertSqlSafe(q))
         .bind(merchant_id)
         .fetch_all(pool)
         .await?;
@@ -334,7 +334,7 @@ pub async fn process_renewals(
         "SELECT {} FROM subscriptions WHERE pause_at_period_end = 1 AND current_period_end <= ? AND status = 'active' LIMIT 500",
         SUB_COLS
     );
-    let to_pause: Vec<Subscription> = sqlx::query_as::<_, Subscription>(&q)
+    let to_pause: Vec<Subscription> = sqlx::query_as::<_, Subscription>(sqlx::AssertSqlSafe(q))
         .bind(&now_str)
         .fetch_all(pool)
         .await?;
@@ -374,7 +374,7 @@ pub async fn process_renewals(
         "SELECT {} FROM subscriptions WHERE cancel_at_period_end = 1 AND current_period_end <= ? AND status = 'active' LIMIT 500",
         SUB_COLS
     );
-    let to_cancel: Vec<Subscription> = sqlx::query_as::<_, Subscription>(&q)
+    let to_cancel: Vec<Subscription> = sqlx::query_as::<_, Subscription>(sqlx::AssertSqlSafe(q))
         .bind(&now_str)
         .fetch_all(pool)
         .await?;
@@ -422,7 +422,7 @@ pub async fn process_renewals(
         "SELECT {} FROM subscriptions WHERE status = 'active' AND current_period_end <= ? AND cancel_at_period_end = 0 AND pause_at_period_end = 0 LIMIT 500",
         SUB_COLS
     );
-    let due_subs: Vec<Subscription> = sqlx::query_as::<_, Subscription>(&q)
+    let due_subs: Vec<Subscription> = sqlx::query_as::<_, Subscription>(sqlx::AssertSqlSafe(q))
         .bind(&notice_threshold)
         .fetch_all(pool)
         .await?;
@@ -534,7 +534,7 @@ pub async fn process_renewals(
          ))) AND current_period_end <= ? AND cancel_at_period_end = 0 AND pause_at_period_end = 0 LIMIT 500",
         SUB_COLS
     );
-    let past_due_candidates: Vec<Subscription> = sqlx::query_as::<_, Subscription>(&q)
+    let past_due_candidates: Vec<Subscription> = sqlx::query_as::<_, Subscription>(sqlx::AssertSqlSafe(q))
         .bind(&now_str)
         .fetch_all(pool)
         .await?;

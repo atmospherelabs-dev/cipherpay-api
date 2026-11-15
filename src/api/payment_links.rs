@@ -599,10 +599,10 @@ pub async fn campaigns(
     config: web::Data<crate::config::Config>,
 ) -> HttpResponse {
     let rows = match sqlx::query_as::<_, payment_links::PaymentLink>(
-        &format!(
+        sqlx::AssertSqlSafe(format!(
             "SELECT {} FROM payment_links WHERE mode = 'donation' AND active = 1 AND listed = 1 ORDER BY total_raised_zatoshis DESC, created_at DESC",
             payment_links::PL_COLUMNS_PUB
-        ),
+        )),
     )
     .fetch_all(pool.get_ref())
     .await

@@ -484,7 +484,8 @@ pub async fn webhooks(
         where_sql
     );
 
-    let mut count_q = sqlx::query_scalar::<_, i64>(&count_sql);
+    // where_sql joins only fixed "column = ?" fragments; every value is bound.
+    let mut count_q = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(count_sql));
     for v in &bind_values {
         count_q = count_q.bind(v);
     }
@@ -505,7 +506,7 @@ pub async fn webhooks(
             String,
             Option<String>,
         ),
-    >(&list_sql);
+    >(sqlx::AssertSqlSafe(list_sql));
     for v in &bind_values {
         list_q = list_q.bind(v);
     }

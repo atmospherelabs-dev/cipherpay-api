@@ -333,7 +333,7 @@ pub async fn create_donation_link(
 
 pub async fn get_payment_link(pool: &SqlitePool, id: &str) -> anyhow::Result<Option<PaymentLink>> {
     let query = format!("SELECT {} FROM payment_links WHERE id = ?", PL_COLUMNS);
-    let row = sqlx::query_as::<_, PaymentLink>(&query)
+    let row = sqlx::query_as::<_, PaymentLink>(sqlx::AssertSqlSafe(query))
         .bind(id)
         .fetch_optional(pool)
         .await?;
@@ -343,7 +343,7 @@ pub async fn get_payment_link(pool: &SqlitePool, id: &str) -> anyhow::Result<Opt
 
 pub async fn get_by_slug(pool: &SqlitePool, slug: &str) -> anyhow::Result<Option<PaymentLink>> {
     let query = format!("SELECT {} FROM payment_links WHERE slug = ?", PL_COLUMNS);
-    let row = sqlx::query_as::<_, PaymentLink>(&query)
+    let row = sqlx::query_as::<_, PaymentLink>(sqlx::AssertSqlSafe(query))
         .bind(slug)
         .fetch_optional(pool)
         .await?;
@@ -359,7 +359,7 @@ pub async fn list_payment_links(
         "SELECT {} FROM payment_links WHERE merchant_id = ? ORDER BY created_at DESC",
         PL_COLUMNS
     );
-    let rows = sqlx::query_as::<_, PaymentLink>(&query)
+    let rows = sqlx::query_as::<_, PaymentLink>(sqlx::AssertSqlSafe(query))
         .bind(merchant_id)
         .fetch_all(pool)
         .await?;

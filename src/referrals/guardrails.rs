@@ -80,7 +80,8 @@ pub async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
     )
     .execute(&mut *tx)
     .await?;
-    sqlx::query(&trigger).execute(&mut *tx).await?;
+    // Recreates the trigger DDL read from this database's sqlite_master above.
+    sqlx::query(sqlx::AssertSqlSafe(trigger)).execute(&mut *tx).await?;
     let existing: Vec<String> = sqlx::query_scalar("SELECT merchant_id FROM merchant_referrals")
         .fetch_all(&mut *tx)
         .await?;

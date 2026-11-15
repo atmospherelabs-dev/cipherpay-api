@@ -17,7 +17,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
         "ALTER TABLE merchants ADD COLUMN recovery_email TEXT",
         "ALTER TABLE merchants ADD COLUMN name TEXT NOT NULL DEFAULT ''",
     ];
-    for sql in &upgrades {
+    for sql in upgrades {
         sqlx::query(sql).execute(&mut *conn).await.ok();
     }
 
@@ -38,7 +38,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
         "ALTER TABLE invoices ADD COLUMN payment_address TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE invoices ADD COLUMN zcash_uri TEXT NOT NULL DEFAULT ''",
     ];
-    for sql in &invoice_upgrades {
+    for sql in invoice_upgrades {
         sqlx::query(sql).execute(&mut *conn).await.ok();
     }
 
@@ -454,7 +454,8 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
                 .execute(&mut *conn)
                 .await
                 .ok();
-            sqlx::query(&inv_sql).execute(&mut *conn).await.ok();
+            // DDL comes from this database's own sqlite_master, not from a request.
+            sqlx::query(sqlx::AssertSqlSafe(inv_sql)).execute(&mut *conn).await.ok();
             sqlx::query("INSERT OR IGNORE INTO invoices SELECT * FROM _inv_repair")
                 .execute(&mut *conn)
                 .await
@@ -635,7 +636,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
         "ALTER TABLE merchants ADD COLUMN fee_rate REAL",
         "ALTER TABLE merchants ADD COLUMN fee_discount_until TEXT",
     ];
-    for sql in &billing_upgrades {
+    for sql in billing_upgrades {
         sqlx::query(sql).execute(&mut *conn).await.ok();
     }
 
@@ -718,7 +719,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
     .execute(&mut *conn)
     .await
     .ok();
-    for sql in &[
+    for sql in [
         "ALTER TABLE billing_cycles ADD COLUMN total_fees_zatoshis INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE billing_cycles ADD COLUMN auto_collected_zatoshis INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE billing_cycles ADD COLUMN outstanding_zatoshis INTEGER NOT NULL DEFAULT 0",
@@ -845,7 +846,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
         .ok();
 
     // Optional ticketing metadata on prices (safe additive columns)
-    for sql in &[
+    for sql in [
         "ALTER TABLE prices ADD COLUMN label TEXT",
         "ALTER TABLE prices ADD COLUMN max_quantity INTEGER",
     ] {
@@ -1047,7 +1048,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
     .ok();
 
     // Price type columns (one_time vs recurring)
-    for sql in &[
+    for sql in [
         "ALTER TABLE prices ADD COLUMN price_type TEXT NOT NULL DEFAULT 'one_time'",
         "ALTER TABLE prices ADD COLUMN billing_interval TEXT",
         "ALTER TABLE prices ADD COLUMN interval_count INTEGER",
@@ -1104,7 +1105,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
     .await
     .ok();
 
-    for sql in &[
+    for sql in [
         "CREATE INDEX IF NOT EXISTS idx_tickets_invoice ON tickets(invoice_id)",
         "CREATE INDEX IF NOT EXISTS idx_tickets_product_status ON tickets(product_id, status)",
         "CREATE INDEX IF NOT EXISTS idx_tickets_merchant_created ON tickets(merchant_id, created_at)",
@@ -1265,17 +1266,19 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
         ("subscriptions", "current_invoice_id"),
         ("subscriptions", "label"),
     ] {
-        let exists: bool = sqlx::query_scalar::<_, i32>(&format!(
-            "SELECT COUNT(*) FROM pragma_table_info('{}') WHERE name = '{}'",
-            table, col
-        ))
+        let exists: bool = sqlx::query_scalar::<_, i32>(
+            "SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?",
+        )
+        .bind(*table)
+        .bind(*col)
         .fetch_one(&mut *conn)
         .await
         .unwrap_or(0)
             > 0;
         if !exists {
             tracing::info!("Adding missing column {}.{}", table, col);
-            sqlx::query(&format!("ALTER TABLE {} ADD COLUMN {} TEXT", table, col))
+            // table and col come from the fixed list above; DDL identifiers cannot be bound.
+            sqlx::query(sqlx::AssertSqlSafe(format!("ALTER TABLE {} ADD COLUMN {} TEXT", table, col)))
                 .execute(&mut *conn)
                 .await
                 .ok();
@@ -1294,7 +1297,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
         .ok();
 
     // Webhook delivery enrichment: queryable event_type, merchant_id, response tracking
-    for sql in &[
+    for sql in [
         "ALTER TABLE webhook_deliveries ADD COLUMN event_type TEXT",
         "ALTER TABLE webhook_deliveries ADD COLUMN merchant_id TEXT",
         "ALTER TABLE webhook_deliveries ADD COLUMN response_status INTEGER",
@@ -1384,7 +1387,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
     .ok();
 
     // Luma integration: merchant API key, event/price linking, invoice PII + registration state
-    for sql in &[
+    for sql in [
         "ALTER TABLE merchants ADD COLUMN luma_api_key TEXT",
         "ALTER TABLE events ADD COLUMN luma_event_id TEXT",
         "ALTER TABLE events ADD COLUMN luma_event_url TEXT",
@@ -1404,7 +1407,7 @@ pub(crate) async fn apply_inline_schema_migration(pool: SqlitePool) -> anyhow::R
         .ok();
 
     // Donation infrastructure: extend payment_links and invoices
-    for sql in &[
+    for sql in [
         "ALTER TABLE payment_links ADD COLUMN mode TEXT NOT NULL DEFAULT 'payment'",
         "ALTER TABLE payment_links ADD COLUMN donation_config TEXT",
         "ALTER TABLE payment_links ADD COLUMN total_raised INTEGER NOT NULL DEFAULT 0",
