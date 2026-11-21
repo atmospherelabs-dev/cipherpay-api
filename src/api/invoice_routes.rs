@@ -1,3 +1,4 @@
+use crate::timefmt::TimestampExt;
 use actix_web::web;
 use actix_web_lab::sse;
 use base64::Engine;
@@ -509,9 +510,9 @@ pub async fn ledger_by_token(
             }
             if let Some(exp) = row.get::<Option<String>, _>("expires_at") {
                 if let Ok(exp_dt) =
-                    chrono::NaiveDateTime::parse_from_str(&exp, "%Y-%m-%dT%H:%M:%SZ")
+                    crate::timefmt::parse_z(&exp)
                 {
-                    if exp_dt < chrono::Utc::now().naive_utc() {
+                    if exp_dt < crate::timefmt::now() {
                         return not_found();
                     }
                 }
@@ -607,9 +608,8 @@ pub async fn create_ledger_token(
     }
 
     let id = uuid::Uuid::new_v4().to_string();
-    let expires_at = (chrono::Utc::now() + chrono::Duration::days(expires_days))
-        .format("%Y-%m-%dT%H:%M:%SZ")
-        .to_string();
+    let expires_at = (crate::timefmt::now() + crate::timefmt::Duration::days(expires_days))
+        .format_z();
 
     let result = sqlx::query(
         "INSERT INTO ledger_tokens (id, merchant_id, label, expires_at) VALUES (?, ?, ?, ?)",
@@ -647,7 +647,7 @@ pub async fn revoke_ledger_token(
     };
 
     let token_id = path.into_inner();
-    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let now = crate::timefmt::now().format_z();
 
     let result = sqlx::query(
         "UPDATE ledger_tokens SET revoked_at = ? WHERE id = ? AND merchant_id = ? AND revoked_at IS NULL",

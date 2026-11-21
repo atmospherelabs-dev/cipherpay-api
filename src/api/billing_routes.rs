@@ -157,7 +157,7 @@ pub async fn billing_settle(
             zec_ngn: 0.0,
             zec_chf: 0.0,
             zec_inr: 0.0,
-            updated_at: chrono::Utc::now(),
+            updated_at: crate::timefmt::now(),
         },
     };
 

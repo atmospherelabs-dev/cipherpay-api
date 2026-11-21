@@ -1,3 +1,4 @@
+use crate::timefmt::TimestampExt;
 use actix_web::{web, HttpRequest, HttpResponse};
 use sqlx::SqlitePool;
 
@@ -6,7 +7,7 @@ use crate::events::parse_event_datetime;
 
 /// Normalize a Luma ISO 8601 datetime (e.g. "2026-04-01T15:00:00.000Z") to "YYYY-MM-DDTHH:MM"
 fn normalize_luma_date(s: &str) -> Option<String> {
-    parse_event_datetime(s).map(|dt| dt.format("%Y-%m-%dT%H:%M").to_string())
+    parse_event_datetime(s).map(|dt| crate::timefmt::format_naive_minutes(dt))
 }
 
 /// GET /api/luma/events -- list importable Luma events for the authenticated merchant
@@ -54,7 +55,7 @@ pub async fn list_events(
     .into_iter()
     .collect();
 
-    let now = chrono::Utc::now().naive_utc();
+    let now = crate::timefmt::now();
 
     let mut result = Vec::new();
     for ev in events {
@@ -65,7 +66,7 @@ pub async fn list_events(
         // Skip past events
         if let Some(ref start) = ev.start_at {
             if let Some(dt) = parse_event_datetime(start) {
-                if dt < now {
+                if dt.assume_utc() < now {
                     continue;
                 }
             }
@@ -423,10 +424,10 @@ pub async fn sync_event(
     };
 
     // Event date has passed → transition to 'past' status
-    let now = chrono::Utc::now().naive_utc();
+    let now = crate::timefmt::now();
     if let Some(ref start) = luma_event.start_at {
         if let Some(dt) = parse_event_datetime(start) {
-            if dt < now {
+            if dt.assume_utc() < now {
                 tracing::info!(event_id = %event_id, "Luma event date has passed, marking as past");
                 sqlx::query(
                     "UPDATE events SET status = 'past' WHERE id = ? AND status != 'cancelled'",
@@ -548,7 +549,7 @@ pub async fn sync_event(
             .bind(&tt.name)
             .bind(tt.max_capacity)
             .bind(&tt.api_id)
-            .bind(chrono::Utc::now().to_rfc3339())
+            .bind(crate::timefmt::now().to_rfc3339())
             .execute(pool.get_ref())
             .await
             .ok();

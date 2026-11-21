@@ -1,3 +1,4 @@
+use crate::timefmt::TimestampExt;
 use actix_web::{web, HttpRequest, HttpResponse};
 use sqlx::SqlitePool;
 
@@ -103,7 +104,7 @@ pub async fn status(
 
     match subscriptions::get_subscription(pool.get_ref(), &sub_id).await {
         Ok(Some(sub)) if sub.merchant_id == merchant.id => {
-            let is_active = sub.has_access_at(chrono::Utc::now());
+            let is_active = sub.has_access_at(crate::timefmt::now());
 
             HttpResponse::Ok().json(serde_json::json!({
                 "subscription_id": sub.id,
@@ -267,9 +268,8 @@ pub async fn simulate_period_end(
     }
 
     // Fast-forward: set current_period_end to 1 hour ago
-    let past = (chrono::Utc::now() - chrono::Duration::hours(1))
-        .format("%Y-%m-%dT%H:%M:%SZ")
-        .to_string();
+    let past = (crate::timefmt::now() - crate::timefmt::Duration::hours(1))
+        .format_z();
 
     if let Err(e) = sqlx::query("UPDATE subscriptions SET current_period_end = ? WHERE id = ?")
         .bind(&past)

@@ -404,8 +404,8 @@ async fn reconcile_status(
     let deadline_passed = q["providerDeadline"]
         .as_str()
         .or(q["deadline"].as_str())
-        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-        .is_some_and(|d| d < Utc::now());
+        .and_then(|s| crate::timefmt::parse_rfc3339(s).ok())
+        .is_some_and(|d| d < crate::timefmt::now());
     if inv.status == "confirmed"
         && (data["status"] == "REFUNDED"
             || (data["status"] == "PENDING_DEPOSIT" && deadline_passed))
@@ -480,7 +480,7 @@ async fn reconcile_status(
         .execute(&mut *tx)
         .await?;
     sqlx::query("UPDATE crosschain_attempts SET state='SUCCESS',last_success=? WHERE invoice_id=?")
-        .bind(Utc::now().timestamp())
+        .bind(crate::timefmt::now().unix_timestamp())
         .bind(id)
         .execute(&mut *tx)
         .await?;
@@ -691,7 +691,7 @@ pub fn start_worker(pool: SqlitePool, gateway: web::Data<Gateway>, key: String) 
             if let Err(e) = crate::referrals::reconcile(&pool).await {
                 tracing::error!(error=%e,"Referral reconciliation failed");
             }
-            let now = Utc::now().timestamp();
+            let now = crate::timefmt::now().unix_timestamp();
             if now / 900 != last_alert {
                 last_alert = now / 900;
                 if let Ok(issues) = operations::issues(&pool).await {
@@ -740,7 +740,7 @@ pub fn start_worker(pool: SqlitePool, gateway: web::Data<Gateway>, key: String) 
                         // Unverified/ambiguous attempts stay explicitly pending;
                         // never turn a provider outage into a merchant bill.
                         let _ = sqlx::query("UPDATE crosschain_fees SET failures=failures+1,next_check=?+MIN(3600,60*(1+failures)) WHERE invoice_id=? AND state NOT IN ('collected','direct','provider_handled')")
-                            .bind(Utc::now().timestamp()).bind(&id).execute(&pool).await;
+                            .bind(crate::timefmt::now().unix_timestamp()).bind(&id).execute(&pool).await;
                     }
                 }
             }
@@ -962,7 +962,7 @@ mod tests {
         sqlx::query("INSERT INTO crosschain_fees(invoice_id,asset_id,recipient,total_bps,cipherpay_bps,failures) VALUES ('other','usdc','cipherscan.near',145,125,564)")
             .execute(&p).await.unwrap();
         sqlx::query("UPDATE invoices SET status='expired' WHERE id='other'").execute(&p).await.unwrap();
-        let now = Utc::now().timestamp();
+        let now = crate::timefmt::now().unix_timestamp();
         // The quoted attempt is still checked; the unquoted expired one is not.
         assert_eq!(due_fee_checks(&p, now).await.unwrap(), vec!["i".to_string()]);
         // The row is untouched and still surfaces for manual review.

@@ -1,6 +1,7 @@
+use crate::timefmt::TimestampExt;
 use actix_web::cookie::{Cookie, SameSite};
 use actix_web::{web, HttpRequest, HttpResponse};
-use chrono::{Duration, Utc};
+use crate::timefmt::Duration;
 use serde::Deserialize;
 use sqlx::SqlitePool;
 use uuid::Uuid;
@@ -48,9 +49,8 @@ pub async fn create_session(
     };
 
     let session_id = Uuid::new_v4().to_string();
-    let expires_at = (Utc::now() + Duration::hours(SESSION_HOURS))
-        .format("%Y-%m-%dT%H:%M:%SZ")
-        .to_string();
+    let expires_at = (crate::timefmt::now() + Duration::hours(SESSION_HOURS))
+        .format_z();
 
     if let Err(e) =
         sqlx::query("INSERT INTO sessions (id, merchant_id, expires_at) VALUES (?, ?, ?)")
@@ -67,7 +67,7 @@ pub async fn create_session(
     }
 
     // Track last token login timestamp
-    let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let now = crate::timefmt::now().format_z();
     let _ = sqlx::query("UPDATE merchants SET last_token_login_at = ? WHERE id = ?")
         .bind(&now)
         .bind(&merchant.id)
@@ -488,7 +488,7 @@ pub async fn retry_webhook(
             .json(serde_json::json!({"error": format!("Blocked: {reason}")}));
     }
 
-    let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let ts = crate::timefmt::now().format_z();
     let mut body: serde_json::Value = match serde_json::from_str(&payload) {
         Ok(v) => v,
         Err(_) => {

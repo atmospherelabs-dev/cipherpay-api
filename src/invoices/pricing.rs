@@ -1,4 +1,3 @@
-use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -16,7 +15,8 @@ pub struct ZecRates {
     pub zec_ngn: f64,
     pub zec_chf: f64,
     pub zec_inr: f64,
-    pub updated_at: DateTime<Utc>,
+    #[serde(serialize_with = "crate::timefmt::serialize_rfc3339_z")]
+    pub updated_at: crate::timefmt::OffsetDateTime,
 }
 
 impl ZecRates {
@@ -64,7 +64,7 @@ impl PriceService {
         {
             let cache = self.cached.read().await;
             if let Some(rates) = &*cache {
-                let age = (Utc::now() - rates.updated_at).num_seconds() as u64;
+                let age = (crate::timefmt::now() - rates.updated_at).whole_seconds() as u64;
                 if age < self.cache_secs {
                     return Ok(rates.clone());
                 }
@@ -87,7 +87,7 @@ impl PriceService {
             Err(e) => {
                 let cache = self.cached.read().await;
                 if let Some(stale) = &*cache {
-                    tracing::warn!(error = %e, age_secs = (Utc::now() - stale.updated_at).num_seconds(), "CoinGecko unavailable, using last known rate");
+                    tracing::warn!(error = %e, age_secs = (crate::timefmt::now() - stale.updated_at).whole_seconds(), "CoinGecko unavailable, using last known rate");
                     return Ok(stale.clone());
                 }
                 tracing::error!(error = %e, "CoinGecko unavailable and no cached rate — prices will be inaccurate");
@@ -141,7 +141,7 @@ impl PriceService {
             zec_ngn: zec["ngn"].as_f64().unwrap_or(0.0),
             zec_chf: zec["chf"].as_f64().unwrap_or(0.0),
             zec_inr: zec["inr"].as_f64().unwrap_or(0.0),
-            updated_at: Utc::now(),
+            updated_at: crate::timefmt::now(),
         })
     }
 }

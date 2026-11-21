@@ -1,3 +1,4 @@
+use crate::timefmt::TimestampExt;
 use actix_web::{web, HttpRequest, HttpResponse};
 use serde::Deserialize;
 use sqlx::SqlitePool;
@@ -161,9 +162,8 @@ pub async fn create_pos_session(
 
     // Create a POS-scoped session
     let session_id = uuid::Uuid::new_v4().to_string();
-    let expires_at = (chrono::Utc::now() + chrono::Duration::hours(POS_SESSION_HOURS))
-        .format("%Y-%m-%dT%H:%M:%SZ")
-        .to_string();
+    let expires_at = (crate::timefmt::now() + crate::timefmt::Duration::hours(POS_SESSION_HOURS))
+        .format_z();
 
     if let Err(e) = sqlx::query(
         "INSERT INTO sessions (id, merchant_id, expires_at, pos_scoped) VALUES (?, ?, ?, 1)",

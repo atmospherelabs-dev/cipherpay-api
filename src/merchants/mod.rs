@@ -1,3 +1,4 @@
+use crate::timefmt::TimestampExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
@@ -495,9 +496,8 @@ pub async fn recovery_recently_requested(
     pool: &SqlitePool,
     merchant_id: &str,
 ) -> anyhow::Result<bool> {
-    let cutoff = (chrono::Utc::now() - chrono::Duration::minutes(RECOVERY_EMAIL_COOLDOWN_MINUTES))
-        .format("%Y-%m-%dT%H:%M:%SZ")
-        .to_string();
+    let cutoff = (crate::timefmt::now() - crate::timefmt::Duration::minutes(RECOVERY_EMAIL_COOLDOWN_MINUTES))
+        .format_z();
     let recent: Option<(i64,)> = sqlx::query_as(
         "SELECT 1 FROM recovery_tokens WHERE merchant_id = ? AND created_at > ? LIMIT 1",
     )
@@ -512,9 +512,8 @@ pub async fn create_recovery_token(pool: &SqlitePool, merchant_id: &str) -> anyh
     let token = Uuid::new_v4().to_string();
     let token_hash = hash_key(&token);
     let id = Uuid::new_v4().to_string();
-    let expires_at = (chrono::Utc::now() + chrono::Duration::hours(1))
-        .format("%Y-%m-%dT%H:%M:%SZ")
-        .to_string();
+    let expires_at = (crate::timefmt::now() + crate::timefmt::Duration::hours(1))
+        .format_z();
 
     sqlx::query("DELETE FROM recovery_tokens WHERE merchant_id = ?")
         .bind(merchant_id)
@@ -643,10 +642,9 @@ mod recovery_cooldown_tests {
         assert!(recovery_recently_requested(&pool, "m1").await.unwrap());
         assert!(!recovery_recently_requested(&pool, "m2").await.unwrap());
 
-        let old = (chrono::Utc::now()
-            - chrono::Duration::minutes(RECOVERY_EMAIL_COOLDOWN_MINUTES + 1))
-        .format("%Y-%m-%dT%H:%M:%SZ")
-        .to_string();
+        let old = (crate::timefmt::now()
+            - crate::timefmt::Duration::minutes(RECOVERY_EMAIL_COOLDOWN_MINUTES + 1))
+        .format_z();
         sqlx::query("UPDATE recovery_tokens SET created_at = ? WHERE merchant_id = 'm1'")
             .bind(&old)
             .execute(&pool)

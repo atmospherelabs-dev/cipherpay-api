@@ -1,4 +1,4 @@
-use chrono::Utc;
+use crate::timefmt::TimestampExt;
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
@@ -30,7 +30,7 @@ pub async fn create_fee_entry(
     fee_rate_applied: f64,
 ) -> anyhow::Result<()> {
     let id = Uuid::new_v4().to_string();
-    let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let now = crate::timefmt::now().format_z();
     let fee_amount_zatoshis = crate::invoices::zec_to_zatoshis(fee_amount_zec)?;
 
     // The entry and aggregate must commit together. A duplicate scanner event
