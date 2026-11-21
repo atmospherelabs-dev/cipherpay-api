@@ -1,4 +1,4 @@
-use chrono::Utc;
+use crate::timefmt::TimestampExt;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use sqlx::SqlitePool;
@@ -81,7 +81,7 @@ pub async fn dispatch_event(
         return Ok(());
     }
 
-    let timestamp = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let timestamp = crate::timefmt::now().format_z();
 
     let mut payload = extra;
     if let Some(obj) = payload.as_object_mut() {
@@ -99,9 +99,8 @@ pub async fn dispatch_event(
     let signature = sign_payload(&webhook_secret, &timestamp, &payload_str);
 
     let delivery_id = Uuid::new_v4().to_string();
-    let next_retry = (Utc::now() + chrono::Duration::seconds(jittered_retry_delay_secs(1)))
-        .format("%Y-%m-%dT%H:%M:%SZ")
-        .to_string();
+    let next_retry = (crate::timefmt::now() + crate::timefmt::Duration::seconds(jittered_retry_delay_secs(1)))
+        .format_z();
 
     let invoice_id_for_fk = payload.get("invoice_id").and_then(|v| v.as_str());
 
@@ -169,7 +168,7 @@ pub async fn retry_failed(
     http: &reqwest::Client,
     encryption_key: &str,
 ) -> anyhow::Result<()> {
-    let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let now = crate::timefmt::now().format_z();
 
     let rows = sqlx::query_as::<_, (String, String, String, String, i64)>(
         "WITH ready AS (
@@ -240,7 +239,7 @@ pub async fn retry_failed(
             continue;
         }
 
-        let ts = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let ts = crate::timefmt::now().format_z();
         let mut body: serde_json::Value = serde_json::from_str(&payload)?;
         if let Some(obj) = body.as_object_mut() {
             obj.insert(
@@ -311,9 +310,8 @@ pub async fn retry_failed(
                 let delay = retry_after_secs
                     .map(|ra| base_delay.max(ra.min(36000)))
                     .unwrap_or(base_delay);
-                let next = (Utc::now() + chrono::Duration::seconds(delay))
-                    .format("%Y-%m-%dT%H:%M:%SZ")
-                    .to_string();
+                let next = (crate::timefmt::now() + crate::timefmt::Duration::seconds(delay))
+                    .format_z();
                 sqlx::query(
                     "UPDATE webhook_deliveries SET attempts = ?, last_attempt_at = ?, next_retry_at = ?, response_status = ?, response_error = ? WHERE id = ?"
                 )

@@ -1,3 +1,4 @@
+use crate::timefmt::TimestampExt;
 use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -126,7 +127,7 @@ pub async fn scan_ticket(
     code: &str,
     merchant_id: &str,
 ) -> anyhow::Result<Option<(Ticket, bool)>> {
-    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let now = crate::timefmt::now().format_z();
     let update = sqlx::query(
         "UPDATE tickets
          SET status = 'used', used_at = ?

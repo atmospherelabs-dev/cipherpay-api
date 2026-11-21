@@ -527,11 +527,10 @@ async fn checkout(
             }));
         }
         if let Some(ref date_str) = event_date {
-            if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(date_str, "%Y-%m-%dT%H:%M:%S")
-                .or_else(|_| chrono::NaiveDateTime::parse_from_str(date_str, "%Y-%m-%dT%H:%M"))
+            if let Ok(dt) = crate::timefmt::parse_naive(date_str)
             {
-                let event_utc = dt.and_utc();
-                if event_utc < chrono::Utc::now() {
+                let event_utc = dt.assume_utc();
+                if event_utc < crate::timefmt::now() {
                     let pool_bg = pool.clone();
                     let pid = product.id.clone();
                     tokio::spawn(async move {

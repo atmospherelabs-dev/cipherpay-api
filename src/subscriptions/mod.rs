@@ -1,4 +1,4 @@
-use chrono::{Duration as ChronoDuration, Utc};
+use crate::timefmt::TimestampExt;
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, SqlitePool};
 use uuid::Uuid;
@@ -20,9 +20,9 @@ pub struct Subscription {
 }
 
 impl Subscription {
-    pub fn has_access_at(&self, now: chrono::DateTime<Utc>) -> bool {
+    pub fn has_access_at(&self, now: crate::timefmt::OffsetDateTime) -> bool {
         self.status == "active"
-            && chrono::DateTime::parse_from_rfc3339(&self.current_period_end)
+            && crate::timefmt::parse_rfc3339(&self.current_period_end)
                 .is_ok_and(|end| now < end)
     }
 }
@@ -36,16 +36,16 @@ pub struct CreateSubscriptionRequest {
 const SUB_COLS: &str = "id, merchant_id, price_id, label, status, current_period_start, current_period_end, cancel_at_period_end, canceled_at, created_at, current_invoice_id, pause_at_period_end";
 
 fn compute_period_end(
-    start: &chrono::DateTime<Utc>,
+    start: &crate::timefmt::OffsetDateTime,
     interval: &str,
     count: i32,
-) -> chrono::DateTime<Utc> {
+) -> crate::timefmt::OffsetDateTime {
     match interval {
-        "day" => *start + ChronoDuration::days(count as i64),
-        "week" => *start + ChronoDuration::weeks(count as i64),
-        "month" => *start + ChronoDuration::days(30 * count as i64),
-        "year" => *start + ChronoDuration::days(365 * count as i64),
-        _ => *start + ChronoDuration::days(30),
+        "day" => *start + crate::timefmt::Duration::days(count as i64),
+        "week" => *start + crate::timefmt::Duration::weeks(count as i64),
+        "month" => *start + crate::timefmt::Duration::days(30 * count as i64),
+        "year" => *start + crate::timefmt::Duration::days(365 * count as i64),
+        _ => *start + crate::timefmt::Duration::days(30),
     }
 }
 
@@ -75,11 +75,10 @@ pub async fn create_subscription(
     let interval = price.billing_interval.as_deref().unwrap_or("month");
     let count = price.interval_count.unwrap_or(1);
 
-    let now = Utc::now();
-    let period_start = now.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let now = crate::timefmt::now();
+    let period_start = now.format_z();
     let period_end = compute_period_end(&now, interval, count)
-        .format("%Y-%m-%dT%H:%M:%SZ")
-        .to_string();
+        .format_z();
 
     let id = format!("sub_{}", Uuid::new_v4().to_string().replace('-', ""));
 
@@ -143,7 +142,7 @@ pub async fn cancel_subscription(
         return Ok(Some(sub));
     }
 
-    let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let now = crate::timefmt::now().format_z();
 
     if at_period_end {
         sqlx::query(
@@ -272,11 +271,10 @@ pub async fn resume_subscription(
 
         let interval = price.billing_interval.as_deref().unwrap_or("month");
         let count = price.interval_count.unwrap_or(1);
-        let now = Utc::now();
-        let new_start = now.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let now = crate::timefmt::now();
+        let new_start = now.format_z();
         let new_end = compute_period_end(&now, interval, count)
-            .format("%Y-%m-%dT%H:%M:%SZ")
-            .to_string();
+            .format_z();
 
         sqlx::query(
             "UPDATE subscriptions SET status = 'active', pause_at_period_end = 0,
@@ -326,7 +324,7 @@ pub async fn process_renewals(
     merchant_ufvks: &std::collections::HashMap<String, String>,
     fee_config: Option<&crate::invoices::FeeConfig>,
 ) -> anyhow::Result<u32> {
-    let now_str = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let now_str = crate::timefmt::now().format_z();
     let mut actions = 0u32;
 
     // 0. Pause subscriptions scheduled to pause at period end
@@ -414,9 +412,8 @@ pub async fn process_renewals(
     }
 
     // 2. Generate draft invoices for active subscriptions approaching period end
-    let notice_threshold = (Utc::now() + ChronoDuration::days(RENEWAL_NOTICE_DAYS))
-        .format("%Y-%m-%dT%H:%M:%SZ")
-        .to_string();
+    let notice_threshold = (crate::timefmt::now() + crate::timefmt::Duration::days(RENEWAL_NOTICE_DAYS))
+        .format_z();
 
     let q = format!(
         "SELECT {} FROM subscriptions WHERE status = 'active' AND current_period_end <= ? AND cancel_at_period_end = 0 AND pause_at_period_end = 0 LIMIT 500",
@@ -667,15 +664,14 @@ pub async fn renew_from_confirmed_invoice(
         .await?
         .ok_or_else(|| anyhow::anyhow!("Subscription price not found"))?;
     let period_end =
-        chrono::DateTime::parse_from_rfc3339(&sub.current_period_end)?.with_timezone(&Utc);
-    let new_start = period_end.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        crate::timefmt::parse_rfc3339(&sub.current_period_end)?;
+    let new_start = period_end.format_z();
     let new_end = compute_period_end(
         &period_end,
         price.billing_interval.as_deref().unwrap_or("month"),
         price.interval_count.unwrap_or(1),
     )
-    .format("%Y-%m-%dT%H:%M:%SZ")
-    .to_string();
+    .format_z();
 
     // Matching the invoice and old boundary makes concurrent/repeated application a no-op.
     let result = sqlx::query(
@@ -717,11 +713,10 @@ pub async fn advance_subscription_period(
     // A renewal buys the next period, including when it is paid early.
     // Keep the existing billing boundary instead of discarding paid time.
     let period_end =
-        chrono::DateTime::parse_from_rfc3339(&sub.current_period_end)?.with_timezone(&Utc);
-    let new_start = period_end.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        crate::timefmt::parse_rfc3339(&sub.current_period_end)?;
+    let new_start = period_end.format_z();
     let new_end = compute_period_end(&period_end, interval, count)
-        .format("%Y-%m-%dT%H:%M:%SZ")
-        .to_string();
+        .format_z();
 
     sqlx::query(
         "UPDATE subscriptions SET current_period_start = ?, current_period_end = ?, current_invoice_id = NULL
@@ -795,10 +790,9 @@ mod tests {
 
     async fn seed_confirmed_renewal(pool: &SqlitePool, sub: &Subscription) -> String {
         let invoice_id = format!("renewal_{}", sub.id);
-        let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-        let expiry = (Utc::now() + ChronoDuration::minutes(10))
-            .format("%Y-%m-%dT%H:%M:%SZ")
-            .to_string();
+        let now = crate::timefmt::now().format_z();
+        let expiry = (crate::timefmt::now() + crate::timefmt::Duration::minutes(10))
+            .format_z();
         sqlx::query("INSERT INTO invoices (id, merchant_id, memo_code, price_eur, price_zec, zec_rate_at_creation, status, expires_at, confirmed_at, subscription_id, price_id, price_zatoshis, received_zatoshis)
             VALUES (?, ?, ?, 9.99, 0.1, 100.0, 'confirmed', ?, ?, ?, ?, 10000000, 10000000)")
             .bind(&invoice_id).bind(&sub.merchant_id).bind(&invoice_id)
@@ -819,9 +813,8 @@ mod tests {
         seed_merchant(&pool, "renewal").await;
         seed_product_and_price(&pool, "renewal", "renewal_product", "renewal_price").await;
         let sub = create_test_sub(&pool, "renewal", "renewal_price").await;
-        let old_end = (Utc::now() + ChronoDuration::days(3))
-            .format("%Y-%m-%dT%H:%M:%SZ")
-            .to_string();
+        let old_end = (crate::timefmt::now() + crate::timefmt::Duration::days(3))
+            .format_z();
         sqlx::query("UPDATE subscriptions SET current_period_end = ? WHERE id = ?")
             .bind(&old_end)
             .bind(&sub.id)
@@ -838,10 +831,9 @@ mod tests {
         let second = second.unwrap();
         assert_ne!(first.is_some(), second.is_some());
         let renewed = first.or(second).unwrap();
-        let expected_end = (chrono::DateTime::parse_from_rfc3339(&old_end).unwrap()
-            + ChronoDuration::days(30))
-        .format("%Y-%m-%dT%H:%M:%SZ")
-        .to_string();
+        let expected_end = (crate::timefmt::parse_rfc3339(&old_end).unwrap()
+            + crate::timefmt::Duration::days(30))
+        .format_z();
         assert_eq!(renewed.current_period_start, old_end);
         assert_eq!(renewed.current_period_end, expected_end);
         assert!(renew_from_confirmed_invoice(&pool, &invoice_id)
@@ -856,9 +848,8 @@ mod tests {
         seed_merchant(&pool, "delayed").await;
         seed_product_and_price(&pool, "delayed", "delayed_product", "delayed_price").await;
         let sub = create_test_sub(&pool, "delayed", "delayed_price").await;
-        let old_end = (Utc::now() - ChronoDuration::minutes(5))
-            .format("%Y-%m-%dT%H:%M:%SZ")
-            .to_string();
+        let old_end = (crate::timefmt::now() - crate::timefmt::Duration::minutes(5))
+            .format_z();
         sqlx::query("UPDATE subscriptions SET current_period_end = ? WHERE id = ?")
             .bind(&old_end)
             .bind(&sub.id)
@@ -873,18 +864,17 @@ mod tests {
             .await
             .unwrap();
         let expired = get_subscription(&pool, &sub.id).await.unwrap().unwrap();
-        assert!(!expired.has_access_at(Utc::now()));
+        assert!(!expired.has_access_at(crate::timefmt::now()));
         let renewed = renew_from_confirmed_invoice(&pool, &invoice_id)
             .await
             .unwrap()
             .unwrap();
-        let expected_end = (chrono::DateTime::parse_from_rfc3339(&old_end).unwrap()
-            + ChronoDuration::days(30))
-        .format("%Y-%m-%dT%H:%M:%SZ")
-        .to_string();
+        let expected_end = (crate::timefmt::parse_rfc3339(&old_end).unwrap()
+            + crate::timefmt::Duration::days(30))
+        .format_z();
         assert_eq!(renewed.current_period_start, old_end);
         assert_eq!(renewed.current_period_end, expected_end);
-        assert!(renewed.has_access_at(Utc::now()));
+        assert!(renewed.has_access_at(crate::timefmt::now()));
     }
 
     #[tokio::test]
@@ -961,9 +951,8 @@ mod tests {
         seed_product_and_price(&pool, "recovery", "recovery_product", "recovery_price").await;
         let sub = create_test_sub(&pool, "recovery", "recovery_price").await;
         let invoice_id = seed_confirmed_renewal(&pool, &sub).await;
-        let past = (Utc::now() - ChronoDuration::minutes(5))
-            .format("%Y-%m-%dT%H:%M:%SZ")
-            .to_string();
+        let past = (crate::timefmt::now() - crate::timefmt::Duration::minutes(5))
+            .format_z();
         sqlx::query(
             "UPDATE subscriptions SET status = 'past_due', current_period_end = ? WHERE id = ?",
         )
@@ -984,7 +973,7 @@ mod tests {
         assert_eq!(actions, 1);
         let renewed = get_subscription(&pool, &sub.id).await.unwrap().unwrap();
         assert_eq!(renewed.current_period_start, past);
-        assert!(renewed.has_access_at(Utc::now()));
+        assert!(renewed.has_access_at(crate::timefmt::now()));
         assert!(renew_from_confirmed_invoice(&pool, &invoice_id)
             .await
             .unwrap()
@@ -997,9 +986,8 @@ mod tests {
         seed_merchant(&pool, "unpaid").await;
         seed_product_and_price(&pool, "unpaid", "unpaid_product", "unpaid_price").await;
         let sub = create_test_sub(&pool, "unpaid", "unpaid_price").await;
-        let old_end = (Utc::now() + ChronoDuration::minutes(5))
-            .format("%Y-%m-%dT%H:%M:%SZ")
-            .to_string();
+        let old_end = (crate::timefmt::now() + crate::timefmt::Duration::minutes(5))
+            .format_z();
         sqlx::query("UPDATE subscriptions SET current_period_end = ?, current_invoice_id = 'unpaid_invoice' WHERE id = ?")
             .bind(&old_end)
             .bind(&sub.id)
@@ -1025,7 +1013,7 @@ mod tests {
             zec_ngn: 100.0,
             zec_chf: 100.0,
             zec_inr: 100.0,
-            updated_at: Utc::now(),
+            updated_at: crate::timefmt::now(),
         };
 
         for _ in 0..2 {
@@ -1036,21 +1024,19 @@ mod tests {
             assert!(invoice.expires_at > old_end);
             let unchanged = get_subscription(&pool, &sub.id).await.unwrap().unwrap();
             assert_eq!(unchanged.current_period_end, old_end);
-            let boundary = chrono::DateTime::parse_from_rfc3339(&old_end)
-                .unwrap()
-                .with_timezone(&Utc);
-            assert!(unchanged.has_access_at(boundary - ChronoDuration::seconds(1)));
+            let boundary = crate::timefmt::parse_rfc3339(&old_end)
+                .unwrap();
+            assert!(unchanged.has_access_at(boundary - crate::timefmt::Duration::seconds(1)));
             assert!(!unchanged.has_access_at(boundary));
-            assert!(!unchanged.has_access_at(boundary + ChronoDuration::minutes(1)));
+            assert!(!unchanged.has_access_at(boundary + crate::timefmt::Duration::minutes(1)));
             sqlx::query("UPDATE invoices SET status = 'expired' WHERE id = 'unpaid_invoice'")
                 .execute(&pool)
                 .await
                 .unwrap();
         }
 
-        let past = (Utc::now() - ChronoDuration::seconds(1))
-            .format("%Y-%m-%dT%H:%M:%SZ")
-            .to_string();
+        let past = (crate::timefmt::now() - crate::timefmt::Duration::seconds(1))
+            .format_z();
         sqlx::query("UPDATE subscriptions SET current_period_end = ? WHERE id = ?")
             .bind(&past)
             .bind(&sub.id)
@@ -1318,9 +1304,8 @@ mod tests {
 
         // Schedule pause and fast-forward period end to the past
         pause_subscription(&pool, &sub.id, m).await.unwrap();
-        let past = (Utc::now() - ChronoDuration::hours(1))
-            .format("%Y-%m-%dT%H:%M:%SZ")
-            .to_string();
+        let past = (crate::timefmt::now() - crate::timefmt::Duration::hours(1))
+            .format_z();
         sqlx::query("UPDATE subscriptions SET current_period_end = ? WHERE id = ?")
             .bind(&past)
             .bind(&sub.id)

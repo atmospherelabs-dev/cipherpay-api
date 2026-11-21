@@ -1,4 +1,4 @@
-use chrono::Utc;
+use crate::timefmt::TimestampExt;
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, SqlitePool};
 use thiserror::Error;
@@ -98,8 +98,8 @@ fn validation_error(message: impl Into<String>) -> anyhow::Error {
 }
 
 /// Parse event_date strings in either "YYYY-MM-DDTHH:MM:SS" or "YYYY-MM-DDTHH:MM" format.
-/// Returns the parsed NaiveDateTime if valid.
-pub fn parse_event_datetime(s: &str) -> Option<chrono::NaiveDateTime> {
+/// Returns the parsed date-time (no offset) if valid.
+pub fn parse_event_datetime(s: &str) -> Option<crate::timefmt::PrimitiveDateTime> {
     // Strip trailing 'Z' and fractional seconds to normalize ISO 8601 variants
     let s = s.trim_end_matches('Z');
     let s = if let Some(dot) = s.rfind('.') {
@@ -107,9 +107,7 @@ pub fn parse_event_datetime(s: &str) -> Option<chrono::NaiveDateTime> {
     } else {
         s
     };
-    chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S")
-        .or_else(|_| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M"))
-        .ok()
+    crate::timefmt::parse_naive(s).ok()
 }
 
 fn slugify(name: &str) -> String {
@@ -589,7 +587,7 @@ pub async fn get_event_detail(
 }
 
 pub async fn mark_past_events(pool: &SqlitePool) -> anyhow::Result<u64> {
-    let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let now = crate::timefmt::now().format_z();
 
     // Also deactivate the backing products so no new checkouts can be created
     sqlx::query(

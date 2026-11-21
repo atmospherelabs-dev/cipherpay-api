@@ -1,3 +1,4 @@
+use crate::timefmt::TimestampExt;
 mod amounts;
 pub mod matching;
 pub mod pricing;
@@ -5,7 +6,7 @@ mod queries;
 mod types;
 
 use base64::Engine;
-use chrono::{Duration, Utc};
+use crate::timefmt::Duration;
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
@@ -54,10 +55,9 @@ pub async fn create_invoice(
         price_zec * rates.zec_usd
     };
 
-    let expires_at = (Utc::now() + Duration::minutes(expiry_minutes))
-        .format("%Y-%m-%dT%H:%M:%SZ")
-        .to_string();
-    let created_at = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let expires_at = (crate::timefmt::now() + Duration::minutes(expiry_minutes))
+        .format_z();
+    let created_at = crate::timefmt::now().format_z();
 
     let div_index = crate::merchants::next_diversifier_index(pool, merchant_id).await?;
     let derived = crate::addresses::derive_invoice_address(merchant_ufvk, div_index)?;
@@ -219,10 +219,9 @@ pub async fn mark_detected(
     txid: &str,
     received_zatoshis: i64,
 ) -> anyhow::Result<bool> {
-    let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-    let new_expires = (Utc::now() + Duration::minutes(30))
-        .format("%Y-%m-%dT%H:%M:%SZ")
-        .to_string();
+    let now = crate::timefmt::now().format_z();
+    let new_expires = (crate::timefmt::now() + Duration::minutes(30))
+        .format_z();
     let result = sqlx::query(
         "UPDATE invoices SET status = 'detected', detected_txid = ?, detected_at = ?, received_zatoshis = ?, expires_at = ?
          WHERE id = ? AND status IN ('pending', 'underpaid')
@@ -252,7 +251,7 @@ pub async fn mark_confirmed(
     confirmed_rate: Option<f64>,
     confirmed_fiat_amount: Option<f64>,
 ) -> anyhow::Result<bool> {
-    let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let now = crate::timefmt::now().format_z();
     let result = sqlx::query(
         "UPDATE invoices SET status = 'confirmed', confirmed_at = ?,
          confirmed_rate = ?, confirmed_fiat_amount = ?
@@ -277,7 +276,7 @@ pub async fn mark_refunded(
     invoice_id: &str,
     refund_txid: Option<&str>,
 ) -> anyhow::Result<()> {
-    let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let now = crate::timefmt::now().format_z();
     sqlx::query(
         "UPDATE invoices SET status = 'refunded', refunded_at = ?, refund_txid = ?
          WHERE id = ? AND status = 'confirmed'",
@@ -326,10 +325,9 @@ pub async fn mark_underpaid(
     received_zatoshis: i64,
     txid: &str,
 ) -> anyhow::Result<()> {
-    let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-    let new_expires = (Utc::now() + Duration::minutes(10))
-        .format("%Y-%m-%dT%H:%M:%SZ")
-        .to_string();
+    let now = crate::timefmt::now().format_z();
+    let new_expires = (crate::timefmt::now() + Duration::minutes(10))
+        .format_z();
     sqlx::query(
         "UPDATE invoices SET status = 'underpaid', received_zatoshis = ?, detected_txid = ?,
          detected_at = ?, expires_at = ?
@@ -383,9 +381,8 @@ pub async fn record_payment(
     .fetch_one(pool)
     .await?;
 
-    let new_expires = (Utc::now() + Duration::minutes(10))
-        .format("%Y-%m-%dT%H:%M:%SZ")
-        .to_string();
+    let new_expires = (crate::timefmt::now() + Duration::minutes(10))
+        .format_z();
     sqlx::query(
         "UPDATE invoices SET received_zatoshis = ?, expires_at = ?
          WHERE id = ? AND status IN ('pending', 'underpaid')",
@@ -433,7 +430,7 @@ pub async fn create_draft_invoice(
 ) -> anyhow::Result<Invoice> {
     let id = Uuid::new_v4().to_string();
     let memo_code = generate_memo_code();
-    let created_at = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let created_at = crate::timefmt::now().format_z();
 
     let div_index = crate::merchants::next_diversifier_index(pool, merchant_id).await?;
     let derived = crate::addresses::derive_invoice_address(merchant_ufvk, div_index)?;
@@ -510,7 +507,7 @@ pub async fn finalize_invoice(
     if let Some(ref sub_id) = invoice.subscription_id {
         let sub = crate::subscriptions::get_subscription(pool, sub_id).await?;
         if let Some(s) = sub {
-            let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+            let now = crate::timefmt::now().format_z();
             if now >= s.current_period_end {
                 anyhow::bail!("Subscription billing period has ended");
             }
@@ -547,9 +544,8 @@ pub async fn finalize_invoice(
     };
     let price_zatoshis = zec_to_zatoshis(price_zec)?;
 
-    let expires_at = (Utc::now() + Duration::minutes(15))
-        .format("%Y-%m-%dT%H:%M:%SZ")
-        .to_string();
+    let expires_at = (crate::timefmt::now() + Duration::minutes(15))
+        .format_z();
 
     let memo_b64 =
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(invoice.memo_code.as_bytes());

@@ -1,3 +1,4 @@
+use crate::timefmt::TimestampExt;
 use super::*;
 use crate::repair_tests::{invoice, merchant, pool};
 use zcash_address::unified::{Encoding, Fvk, Ufvk};
@@ -142,7 +143,7 @@ async fn confidential_gateway_never_retries_with_public_routing() {
 #[tokio::test]
 async fn reservation_is_durable_unique_and_requires_full_payment() {
     let (p, i) = fixture().await;
-    let deadline = (Utc::now() + Duration::minutes(30)).to_rfc3339();
+    let deadline = (crate::timefmt::now() + Duration::minutes(30)).to_rfc3339();
     let (a, b) = tokio::join!(
         reserve(&p, "i", &deadline, None),
         reserve(&p, "i", &deadline, None)
@@ -175,7 +176,7 @@ async fn encrypted_attempt_survives_reload_without_changing_invoice_status() {
     reserve(
         &p,
         "i",
-        &(Utc::now() + Duration::minutes(30)).to_rfc3339(),
+        &(crate::timefmt::now() + Duration::minutes(30)).to_rfc3339(),
         None,
     )
     .await
@@ -233,7 +234,7 @@ async fn wallet_lock_requires_ownership_and_survives_reload() {
     let (p, _) = fixture().await;
     let mut config = crate::config::Config::from_env().unwrap();
     config.encryption_key = "11".repeat(32);
-    let deadline = (Utc::now() + Duration::minutes(30)).to_rfc3339();
+    let deadline = (crate::timefmt::now() + Duration::minutes(30)).to_rfc3339();
     reserve(&p, "i", &deadline, None).await.unwrap();
     let payload = crate::crypto::encrypt(
         &json!({"deadline":deadline}).to_string(),
@@ -347,7 +348,7 @@ async fn strict_settlement_cannot_be_bypassed_by_a_stale_scanner_snapshot() {
     reserve(
         &p,
         "i",
-        &(Utc::now() + Duration::minutes(30)).to_rfc3339(),
+        &(crate::timefmt::now() + Duration::minutes(30)).to_rfc3339(),
         None,
     )
     .await
@@ -391,7 +392,7 @@ async fn http_flow_creates_once_and_provider_success_does_not_settle() {
             echo["appFees"]=json!([{"recipient":"cipherscan.near","fee":125},{"recipient":"provider.near","fee":20}]);
             HttpResponse::Ok().json(signatures::signed(json!({"correlationId":"test-quote","quoteRequest":echo,"quote":{
                 "amountIn":"130000000","amountOut":"10000000","minAmountOut":"10000000",
-                "depositAddress":"0x2345678901234567890123456789012345678901","deadline":(chrono::DateTime::parse_from_rfc3339(body["deadline"].as_str().unwrap()).unwrap()+Duration::days(3)).to_rfc3339(),"timeEstimate":150
+                "depositAddress":"0x2345678901234567890123456789012345678901","deadline":(crate::timefmt::parse_rfc3339(body["deadline"].as_str().unwrap()).unwrap()+Duration::days(3)).to_rfc3339(),"timeEstimate":150
             }})))
         }))
         .route("/status", web::get().to(|| async { HttpResponse::Ok().json(json!({"status":"SUCCESS"})) })))
@@ -448,19 +449,19 @@ async fn http_flow_creates_once_and_provider_success_does_not_settle() {
         .fetch_one(&p).await.unwrap();
     assert_eq!(fee_terms, (145, 125));
     let funding_deadline =
-        chrono::DateTime::parse_from_rfc3339(first["quote"]["deadline"].as_str().unwrap()).unwrap();
+        crate::timefmt::parse_rfc3339(first["quote"]["deadline"].as_str().unwrap()).unwrap();
     let provider_deadline =
-        chrono::DateTime::parse_from_rfc3339(first["quote"]["providerDeadline"].as_str().unwrap())
+        crate::timefmt::parse_rfc3339(first["quote"]["providerDeadline"].as_str().unwrap())
             .unwrap();
-    assert!(funding_deadline < Utc::now() + Duration::minutes(31));
-    assert!(provider_deadline > Utc::now() + Duration::days(2));
+    assert!(funding_deadline < crate::timefmt::now() + Duration::minutes(31));
+    assert!(provider_deadline > crate::timefmt::now() + Duration::days(2));
     let invoice = crate::invoices::get_invoice(&p, "i")
         .await
         .unwrap()
         .unwrap();
     assert!(
-        chrono::DateTime::parse_from_rfc3339(&invoice.expires_at).unwrap()
-            == chrono::DateTime::parse_from_rfc3339("2099-01-01T00:00:00Z").unwrap()
+        crate::timefmt::parse_rfc3339(&invoice.expires_at).unwrap()
+            == crate::timefmt::parse_rfc3339("2099-01-01T00:00:00Z").unwrap()
     );
 
     let second: Value = test::call_and_read_body_json(
@@ -709,27 +710,27 @@ async fn committed_quote_extension_keeps_funding_window_bounded() {
     let (_, i) = fixture().await;
     let body = quote_body(&i, &input(), &asset(), false).unwrap();
     let requested =
-        chrono::DateTime::parse_from_rfc3339(body["deadline"].as_str().unwrap()).unwrap();
+        crate::timefmt::parse_rfc3339(body["deadline"].as_str().unwrap()).unwrap();
     let provider = (requested + Duration::days(3)).to_rfc3339();
     let mut response = json!({"quoteRequest":body,"quote":{"amountIn":"5490787","amountOut":"10000000","minAmountOut":"10000000","depositAddress":input().refund_address,"deadline":provider,"timeWhenInactive":provider}});
     let checked = checked_quote(&response, &body, &asset(), false).unwrap();
     assert_eq!(
-        chrono::DateTime::parse_from_rfc3339(checked["deadline"].as_str().unwrap()).unwrap(),
+        crate::timefmt::parse_rfc3339(checked["deadline"].as_str().unwrap()).unwrap(),
         requested
     );
     assert_eq!(checked["providerDeadline"], provider);
     let earlier =
-        (Utc::now() + Duration::minutes(5)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        (crate::timefmt::now() + Duration::minutes(5)).rfc3339_millis_z();
     response["quote"]["timeWhenInactive"] = json!(earlier);
     assert_eq!(
         checked_quote(&response, &body, &asset(), false).unwrap()["deadline"],
         earlier
     );
-    response["quote"]["timeWhenInactive"] = json!((Utc::now() - Duration::seconds(1)).to_rfc3339());
+    response["quote"]["timeWhenInactive"] = json!((crate::timefmt::now() - Duration::seconds(1)).to_rfc3339());
     assert!(checked_quote(&response, &body, &asset(), false).is_err());
     response["quote"]["timeWhenInactive"] = Value::Null;
     for deadline in [
-        (Utc::now() - Duration::seconds(1)).to_rfc3339(),
+        (crate::timefmt::now() - Duration::seconds(1)).to_rfc3339(),
         (requested + Duration::days(8)).to_rfc3339(),
         "invalid".into(),
     ] {
@@ -754,7 +755,7 @@ async fn public_invoice_marks_crosschain_without_exposing_swap_details() {
     reserve(
         &p,
         "i",
-        &(Utc::now() + Duration::minutes(30)).to_rfc3339(),
+        &(crate::timefmt::now() + Duration::minutes(30)).to_rfc3339(),
         None,
     )
     .await
@@ -777,7 +778,7 @@ async fn merchant_invoice_tag_is_scoped_and_preserves_received_amount() {
     reserve(
         &p,
         "i",
-        &(Utc::now() + Duration::minutes(30)).to_rfc3339(),
+        &(crate::timefmt::now() + Duration::minutes(30)).to_rfc3339(),
         None,
     )
     .await
@@ -868,7 +869,7 @@ async fn unused_reservation_preserves_and_resolves_direct_fee_obligation() {
 async fn quote_never_extends_direct_price_lock_and_recovery_accepts_only_delivery() {
     let (p, _) = fixture().await;
     let original =
-        (Utc::now() + Duration::minutes(2)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        (crate::timefmt::now() + Duration::minutes(2)).rfc3339_secs_z();
     sqlx::query("UPDATE invoices SET expires_at=? WHERE id='i'")
         .bind(&original)
         .execute(&p)
@@ -877,7 +878,7 @@ async fn quote_never_extends_direct_price_lock_and_recovery_accepts_only_deliver
     reserve(
         &p,
         "i",
-        &(Utc::now() + Duration::days(3)).to_rfc3339(),
+        &(crate::timefmt::now() + Duration::days(3)).to_rfc3339(),
         None,
     )
     .await
@@ -970,7 +971,7 @@ async fn public_invoice_cannot_create_adopt_or_lock_a_swap() {
     reserve(
         &p,
         "i",
-        &(Utc::now() + Duration::minutes(30)).to_rfc3339(),
+        &(crate::timefmt::now() + Duration::minutes(30)).to_rfc3339(),
         None,
     )
     .await
@@ -1023,8 +1024,8 @@ async fn private_swap_details_require_the_invoice_capability_for_every_state() {
     use actix_web::{test,App};
     let (p,_)=fixture().await;
     let mut config=crate::config::Config::from_env().unwrap();config.encryption_key="11".repeat(32);
-    reserve(&p,"i",&(Utc::now()+Duration::minutes(10)).to_rfc3339(),None).await.unwrap();
-    let payload=crate::crypto::encrypt(&json!({"asset":asset(),"refundAddress":"private-refund","depositAddress":"private-deposit","depositMemo":"private-memo","amountIn":"123","deadline":(Utc::now()+Duration::minutes(10)).to_rfc3339()}).to_string(),&config.encryption_key).unwrap();
+    reserve(&p,"i",&(crate::timefmt::now()+Duration::minutes(10)).to_rfc3339(),None).await.unwrap();
+    let payload=crate::crypto::encrypt(&json!({"asset":asset(),"refundAddress":"private-refund","depositAddress":"private-deposit","depositMemo":"private-memo","amountIn":"123","deadline":(crate::timefmt::now()+Duration::minutes(10)).to_rfc3339()}).to_string(),&config.encryption_key).unwrap();
     let gateway=Gateway{enabled:true,fee_recipient:None,key:String::new(),base:"http://127.0.0.1:1".into(),client:reqwest::Client::new(), confirmation_client: reqwest::Client::new(), cipherscan_api_url: "http://127.0.0.1:1".into(),tokens:Mutex::new(None),eligibility:Mutex::new(HashMap::new()),eligibility_slots:Semaphore::new(4)};
     let app=test::init_service(App::new().app_data(web::Data::new(p.clone())).app_data(web::Data::new(config)).app_data(web::Data::new(gateway)).route("/{id}",web::get().to(status))).await;
     let token=security::token(&p,"i").await.unwrap();
@@ -1058,7 +1059,7 @@ async fn disabling_crosschain_blocks_new_reservations_but_preserves_existing_dep
     use actix_web::{test,App};
     let (p,_)=fixture().await;
     assert!(operations::enabled(&p,"i").await.unwrap());
-    let deadline=(Utc::now()+Duration::minutes(10)).to_rfc3339();
+    let deadline=(crate::timefmt::now()+Duration::minutes(10)).to_rfc3339();
     sqlx::query("UPDATE merchants SET crosschain_enabled=0 WHERE id='m'").execute(&p).await.unwrap();
     assert!(!reserve(&p,"i",&deadline,None).await.unwrap());
     let config=crate::config::Config::from_env().unwrap();
@@ -1079,7 +1080,7 @@ async fn interrupted_setup_is_reported_and_cannot_be_retried_as_a_new_quote() {
     use actix_web::{test,App};
     let (p,_)=fixture().await;
     let mut config=crate::config::Config::from_env().unwrap();config.admin_key=Some("test-admin".into());
-    reserve(&p,"i",&(Utc::now()+Duration::minutes(10)).to_rfc3339(),None).await.unwrap();
+    reserve(&p,"i",&(crate::timefmt::now()+Duration::minutes(10)).to_rfc3339(),None).await.unwrap();
     sqlx::query("UPDATE crosschain_attempts SET state='NEEDS_REVIEW' WHERE invoice_id='i'").execute(&p).await.unwrap();
     let issues=operations::issues(&p).await.unwrap();assert_eq!(issues[0]["reason"],"setup_review");
     let app=test::init_service(App::new().app_data(web::Data::new(p.clone())).app_data(web::Data::new(config)).route("/issues",web::get().to(operations::admin_issues)).route("/{id}",web::post().to(operations::retry))).await;

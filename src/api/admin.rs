@@ -1,3 +1,4 @@
+use crate::timefmt::TimestampExt;
 use actix_web::web;
 use hmac::{Hmac, Mac};
 use serde::Deserialize;

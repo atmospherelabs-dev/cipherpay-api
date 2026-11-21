@@ -1,8 +1,9 @@
+use crate::timefmt::TimestampExt;
 mod fee_ledger;
 mod status;
 mod types;
 
-use chrono::{Duration, Utc};
+use crate::timefmt::Duration;
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
@@ -135,12 +136,11 @@ pub async fn ensure_billing_cycle(
         _ => config.billing_cycle_days_standard,
     };
 
-    let now = Utc::now();
+    let now = crate::timefmt::now();
     let id = Uuid::new_v4().to_string();
-    let period_start = now.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let period_start = now.format_z();
     let period_end = (now + Duration::days(cycle_days))
-        .format("%Y-%m-%dT%H:%M:%SZ")
-        .to_string();
+        .format_z();
 
     let carried: i64 = sqlx::query_scalar(
         "SELECT COALESCE(SUM(outstanding_zatoshis), 0) FROM billing_cycles
@@ -209,11 +209,10 @@ pub async fn create_settlement_invoice(
 ) -> anyhow::Result<String> {
     let id = Uuid::new_v4().to_string();
     let memo_code = format!("SETTLE-{}", &Uuid::new_v4().to_string()[..8].to_uppercase());
-    let now = Utc::now();
+    let now = crate::timefmt::now();
     let expires_at = (now + Duration::days(7))
-        .format("%Y-%m-%dT%H:%M:%SZ")
-        .to_string();
-    let created_at = now.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        .format_z();
+    let created_at = now.format_z();
 
     let outstanding_zec = crate::invoices::zatoshis_to_zec(outstanding_zatoshis);
     let price_eur = outstanding_zec * zec_eur_rate;
@@ -264,7 +263,7 @@ pub async fn process_billing_cycles(
         return Ok(());
     }
 
-    let now_str = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let now_str = crate::timefmt::now().format_z();
     let enc_key = &config.encryption_key;
 
     // 1. Close expired open cycles
@@ -298,9 +297,8 @@ pub async fn process_billing_cycles(
                 "trusted" => 14,
                 _ => 7,
             };
-            let grace_until = (Utc::now() + Duration::days(grace_days))
-                .format("%Y-%m-%dT%H:%M:%SZ")
-                .to_string();
+            let grace_until = (crate::timefmt::now() + Duration::days(grace_days))
+                .format_z();
 
             let settlement_id = create_settlement_invoice(
                 pool,
@@ -350,9 +348,8 @@ pub async fn process_billing_cycles(
     }
 
     // 1b. Grace period reminders (3 days before grace expires)
-    let reminder_threshold = (Utc::now() + Duration::days(3))
-        .format("%Y-%m-%dT%H:%M:%SZ")
-        .to_string();
+    let reminder_threshold = (crate::timefmt::now() + Duration::days(3))
+        .format_z();
     let invoiced_cycles = sqlx::query_as::<_, BillingCycle>(
         "SELECT * FROM billing_cycles WHERE status = 'invoiced' AND grace_until <= ? AND grace_until > ?",
     )
@@ -368,9 +365,9 @@ pub async fn process_billing_cycles(
             {
                 let days_left = {
                     let grace_dt =
-                        chrono::NaiveDateTime::parse_from_str(grace_until, "%Y-%m-%dT%H:%M:%SZ");
+                        crate::timefmt::parse_z(grace_until);
                     match grace_dt {
-                        Ok(dt) => (dt - Utc::now().naive_utc()).num_days().max(1),
+                        Ok(dt) => (dt - crate::timefmt::now()).whole_days().max(1),
                         Err(_) => 3,
                     }
                 };
@@ -450,10 +447,10 @@ pub async fn process_billing_cycles(
 
         if let Some(grace_until) = &cycle.grace_until {
             if let Ok(grace_dt) =
-                chrono::NaiveDateTime::parse_from_str(grace_until, "%Y-%m-%dT%H:%M:%SZ")
+                crate::timefmt::parse_z(grace_until)
             {
                 let suspend_at = grace_dt + Duration::days(suspend_days);
-                if Utc::now().naive_utc() > suspend_at {
+                if crate::timefmt::now() > suspend_at {
                     sqlx::query("UPDATE billing_cycles SET status = 'suspended' WHERE id = ?")
                         .bind(&cycle.id)
                         .execute(pool)
@@ -513,9 +510,8 @@ pub async fn process_billing_cycles(
     }
 
     // 4b. Warn merchants whose discount expires in 7 days
-    let warning_threshold = (Utc::now() + Duration::days(7))
-        .format("%Y-%m-%dT%H:%M:%SZ")
-        .to_string();
+    let warning_threshold = (crate::timefmt::now() + Duration::days(7))
+        .format_z();
     let warning_merchants: Vec<(String, Option<String>)> = sqlx::query_as(
         "SELECT id, fee_discount_until FROM merchants
          WHERE fee_discount_until IS NOT NULL AND fee_discount_until > ? AND fee_discount_until <= ?",

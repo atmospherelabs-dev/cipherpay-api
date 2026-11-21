@@ -1,8 +1,9 @@
 //! Invoice-bound 1Click payments. Provider status is informational: only the
 //! Zcash scanner may settle an invoice. Never retry an ambiguous quote creation.
+use crate::timefmt::TimestampExt;
 use actix_web::{web, HttpResponse};
 use anyhow::{bail, ensure, Context};
-use chrono::{Duration, Utc};
+use crate::timefmt::Duration;
 use futures::{stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -340,7 +341,7 @@ fn validate_invoice(inv: &crate::invoices::Invoice) -> anyhow::Result<()> {
         "Invoice is not available for a new payment"
     );
     ensure!(
-        chrono::DateTime::parse_from_rfc3339(&inv.expires_at)? > Utc::now(),
+        crate::timefmt::parse_rfc3339(&inv.expires_at)? > crate::timefmt::now(),
         "Invoice has expired"
     );
     let receiver = crate::invoices::matching::orchard_receiver(&inv.payment_address);
@@ -375,7 +376,7 @@ fn quote_body(
         "refundTo": input.refund_address, "refundType": "ORIGIN_CHAIN",
         "depositType": "ORIGIN_CHAIN", "depositMode": "SIMPLE",
         "confidentiality": CONFIDENTIALITY,
-        "deadline": std::cmp::min(Utc::now() + Duration::minutes(minutes), chrono::DateTime::parse_from_rfc3339(&inv.expires_at)?.with_timezone(&Utc)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        "deadline": std::cmp::min(crate::timefmt::now() + Duration::minutes(minutes), crate::timefmt::parse_rfc3339(&inv.expires_at)?).rfc3339_secs_z(),
         "quoteWaitingTimeMs": 3000
     }))
 }
@@ -449,8 +450,8 @@ fn checked_quote(
             "Invalid deposit address"
         );
         let deadline = q["deadline"].as_str().context("Missing quote deadline")?;
-        let until = chrono::DateTime::parse_from_rfc3339(deadline)?;
-        let requested = chrono::DateTime::parse_from_rfc3339(
+        let until = crate::timefmt::parse_rfc3339(deadline)?;
+        let requested = crate::timefmt::parse_rfc3339(
             body["deadline"]
                 .as_str()
                 .context("Missing requested deadline")?,
@@ -458,21 +459,21 @@ fn checked_quote(
         // 1Click may extend committed ZEC quote lifetimes (currently by three
         // days). Keep our short funding window separate from provider recovery.
         ensure!(
-            until > Utc::now() && until <= requested + Duration::days(7),
+            until > crate::timefmt::now() && until <= requested + Duration::days(7),
             "Invalid quote deadline"
         );
         let mut funding_until = until.min(requested);
         if !q["timeWhenInactive"].is_null() {
-            let inactive = chrono::DateTime::parse_from_rfc3339(
+            let inactive = crate::timefmt::parse_rfc3339(
                 q["timeWhenInactive"]
                     .as_str()
                     .context("Invalid inactive time")?,
             )?;
             funding_until = funding_until.min(inactive);
         }
-        ensure!(funding_until > Utc::now(), "Quote is already inactive");
+        ensure!(funding_until > crate::timefmt::now(), "Quote is already inactive");
         payment_deadline =
-            json!(funding_until.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+            json!(funding_until.rfc3339_millis_z());
     }
     Ok(json!({
         "asset": asset, "amountIn": q["amountIn"], "amountOut": q["amountOut"],
@@ -696,7 +697,7 @@ pub async fn eligibility(
     } else {
         "UNKNOWN"
     };
-    let value = json!({"state":state,"routes":routes,"hasUnknown":has_unknown,"checkedAt":Utc::now().to_rfc3339(),"validForSeconds":if has_unknown {5} else {30}});
+    let value = json!({"state":state,"routes":routes,"hasUnknown":has_unknown,"checkedAt":crate::timefmt::now().to_rfc3339(),"validForSeconds":if has_unknown {5} else {30}});
     *cached = Some((Instant::now(), value.clone()));
     HttpResponse::Ok()
         .insert_header(("Cache-Control", "no-store"))
@@ -784,7 +785,7 @@ async fn reserve(
     if changed == 0 {
         return Ok(false);
     }
-    chrono::DateTime::parse_from_rfc3339(deadline)?;
+    crate::timefmt::parse_rfc3339(deadline)?;
     sqlx::query("UPDATE invoices SET exact_payment=1 WHERE id=?")
         .bind(id)
         .execute(&mut *tx)
@@ -861,7 +862,7 @@ pub async fn create(
         let payload = crate::crypto::encrypt(&quote.to_string(), &config.encryption_key)?;
         let mut tx = pool.begin().await?;
         sqlx::query("UPDATE crosschain_attempts SET state='PENDING_DEPOSIT',payload=?,last_success=? WHERE invoice_id=?")
-            .bind(payload).bind(Utc::now().timestamp()).bind(&id).execute(&mut *tx).await?;
+            .bind(payload).bind(crate::timefmt::now().unix_timestamp()).bind(&id).execute(&mut *tx).await?;
         fees::bind_quote(&mut tx, &id, &response, &body).await?;
         tx.commit().await?;
         anyhow::Ok(json!({"state":"PENDING_DEPOSIT", "quote":quote, "stale":false, "canManage":true, "settlementVerified":false}))
@@ -922,7 +923,7 @@ async fn read_attempt(pool: &SqlitePool, id: &str, key: &str) -> anyhow::Result<
             None => Value::Null,
         };
         Ok(
-            json!({"state":state, "quote":quote, "stale":Utc::now().timestamp()-checked > 60,
+            json!({"state":state, "quote":quote, "stale":crate::timefmt::now().unix_timestamp()-checked > 60,
             "sendStarted": send_token.is_some(), "sentTxid": sent_txid, "settlementVerified":settlement_verified}),
         )
     })
@@ -964,7 +965,7 @@ pub async fn status(
             .insert_header(("Cache-Control", "no-store"))
             .json(attempt);
     }
-    let now = Utc::now().timestamp();
+    let now = crate::timefmt::now().unix_timestamp();
     // Database lease bounds polling across browsers and API workers.
     let lease = sqlx::query(
         "UPDATE crosschain_attempts SET last_checked=? WHERE invoice_id=? AND last_checked < ?",
@@ -1048,7 +1049,7 @@ pub async fn wallet_send(
                 ensure!(a["state"] == "PENDING_DEPOSIT", "Payment already in progress");
                 ensure!(a["stale"] == false, "Payment status is unavailable. Wait for it to refresh before sending.");
                 let deadline = a["quote"]["deadline"].as_str().context("No payment instructions")?;
-                ensure!(chrono::DateTime::parse_from_rfc3339(deadline)? > Utc::now(), "Quote expired");
+                ensure!(crate::timefmt::parse_rfc3339(deadline)? > crate::timefmt::now(), "Quote expired");
                 let token = uuid::Uuid::new_v4().to_string();
                 let rows = sqlx::query("UPDATE crosschain_attempts SET send_token=? WHERE invoice_id=? AND send_token IS NULL AND state='PENDING_DEPOSIT'
                     AND EXISTS (SELECT 1 FROM invoices WHERE id=? AND status='pending' AND received_zatoshis=0)")

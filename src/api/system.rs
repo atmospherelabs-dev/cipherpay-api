@@ -68,7 +68,7 @@ pub async fn health(
     // 3. Price feed: check if rates are available and fresh
     let price_ok = match price_service.get_rates().await {
         Ok(rates) => {
-            let age_secs = (chrono::Utc::now() - rates.updated_at).num_seconds();
+            let age_secs = (crate::timefmt::now() - rates.updated_at).whole_seconds();
             if age_secs > 600 {
                 degraded = true;
                 checks.insert("price_feed".into(), serde_json::json!({

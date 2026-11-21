@@ -1,7 +1,8 @@
+use crate::timefmt::TimestampExt;
 use actix_web::{web, HttpRequest, HttpResponse};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use chrono::{Duration, Utc};
+use crate::timefmt::Duration;
 use serde::Deserialize;
 use sqlx::SqlitePool;
 use uuid::Uuid;
@@ -28,9 +29,8 @@ async fn store_challenge(
     state_json: &str,
 ) -> Result<String, sqlx::Error> {
     let id = Uuid::new_v4().to_string();
-    let expires_at = (Utc::now() + Duration::seconds(CHALLENGE_EXPIRY_SECS))
-        .format("%Y-%m-%dT%H:%M:%SZ")
-        .to_string();
+    let expires_at = (crate::timefmt::now() + Duration::seconds(CHALLENGE_EXPIRY_SECS))
+        .format_z();
 
     sqlx::query(
         "INSERT INTO passkey_challenges (id, merchant_id, flow_type, state_json, expires_at)
@@ -99,10 +99,10 @@ async fn check_reauth(pool: &SqlitePool, session_id: &str) -> bool {
 
     match row {
         Some(reauth_at) => {
-            if let Ok(ts) = chrono::NaiveDateTime::parse_from_str(&reauth_at, "%Y-%m-%dT%H:%M:%SZ")
+            if let Ok(ts) = crate::timefmt::parse_z(&reauth_at)
             {
-                let reauth_time = ts.and_utc();
-                Utc::now().signed_duration_since(reauth_time).num_seconds() < REAUTH_WINDOW_SECS
+                let reauth_time = ts;
+                (crate::timefmt::now() - reauth_time).whole_seconds() < REAUTH_WINDOW_SECS
             } else {
                 false
             }
@@ -112,7 +112,7 @@ async fn check_reauth(pool: &SqlitePool, session_id: &str) -> bool {
 }
 
 async fn set_reauth(pool: &SqlitePool, session_id: &str) -> Result<(), sqlx::Error> {
-    let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let now = crate::timefmt::now().format_z();
     sqlx::query("UPDATE sessions SET reauth_at = ? WHERE id = ?")
         .bind(&now)
         .bind(session_id)
@@ -451,7 +451,7 @@ pub async fn login_complete(
     };
 
     // Update counter and last_used_at
-    let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let now = crate::timefmt::now().format_z();
 
     // Re-load and update the stored passkey with new counter
     if let Ok(Some(cred_json)) = sqlx::query_scalar::<_, String>(
@@ -478,9 +478,8 @@ pub async fn login_complete(
 
     // Create session (same as token login)
     let session_id = Uuid::new_v4().to_string();
-    let expires_at = (Utc::now() + chrono::Duration::hours(24))
-        .format("%Y-%m-%dT%H:%M:%SZ")
-        .to_string();
+    let expires_at = (crate::timefmt::now() + crate::timefmt::Duration::hours(24))
+        .format_z();
 
     if let Err(e) =
         sqlx::query("INSERT INTO sessions (id, merchant_id, expires_at) VALUES (?, ?, ?)")

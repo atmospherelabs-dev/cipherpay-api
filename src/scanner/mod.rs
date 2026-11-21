@@ -1,3 +1,4 @@
+use crate::timefmt::TimestampExt;
 mod api;
 pub mod blocks;
 pub mod decrypt;
@@ -545,12 +546,12 @@ async fn scan_blocks(
             .fetch_all(pool).await?;
         for (id,txid) in fees {
             sqlx::query("INSERT INTO direct_fee_checks VALUES (?,?,?) ON CONFLICT(invoice_id,txid) DO UPDATE SET next_check=excluded.next_check")
-                .bind(&id).bind(&txid).bind(chrono::Utc::now().timestamp()+300).execute(pool).await?;
+                .bind(&id).bind(&txid).bind(crate::timefmt::now().unix_timestamp()+300).execute(pool).await?;
             if matches!(blocks::check_tx_confirmed(http,&config.cipherscan_api_url,&txid).await,Ok(true)) {
                 if let Ok(raw)=mempool::fetch_raw_tx(http,&config.cipherscan_api_url,&txid).await {
                     try_detect_fee(pool,config,&raw,&id,Some(&txid)).await;
                     sqlx::query("UPDATE direct_fee_checks SET next_check=? WHERE invoice_id=? AND txid=?")
-                        .bind(chrono::Utc::now().timestamp()+21600).bind(&id).bind(&txid).execute(pool).await?;
+                        .bind(crate::timefmt::now().unix_timestamp()+21600).bind(&id).bind(&txid).execute(pool).await?;
                 }
             }
         }
@@ -667,10 +668,10 @@ async fn scan_blocks(
     let start_height = {
         let oldest_ts = earliest_relevant_timestamp(&pending, &active_campaigns);
         if let Some(ts) = oldest_ts {
-            let now = chrono::Utc::now();
-            if let Ok(created) = chrono::DateTime::parse_from_rfc3339(&ts) {
-                let secs_ago = (now - created.with_timezone(&chrono::Utc))
-                    .num_seconds()
+            let now = crate::timefmt::now();
+            if let Ok(created) = crate::timefmt::parse_rfc3339(&ts) {
+                let secs_ago = (now - created)
+                    .whole_seconds()
                     .max(0) as u64;
                 let earliest_block = earliest_relevant_height(current_height, secs_ago);
                 if earliest_block > persisted_start {
@@ -1261,8 +1262,8 @@ async fn schedule_luma_retry(pool: &SqlitePool, invoice_id: &str) {
 
     // Exponential backoff: min(60, 5 * 2^(attempt-1)) minutes
     let backoff_minutes = std::cmp::min(60, 5 * (1i64 << (new_count - 1)));
-    let retry_at = chrono::Utc::now() + chrono::Duration::minutes(backoff_minutes);
-    let retry_at_str = retry_at.format("%Y-%m-%dT%H:%M:%S").to_string();
+    let retry_at = crate::timefmt::now() + crate::timefmt::Duration::minutes(backoff_minutes);
+    let retry_at_str = retry_at.format_naive();
 
     tracing::warn!(
         invoice_id,
@@ -1287,7 +1288,7 @@ async fn retry_due_luma_registrations(
     pool: &SqlitePool,
     outbound_http: &reqwest::Client,
 ) {
-    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+    let now = crate::timefmt::now().format_naive();
 
     let rows: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
         "SELECT i.id, i.product_id, i.price_id FROM invoices i

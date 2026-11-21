@@ -51,7 +51,7 @@ pub(super) fn verify(response: &Value) -> anyhow::Result<()> {
 pub(super) fn verify_fresh(response: &Value) -> anyhow::Result<()> {
     verify(response)?;
     let timestamp = response["timestamp"].as_str().context("Missing quote timestamp")?;
-    let age = chrono::Utc::now().signed_duration_since(chrono::DateTime::parse_from_rfc3339(timestamp)?).num_seconds();
+    let age = (crate::timefmt::now() - crate::timefmt::parse_rfc3339(timestamp)?).whole_seconds();
     ensure!((-60..=300).contains(&age), "Stale quote signature");
     Ok(())
 }
@@ -69,7 +69,8 @@ pub(super) fn verify_status(response: &Value) -> anyhow::Result<()> {
 #[cfg(test)]
 pub(super) fn signed(mut response: Value) -> Value {
     use ed25519_dalek::Signer;
-    response["timestamp"] = Value::String(chrono::Utc::now().to_rfc3339());
+    use crate::timefmt::TimestampExt;
+    response["timestamp"] = Value::String(crate::timefmt::now().to_rfc3339());
     let sig = ed25519_dalek::SigningKey::from_bytes(&[42;32]).sign(message(&response).unwrap().as_bytes());
     response["signature"] = Value::String(format!("ed25519:{}",bs58::encode(sig.to_bytes()).into_string()));
     response
