@@ -151,6 +151,7 @@ Signature = HMAC-SHA256(`timestamp.body`, `webhook_secret`)
 | `PATCH` | `/api/invoices/{id}/refund-address` | — | Set refund address |
 | `GET` | `/api/invoices/{id}/stream` | — | SSE payment stream |
 | `GET` | `/api/invoices/{id}/status` | — | Poll payment status |
+| `GET` | `/api/invoices/{id}/payment-request` | — | Machine-readable payment request for agents and wallets: `payable`, `not_payable_reason`, outputs in integer zatoshis with decoded memos (invoice output required, platform fee output optional) |
 | `GET` | `/api/invoices/{id}/qr` | — | QR code image |
 | **Subscriptions** | | | |
 | `POST` | `/api/subscriptions` | API key | Create subscription |

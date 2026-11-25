@@ -206,6 +206,91 @@ pub async fn get(pool: web::Data<SqlitePool>, path: web::Path<String>) -> HttpRe
     }
 }
 
+/// Public, machine-readable payment request for agents and wallets.
+/// Looks up by invoice ID only (not memo code) and exposes no shipping data,
+/// refund address or checkout capability token.
+pub async fn payment_request(
+    pool: web::Data<SqlitePool>,
+    config: web::Data<Config>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    use crate::invoices::payment_request as pr;
+    let id = path.into_inner();
+    let inv = match invoices::get_invoice(pool.get_ref(), &id).await {
+        Ok(Some(inv)) => inv,
+        Ok(None) => {
+            return HttpResponse::NotFound().json(serde_json::json!({"error": "Invoice not found"}))
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to get invoice for payment request");
+            return HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": "Internal error"}));
+        }
+    };
+    let flags = sqlx::query_as::<_, (bool, bool)>(
+        "SELECT expires_at > strftime('%Y-%m-%dT%H:%M:%SZ','now'),
+                EXISTS(SELECT 1 FROM crosschain_attempts WHERE invoice_id = invoices.id)
+         FROM invoices WHERE id = ?",
+    )
+    .bind(&inv.id)
+    .fetch_one(pool.get_ref())
+    .await;
+    let (unexpired, crosschain_started) = match flags {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to read payment request state");
+            return HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": "Internal error"}));
+        }
+    };
+
+    let outputs = pr::outputs(
+        &inv.zcash_uri,
+        &inv.id,
+        &inv.payment_address,
+        &inv.memo_code,
+        inv.price_zatoshis,
+    );
+    let mut reason = pr::not_payable_reason(
+        &inv.status,
+        unexpired,
+        inv.received_zatoshis,
+        inv.detected_txid.is_some(),
+        crosschain_started,
+    );
+    if reason.is_none() && outputs.is_none() {
+        reason = Some("invalid_payment_request");
+    }
+    let payable = reason.is_none();
+    let outputs = if payable { outputs.unwrap_or_default() } else { Vec::new() };
+    let total: i64 = outputs.iter().map(|o| o.amount_zatoshis).sum();
+    let frontend = config.frontend_url.as_deref().unwrap_or("https://cipherpay.app");
+    let merchant_origin = get_merchant_webhook_origin(pool.get_ref(), &inv.merchant_id).await;
+
+    HttpResponse::Ok()
+        .insert_header(("Cache-Control", "no-store"))
+        .insert_header(("Access-Control-Allow-Origin", "*"))
+        .json(serde_json::json!({
+            "version": pr::VERSION,
+            "invoice_id": inv.id,
+            "network": if config.is_testnet() { "zcash:testnet" } else { "zcash:mainnet" },
+            "status": inv.status,
+            "payable": payable,
+            "not_payable_reason": reason,
+            "expires_at": inv.expires_at,
+            "merchant": { "name": inv.merchant_name, "origin": merchant_origin },
+            "description": inv.product_name,
+            "price": { "amount": inv.amount.unwrap_or(inv.price_eur), "currency": inv.currency.as_deref().unwrap_or("EUR") },
+            "price_zatoshis": inv.price_zatoshis,
+            "total_zatoshis": total,
+            "outputs": outputs,
+            "zcash_uri": if payable { Some(inv.zcash_uri.as_str()) } else { None },
+            "instructions": "Pay each required output (and optionally the platform fee output) in one shielded transaction, with the exact amount and memo. Do not pay when payable is false.",
+            "status_url": format!("/api/invoices/{}/status", inv.id),
+            "checkout_url": format!("{}/pay/{}", frontend, inv.id),
+        }))
+}
+
 /// Extract the origin (scheme+host+port) from a merchant's webhook URL.
 async fn get_merchant_webhook_origin(pool: &SqlitePool, merchant_id: &str) -> Option<String> {
     let row: Option<(Option<String>,)> =
@@ -360,4 +445,72 @@ fn validate_invoice_request(req: &CreateInvoiceRequest) -> Result<(), validation
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod payment_request_tests {
+    use super::*;
+    use actix_web::{test, App};
+    use base64::Engine;
+
+    fn b64(s: &str) -> String {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(s)
+    }
+
+    #[actix_web::test]
+    async fn payment_request_reports_outputs_and_refuses_unsafe_states() {
+        let pool = crate::repair_tests::pool().await;
+        crate::repair_tests::merchant(&pool, "m").await;
+        crate::repair_tests::invoice(&pool, "i", "m").await;
+        let uri = format!(
+            "zcash:?address=u1inv&amount=0.00001000&memo={}&address.1=u1fee&amount.1=0.00000100&memo.1={}",
+            b64("CP-i"),
+            b64("FEE-i")
+        );
+        sqlx::query("UPDATE invoices SET payment_address='u1inv', zcash_uri=?, product_name='Ice', status='pending' WHERE id='i'")
+            .bind(&uri).execute(&pool).await.unwrap();
+        let config = crate::config::Config::from_env().unwrap();
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(pool.clone()))
+                .app_data(web::Data::new(config))
+                .route("/{id}", web::get().to(payment_request)),
+        )
+        .await;
+        let get = |path: &'static str| test::TestRequest::get().uri(path).to_request();
+
+        let body: serde_json::Value = test::call_and_read_body_json(&app, get("/i")).await;
+        assert_eq!(body["payable"], true);
+        assert_eq!(body["total_zatoshis"], 1100);
+        assert_eq!(body["outputs"][0]["amount_zatoshis"], 1000);
+        assert_eq!(body["outputs"][0]["memo"], "CP-i");
+        assert_eq!(body["outputs"][0]["required"], true);
+        assert_eq!(body["outputs"][1]["purpose"], "platform_fee");
+        assert_eq!(body["outputs"][1]["required"], false);
+        assert!(body.get("checkout_token").is_none());
+        assert!(!body.to_string().contains("refund_address\":\""));
+
+        // Memo codes are not accepted as lookup keys.
+        assert_eq!(test::call_service(&app, get("/CP-i")).await.status(), 404);
+
+        // A started cross-chain quote makes direct payment unsafe.
+        sqlx::query("INSERT INTO crosschain_attempts (invoice_id,state) VALUES ('i','CREATING')")
+            .execute(&pool).await.unwrap();
+        let body: serde_json::Value = test::call_and_read_body_json(&app, get("/i")).await;
+        assert_eq!(body["payable"], false);
+        assert_eq!(body["not_payable_reason"], "crosschain_in_progress");
+        assert_eq!(body["outputs"].as_array().unwrap().len(), 0);
+        assert!(body["zcash_uri"].is_null());
+        sqlx::query("DELETE FROM crosschain_attempts").execute(&pool).await.unwrap();
+
+        sqlx::query("UPDATE invoices SET expires_at='2000-01-01T00:00:00Z' WHERE id='i'")
+            .execute(&pool).await.unwrap();
+        let body: serde_json::Value = test::call_and_read_body_json(&app, get("/i")).await;
+        assert_eq!(body["not_payable_reason"], "expired");
+
+        sqlx::query("UPDATE invoices SET expires_at='2099-01-01T00:00:00Z', zcash_uri='zcash:u1evil?amount=0.00001&memo=' WHERE id='i'")
+            .execute(&pool).await.unwrap();
+        let body: serde_json::Value = test::call_and_read_body_json(&app, get("/i")).await;
+        assert_eq!(body["not_payable_reason"], "invalid_payment_request");
+    }
 }

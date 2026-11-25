@@ -281,6 +281,11 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             )
             .route("/invoices/{id}", web::get().to(invoices::get))
             .route("/invoices/{id}/status", web::get().to(status::get))
+            .service(
+                web::resource("/invoices/{id}/payment-request")
+                    .wrap(Governor::new(&public_read_limit))
+                    .route(web::get().to(invoices::payment_request)),
+            )
             .route(
                 "/invoices/{id}/stream",
                 web::get().to(invoice_routes::invoice_stream),
