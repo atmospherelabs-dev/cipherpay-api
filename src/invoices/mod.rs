@@ -1,6 +1,7 @@
 use crate::timefmt::TimestampExt;
 mod amounts;
 pub mod matching;
+pub mod payment_request;
 pub mod pricing;
 mod queries;
 mod types;
